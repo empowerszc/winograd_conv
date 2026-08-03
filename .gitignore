@@ -1,0 +1,11 @@
+build/
+*.o
+*.a
+*.so
+*.exe
+*.pdb
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
+!CMakeLists.txt

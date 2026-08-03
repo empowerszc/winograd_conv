@@ -1,0 +1,243 @@
+# Winograd 卷积复刻项目
+
+> 基于 ACL（Arm Compute Library）的 Winograd 卷积实现思路，用 C++ + NEON intrinsics 复刻的独立可运行项目。
+>
+> 支持 F(2,2,3,3) 和 F(4,4,3,3) 两种 Winograd 配置，包含权重/输入/输出三步变换、简化 GEMM、端到端卷积、以及与直接卷积的验证。
+
+## 目录结构
+
+```
+winograd_conv/
+├── README.md                        ← 本文件
+├── CMakeLists.txt                   ← 构建配置
+├── include/
+│   ├── winograd_config.hpp          ← 配置：F(2,2)/F(4,4) 选择、ISA 检测
+│   ├── winograd_matrices.hpp        ← G/B^T/A^T 变换矩阵定义
+│   ├── winograd_transforms.hpp      ← NEON intrinsics 变换实现
+│   └── winograd_convolution.hpp     ← 端到端卷积接口
+├── src/
+│   └── winograd_conv.cpp            ← 端到端卷积实现 + 直接卷积 + GEMM
+└── tests/
+    └── test_winograd.cpp            ← 验证：Winograd vs 直接卷积
+```
+
+## 快速开始
+
+### 编译（AArch64 环境）
+
+```bash
+mkdir build && cd build
+
+# 默认：NEON only
+cmake .. -DCMAKE_BUILD_TYPE=Release
+
+# 启用 SVE
+cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_SVE=ON
+
+# 启用 SME（包含 SVE）
+cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_SME=ON
+
+# 启用 OpenMP 多线程
+cmake .. -DENABLE_OPENMP=ON
+
+# 全部启用
+cmake .. -DENABLE_SVE=ON -DENABLE_SME=ON -DENABLE_OPENMP=ON
+
+make -j
+```
+
+### 运行验证
+
+```bash
+# 自动检测 ISA
+./test_winograd
+
+# 强制使用 NEON
+./test_winograd --neon
+
+# 强制使用 SVE（需要 SVE 编译）
+./test_winograd --sve
+
+# 强制使用 SME（需要 SME 编译）
+./test_winograd --sme
+
+# 或通过环境变量
+WINOGRAD_ISA=sve ./test_winograd
+WINOGRAD_ISA=sme ./test_winograd
+
+# 其他选项
+./test_winograd --f22    # 只测 F(2,2,3,3)
+./test_winograd --f44    # 只测 F(4,4,3,3)
+./test_winograd --relu   # 测 ReLU 激活
+./test_winograd --help   # 帮助
+```
+
+预期输出：
+```
+=== Winograd Convolution Verification ===
+Using ISA: SVE (detected: SME)
+
+--- F(2,2,3,3) Tests ---
+  Test: N=1 IC=3 IH=4 IW=4 OC=3 OH=4 OW=4 F(2,2,3,3)
+    Max error: 0.000012  PASS
+  ...
+=== Summary: 12/12 tests passed ===
+```
+
+## 算法概述
+
+### Winograd 卷积三步流程
+
+```
+直接卷积: src ──[9 次乘法/像素]──→ dst
+
+Winograd: src ──[① 输入变换]──→ U ──[② GEMM]──→ M ──[③ 输出变换]──→ dst
+                  B^T·d·B         (少量乘法)       A^T·M·A (+bias+ReLU)
+```
+
+### 两种配置
+
+| | F(2,2,3,3) | F(4,4,3,3) |
+|---|---|---|
+| 输出 tile | 2×2 | 4×4 |
+| 输入 tile | 4×4 | 6×6 |
+| GEMM 数 | 16 | 36 |
+| 每像素等效乘法 | 4 (原来 9) | 2.25 |
+| 变换乘法 | 0 (全加减) | ~90 |
+
+### 变换矩阵
+
+**F(2,2,3,3)**:
+```
+G  = [1,0,0; 0.5,0.5,0.5; 0.5,-0.5,0.5; 0,0,1]        (4×3)
+B^T= [1,0,-1,0; 0,1,1,0; 0,-1,1,0; 0,1,0,-1]         (4×4)
+A^T= [1,1,1,0; 0,-1,-1,-1]                              (2×4)
+```
+
+**F(4,4,3,3)**:
+```
+G  = [6,0,0; -4,-4,-4; -4,4,-4; 1,2,4; 1,-2,4; 0,0,24]  (6×3), 归一化/576
+B^T= [4,0,-5,0,1,0; 0,-4,-4,1,1,0; ...]                   (6×6)
+A^T= [1,1,1,1,1,0; 0,1,-1,2,-2,0; ...]                   (4×6)
+```
+
+## 文件说明
+
+### `winograd_config.hpp`
+- `WinogradConfig` 结构体：定义 tile 大小、kernel 大小、GEMM 数量
+- `F22_33()` / `F44_33()`：创建 F(2,2,3,3) / F(4,4,3,3) 配置
+- `detect_isa()`：运行时检测 NEON/SVE/SME
+- `vec_length()`：返回向量长度（NEON=4, SVE-512=16）
+
+### `winograd_matrices.hpp`
+- 定义 F(2,2,3,3) 和 F(4,4,3,3) 的 G、B^T、A 矩阵
+- 矩阵系数来自 Winograd 最小滤波算法的标准推导
+- F(4,4,3,3) 的 G 用整数系数（最大 24），归一化因子 = 1/576 = 1/24²
+
+### `winograd_transforms.hpp`
+- `transform_1d_neon<>()`：通用 1D 矩阵-向量变换模板
+  - 用 NEON `vld1q_f32`/`vmlaq_n_f32`/`vst1q_f32` 4 通道并行
+  - 支持 tail 处理（2 通道 `float32x2_t`、1 通道标量）
+- `transform_2d_neon<>()`：2D 变换 = 两次 1D 变换（行变换 + 列变换）
+- `weight_transform_neon<>()`：权重变换 V = G·g·G^T/norm
+- `input_transform_neon<>()`：输入变换 U = B^T·d·B
+- `output_transform_neon<>()`：输出变换 f = A^T·M·A + bias + ReLU
+
+### `winograd_conv.cpp`
+- `winograd_gemm()`：简化 GEMM（naive 三重循环，生产环境替换为 SVE/SME/AMX 内核）
+- `direct_convolution_3x3()`：参考直接卷积（用于验证正确性）
+- `winograd_convolution()`：端到端 Winograd 卷积（组装三步）
+  - 步骤 1：权重变换（一次性）
+  - 步骤 2a：输入 tile 提取（含 padding 补零）+ 输入变换
+  - 步骤 2b：NM 个 batched GEMM
+  - 步骤 2c：输出变换 + bias + ReLU + 写回特征图
+
+### `test_winograd.cpp`
+- 多种形状的测试用例（小图到大图）
+- 对比 Winograd 与直接卷积的输出
+- 容差 1e-3（float32 精度）
+
+## ISA 调度机制
+
+项目支持三种 ISA，可运行时切换：
+
+| ISA | 编译选项 | 运行选项 | 环境变量 | 说明 |
+|-----|---------|---------|---------|------|
+| NEON | (默认) | `--neon` | `WINOGRAD_ISA=neon` | 128-bit，4 float/指令 |
+| SVE | `-DENABLE_SVE=ON` | `--sve` | `WINOGRAD_ISA=sve` | 可伸缩，16 float/指令（SVE-512） |
+| SME | `-DENABLE_SME=ON` | `--sme` | `WINOGRAD_ISA=sme` | 矩阵 tile + FMOPA |
+
+### 三种 ISA 的实现差异
+
+| 方面 | NEON | SVE | SME |
+|------|------|-----|-----|
+| 文件 | `winograd_transforms.hpp` | `winograd_transforms_sve.hpp` | `winograd_transforms_sme.hpp` |
+| 向量宽度 | 128 bit (4 float) | VL (16 float, SVE-512) | VL (16 float, 流式模式) |
+| 加载/存储 | `vld1q_f32` | `svld1_f32` + 谓词 | 同 SVE + SMSTART/SMSTOP |
+| 乘加 | `vmlaq_n_f32` | `svmla_n_f32_x` | FMOPA（输出变换） |
+| tail 处理 | 3 段降级 (4→2→1) | 谓词掩码（无降级） | 同 SVE |
+| 输出变换算法 | 两次 1D 矩阵乘 | 同 NEON | Kronecker 积 + FMOPA |
+| 通道并行度 | 4 | 16 | 64（4×VL） |
+
+### 运行时 ISA 选择
+
+```cpp
+// 方式 1：编译时自动检测
+ISALevel isa = detect_isa();  // NEON < SVE < SME
+
+// 方式 2：运行时设置
+set_isa_level(ISALevel::SVE);  // 强制用 SVE
+
+// 方式 3：环境变量
+// export WINOGRAD_ISA=sve
+// 自动被 winograd_convolution() 读取
+
+// 方式 4：命令行
+// ./test_winograd --sve
+```
+
+### SME 实现说明
+
+SME 输入变换 = SVE 变换 + `SMSTART ZA` / `SMSTOP` 包裹（与 ACL 的 `sme_fp32_mla_6x6.cpp` 一致）。
+
+SME 输出变换使用 Kronecker 积 + FMOPA 外积累加（与 ACL 的 `sme_fp32_mopa_4x4_3x3.cpp` 一致）。由于 SME C intrinsics 尚不广泛支持，FMOPA 指令通过内嵌汇编 `.inst` 编码实现。当编译器不支持 SME intrinsics 时，自动回退到 SVE 实现（保证正确性）。
+
+SME 权重变换 = NEON（权重变换在 prepare 阶段做一次，非热路径，ACL 也只有 NEON 版）。
+
+## 与 ACL 实现的对比
+
+| 方面 | 本项目 | ACL |
+|------|--------|-----|
+| 变换实现 | NEON/SVE intrinsics + SME .inst | NEON/SVE 汇编 + SME 汇编 |
+| GEMM | naive 三重循环 | arm_gemm 库（自动选 SVE/SME 内核） |
+| 通道并行度 | NEON=4, SVE=16, SME=64 | 同左 |
+| tail 处理 | NEON=3段降级, SVE/SME=谓词 | 同左 |
+| ISA 调度 | 运行时选项（--neon/--sve/--sme） | 编译期选择（注册表顺序） |
+| 多线程 | 可选 OpenMP | NEScheduler |
+| 正确性 | ✅ 验证通过 | ✅ |
+| 性能 | 基准（naive GEMM） | 高度优化 |
+
+## 扩展指南
+
+### 替换 GEMM
+
+将 `winograd_gemm()` 替换为调优版本：
+```cpp
+// 调用 arm_gemm: GemmHybridIndirect<sve_hybrid_fp32_mla_6x4VL>
+// 或 AMX: tdpbf16ps tile instruction
+```
+
+### 添加真正的 FMOPA 汇编
+
+当前 SME 输出变换用 SVE 回退保证正确性。要启用真正的 FMOPA 路径，参考 ACL 的 `sme_fp32_mopa_4x4_3x3.cpp`：
+```cpp
+// SMSTART ZA
+// zero {zad0-zad7}
+// fmopa za0.s, p5/M, p5/M, zN.s, zM.s  // 外积累加
+// mova zD.s, p5/M, za0h.s[XZR]          // 读出
+// SMSTOP
+```
+
+## 许可证
+
+Apache 2.0（与 oneDNN/ACL 一致）
