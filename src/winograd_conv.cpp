@@ -16,6 +16,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdlib>
+#include <arm_neon.h>
 
 // Include ISA-specific transform implementations
 #include "winograd_transforms.hpp"           // NEON (always available on AArch64)
@@ -152,14 +153,13 @@ static void dispatch_output_transform(
 }
 
 // ============================================================================
-// Simple batched GEMM
+// Simple batched GEMM for Winograd domain
 // ============================================================================
 // M[n][oc] = sum_ic U[n][ic] * V[oc][ic]
 //
-// This is a naive triple-loop GEMM. In production, replace with:
-// - arm_gemm SVE kernel (sve_hybrid_fp32_mla_6x4VL)
-// - or arm_gemm SME kernel (sme_interleaved_nomerge_fp32_mopa_2VLx2VL)
-// - or AMX tile instruction (tdpbf16ps) on x64
+// TODO: Replace with OpenBLAS cblas_sgemm for production use:
+//   cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+//               n_tiles, OC, IC, 1.0f, U_slice, IC, V_slice, IC, 0.0f, M_slice, OC);
 //
 // The key insight: this GEMM is called n_multis times (16 for F(2,2,3,3),
 // 36 for F(4,4,3,3)), once per Winograd domain element.
@@ -266,187 +266,114 @@ void winograd_convolution(
     int n_tile_cols = config.n_tile_cols(OW);
     int n_tiles = n_tile_rows * n_tile_cols;
 
-    // ---- Step 1: Weight transform (one-time) ----
-    // V[TS][TS][OC][IC] = G * g * G^T / norm
-    // For each (oc, ic) pair, transform the 3x3 weight to TSxTS
-    //
-    // Layout: V[ts_row][ts_col][oc * IC + ic]
-    // This is the "weight matrix" used by all GEMMs
-
+    // ---- Step 1: Weight transform (one-time, via ISA dispatch) ----
+    // V[TS*TS][OC*IC], layout: V[m][oc*IC+ic]
     int V_size = TS * TS * OC * IC;
     std::vector<float> V(V_size, 0.0f);
 
-    // For each output channel and input channel
     for (int oc = 0; oc < OC; oc++) {
-        for (int ic = 0; ic < IC; ic++) {
-            // Extract 3x3 weight for this (oc, ic)
-            float g[3][3];
-            for (int kh = 0; kh < 3; kh++) {
-                for (int kw = 0; kw < 3; kw++) {
-                    g[kh][kw] = wei[((oc * IC + ic) * 3 + kh) * 3 + kw];
-                }
-            }
+        // Rearrange wei[oc][IC][3][3] → g[3][3][IC] (channels-contiguous)
+        std::vector<float> g(9 * IC);
+        for (int ic = 0; ic < IC; ic++)
+            for (int kh = 0; kh < 3; kh++)
+                for (int kw = 0; kw < 3; kw++)
+                    g[(kh * 3 + kw) * IC + ic] =
+                        wei[((oc * IC + ic) * 3 + kh) * 3 + kw];
 
-            // Transform: V = G * g * G^T / norm
-            // Step 1: Ww = G * g (row transform)
-            float Ww[6][3];  // max TS=6, kw=3
-            for (int i = 0; i < TS; i++) {
-                for (int j = 0; j < 3; j++) {
-                    float val = 0.0f;
-                    for (int k = 0; k < 3; k++) {
-                        // Use the appropriate G matrix
-                        float g_coef;
-                        if (TS == 4) {
-                            g_coef = F22_G::val[i][k];
-                        } else {
-                            g_coef = F44_G::val[i][k];
-                        }
-                        val += g_coef * g[k][j];
-                    }
-                    Ww[i][j] = val;
-                }
-            }
+        // Transform via ISA dispatch (NEON/SVE/SME)
+        std::vector<float> V_oc(TS * TS * IC);
+        dispatch_weight_transform(g.data(), V_oc.data(), IC, is_f44, isa);
 
-            // Step 2: V = Ww * G^T / norm (col transform)
-            float norm = (TS == 4) ? F22_G::norm : F44_G::norm;
-            for (int i = 0; i < TS; i++) {
-                for (int j = 0; j < TS; j++) {
-                    float val = 0.0f;
-                    for (int k = 0; k < 3; k++) {
-                        float g_coef;
-                        if (TS == 4) {
-                            g_coef = F22_G::val[j][k];  // G^T[j][k] = G[k][j]... wait
-                            // Actually V[i][j] = sum_k Ww[i][k] * G[j][k]
-                            // Because V = Ww * G^T, and (G^T)[j][k] = G[k][j]
-                            // So V[i][j] = sum_k Ww[i][k] * G[k][j]
-                            g_coef = F22_G::val[j][k];
-                        } else {
-                            g_coef = F44_G::val[j][k];
-                        }
-                        val += Ww[i][k] * g_coef;
-                    }
-                    val *= norm;  // apply normalization
-                    // Store: V[ts_row][ts_col][oc * IC + ic]
-                    V[(i * TS + j) * OC * IC + oc * IC + ic] = val;
-                }
-            }
-        }
+        // Store into V[m][oc*IC+ic]
+        for (int m = 0; m < TS * TS; m++)
+            for (int ic = 0; ic < IC; ic++)
+                V[m * OC * IC + oc * IC + ic] = V_oc[m * IC + ic];
     }
+
+    // ---- Pre-allocate workspace (reused across batches) ----
+    int U_size = NM * n_tiles * IC;
+    int M_size = NM * n_tiles * OC;
+    std::vector<float> U(U_size, 0.0f);
+    std::vector<float> M_buf(M_size, 0.0f);
+    std::vector<float> d_tile(TS * TS * IC, 0.0f);
+    std::vector<float> U_tile(TS * TS * IC, 0.0f);
+    std::vector<float> M_tile(TS * TS * OC, 0.0f);
+    std::vector<float> f_tile(OT * OT * OC, 0.0f);
 
     // ---- Step 2: For each batch ----
     for (int n = 0; n < N; n++) {
         // ---- Step 2a: Input transform ----
-        // For each tile, extract input tile (with padding), transform to U
-        //
-        // U[n_multis][n_tiles][IC]  (Winograd domain input)
-        // Layout: U[ts_idx][tile_idx][ic]
-        //   where ts_idx = ts_row * TS + ts_col (0..NM-1)
-        //   and tile_idx = tile_row * n_tile_cols + tile_col
-
-        int U_size = NM * n_tiles * IC;
-        std::vector<float> U(U_size, 0.0f);
-
         for (int tr = 0; tr < n_tile_rows; tr++) {
             for (int tc = 0; tc < n_tile_cols; tc++) {
                 int tile_idx = tr * n_tile_cols + tc;
 
                 // Extract input tile [TS][TS][IC] from src (with zero padding)
-                // tile starts at (tr * OT - 1, tc * OT - 1) in input space
-                // (pad=1 means the first output pixel corresponds to input position -1)
-                std::vector<float> d_tile(TS * TS * IC, 0.0f);
-
+                std::fill(d_tile.begin(), d_tile.end(), 0.0f);
                 for (int ti = 0; ti < TS; ti++) {
                     for (int tj = 0; tj < TS; tj++) {
-                        int ih = tr * OT - 1 + ti;  // input row (with pad=1 offset)
-                        int iw = tc * OT - 1 + tj;  // input col
-
+                        int ih = tr * OT - 1 + ti;
+                        int iw = tc * OT - 1 + tj;
                         if (ih >= 0 && ih < IH && iw >= 0 && iw < IW) {
                             for (int ic = 0; ic < IC; ic++) {
                                 d_tile[(ti * TS + tj) * IC + ic] =
                                     src[((n * IC + ic) * IH + ih) * IW + iw];
                             }
                         }
-                        // else: padding = 0 (already zeroed)
                     }
                 }
 
                 // Transform: U_tile = B^T * d * B
-                std::vector<float> U_tile(TS * TS * IC, 0.0f);
-
                 dispatch_input_transform(d_tile.data(), U_tile.data(), IC,
                                          is_f44, isa);
 
-                // Scatter U_tile into U[ts_idx][tile_idx][:]
+                // Scatter U_tile into U[ts_idx][tile_idx][ic]
+                // (both sides contiguous in ic → vectorize with NEON)
                 for (int ti = 0; ti < TS; ti++) {
                     for (int tj = 0; tj < TS; tj++) {
                         int ts_idx = ti * TS + tj;
-                        for (int ic = 0; ic < IC; ic++) {
-                            U[(ts_idx * n_tiles + tile_idx) * IC + ic] =
-                                U_tile[(ti * TS + tj) * IC + ic];
-                        }
+                        float* dst_ptr = U.data() + (ts_idx * n_tiles + tile_idx) * IC;
+                        const float* src_ptr = U_tile.data() + (ti * TS + tj) * IC;
+                        int ic = 0;
+                        for (; ic + 4 <= IC; ic += 4)
+                            vst1q_f32(dst_ptr + ic, vld1q_f32(src_ptr + ic));
+                        for (; ic < IC; ic++)
+                            dst_ptr[ic] = src_ptr[ic];
                     }
                 }
             }
         }
 
         // ---- Step 2b: GEMM ----
-        // For each Winograd domain element (ts_idx = 0..NM-1):
-        //   M[ts_idx][tile_idx][oc] = U[ts_idx][tile_idx][ic] * V[ts_idx][oc][ic]
-        //
-        // This is NM independent GEMMs, each of size [n_tiles x OC x IC]
-
-        int M_size = NM * n_tiles * OC;
-        std::vector<float> M(M_size, 0.0f);
-
         for (int ts_idx = 0; ts_idx < NM; ts_idx++) {
-            // U_slice: [n_tiles][IC]
             const float* U_slice = U.data() + ts_idx * n_tiles * IC;
-            // V_slice: [OC][IC]
             const float* V_slice = V.data() + ts_idx * OC * IC;
-            // M_slice: [n_tiles][OC]
-            float* M_slice = M.data() + ts_idx * n_tiles * OC;
-
+            float* M_slice = M_buf.data() + ts_idx * n_tiles * OC;
             winograd_gemm(U_slice, V_slice, M_slice, n_tiles, OC, IC);
         }
 
-        // ---- Step 2c: Output transform ----
-        // For each tile: f[OT][OT][OC] = A^T * M_tile * A + bias + ReLU
-
+        // ---- Step 2c: Output transform (includes bias + ReLU) ----
         for (int tr = 0; tr < n_tile_rows; tr++) {
             for (int tc = 0; tc < n_tile_cols; tc++) {
                 int tile_idx = tr * n_tile_cols + tc;
 
                 // Gather M_tile[TS][TS][OC] from M[ts_idx][tile_idx][oc]
-                std::vector<float> M_tile(TS * TS * OC, 0.0f);
+                // (both sides contiguous in oc → vectorize with NEON)
                 for (int ti = 0; ti < TS; ti++) {
                     for (int tj = 0; tj < TS; tj++) {
                         int ts_idx = ti * TS + tj;
-                        for (int oc = 0; oc < OC; oc++) {
-                            M_tile[(ti * TS + tj) * OC + oc] =
-                                M[(ts_idx * n_tiles + tile_idx) * OC + oc];
-                        }
+                        const float* src_ptr = M_buf.data() + (ts_idx * n_tiles + tile_idx) * OC;
+                        float* dst_ptr = M_tile.data() + (ti * TS + tj) * OC;
+                        int oc = 0;
+                        for (; oc + 4 <= OC; oc += 4)
+                            vst1q_f32(dst_ptr + oc, vld1q_f32(src_ptr + oc));
+                        for (; oc < OC; oc++)
+                            dst_ptr[oc] = src_ptr[oc];
                     }
                 }
 
-                // Transform: f_tile = A^T * M_tile * A
-                std::vector<float> f_tile(OT * OT * OC, 0.0f);
-
+                // Transform: f_tile = A^T * M * A (bias + ReLU applied inside)
                 dispatch_output_transform(M_tile.data(), f_tile.data(), OC,
                                           bias, act_min, act_max, is_f44, isa);
-
-                // Add bias (per output channel)
-                if (bias) {
-                    for (int oi = 0; oi < OT; oi++) {
-                        for (int oj = 0; oj < OT; oj++) {
-                            for (int oc = 0; oc < OC; oc++) {
-                                float v = f_tile[(oi * OT + oj) * OC + oc] + bias[oc];
-                                if (v > act_max) v = act_max;
-                                if (v < act_min) v = act_min;
-                                f_tile[(oi * OT + oj) * OC + oc] = v;
-                            }
-                        }
-                    }
-                }
 
                 // Write to output (with bounds checking for edge tiles)
                 for (int oi = 0; oi < OT; oi++) {

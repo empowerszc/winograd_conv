@@ -226,21 +226,29 @@ void output_transform_sve(
         A_matrix, M, f, channels, channels
     );
 
-    // Add bias and clamp (activation)
-    int total = OUTPUT_TILE * OUTPUT_TILE * channels;
-    int c = 0;
-    svbool_t pg = sve_whilelt(c, total);
+    // Add bias + clamp per-channel (matches ACL output transform)
     svfloat32_t vmin = svdup_n_f32(act_min);
     svfloat32_t vmax = svdup_n_f32(act_max);
-    do {
-        svfloat32_t v = svld1_f32(pg, f + c);
-        // Clamp: min(max(v, min), max) = clamp(v, min, max)
-        v = svmin_f32_x(pg, v, vmax);
-        v = svmax_f32_x(pg, v, vmin);
-        svst1_f32(pg, f + c, v);
-        c += sve_count();
-        pg = sve_whilelt(c, total);
-    } while (svptest_first(pg));
+
+    for (int oi = 0; oi < OUTPUT_TILE; oi++) {
+        for (int oj = 0; oj < OUTPUT_TILE; oj++) {
+            float* fptr = f + (oi * OUTPUT_TILE + oj) * channels;
+            int c = 0;
+            svbool_t pg = sve_whilelt(c, channels);
+            do {
+                svfloat32_t v = svld1_f32(pg, fptr + c);
+                if (bias) {
+                    svfloat32_t b = svld1_f32(pg, bias + c);
+                    v = svadd_f32_x(pg, v, b);
+                }
+                v = svmin_f32_x(pg, v, vmax);
+                v = svmax_f32_x(pg, v, vmin);
+                svst1_f32(pg, fptr + c, v);
+                c += sve_count();
+                pg = sve_whilelt(c, channels);
+            } while (svptest_first(pg));
+        }
+    }
 }
 
 // ============================================================================

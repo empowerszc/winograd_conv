@@ -10,6 +10,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <string>
 
 namespace winograd_conv {
 
@@ -85,9 +87,9 @@ inline ISALevel parse_isa(const char* str) {
     if (str) {
         if (strcmp(str, "neon") == 0 || strcmp(str, "NEON") == 0)
             return ISALevel::NEON;
-        if (str == std::string("sve") || str == std::string("SVE"))
+        if (strcmp(str, "sve") == 0 || strcmp(str, "SVE") == 0)
             return ISALevel::SVE;
-        if (str == std::string("sme") || str == std::string("SME"))
+        if (strcmp(str, "sme") == 0 || strcmp(str, "SME") == 0)
             return ISALevel::SME;
     }
     return detect_isa();

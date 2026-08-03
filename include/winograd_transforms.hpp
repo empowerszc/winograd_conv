@@ -311,29 +311,34 @@ void output_transform_neon(
         A_matrix, M, f, channels, channels
     );
 
-    // Step 3: Add bias and apply activation (clamp)
-    int total = OUTPUT_TILE * OUTPUT_TILE * channels;
-    int i = 0;
-
-    // Load activation bounds
+    // Step 3: Add bias + clamp per-channel (matches ACL output transform)
     float32x4_t vmin = vdupq_n_f32(act_min);
     float32x4_t vmax = vdupq_n_f32(act_max);
 
-    for (; i + 4 <= total; i += 4) {
-        float32x4_t v = vld1q_f32(f + i);
-        if (bias) {
-            // Load bias (broadcast the same bias value for all spatial positions)
-            // Note: bias is per-channel, but we're processing in flat order
-            // For simplicity, skip per-channel bias here; real impl would track channel index
+    for (int oi = 0; oi < OUTPUT_TILE; oi++) {
+        for (int oj = 0; oj < OUTPUT_TILE; oj++) {
+            float* fptr = f + (oi * OUTPUT_TILE + oj) * channels;
+            int c = 0;
+            // 4-channel NEON
+            for (; c + 4 <= channels; c += 4) {
+                float32x4_t v = vld1q_f32(fptr + c);
+                if (bias) {
+                    float32x4_t b = vld1q_f32(bias + c);
+                    v = vaddq_f32(v, b);
+                }
+                v = vminq_f32(v, vmax);
+                v = vmaxq_f32(v, vmin);
+                vst1q_f32(fptr + c, v);
+            }
+            // Tail: scalar
+            for (; c < channels; c++) {
+                float v = fptr[c];
+                if (bias) v += bias[c];
+                if (v > act_max) v = act_max;
+                if (v < act_min) v = act_min;
+                fptr[c] = v;
+            }
         }
-        v = vmaxq_f32(vminq_f32(v, vmax), vmin);  // clamp(min, max)
-        vst1q_f32(f + i, v);
-    }
-    for (; i < total; i++) {
-        float v = f[i];
-        if (v > act_max) v = act_max;
-        if (v < act_min) v = act_min;
-        f[i] = v;
     }
 }
 
