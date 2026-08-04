@@ -178,31 +178,22 @@ void weight_transform_neon(
         int ch = std::min(4, channels - c_block);
 
         for (int j = 0; j < 3; j++) {
-            const float* g_col = g + j * channels + c_block;
-            float* Ww_col = Ww + j * 4;
-
             for (int i = 0; i < TILE_SIZE; i++) {
-                float32x4_t acc = vdupq_n_f32(0.0f);
-                for (int k = 0; k < 3; k++) {
-                    float32x4_t g_val = vld1q_f32(g + k * 3 * channels + j * channels + c_block);
-                    if (ch < 4) {
-                        // Handle tail: load only valid elements
-                        for (int c = 0; c < ch; c++) {
-                            Ww[i * 3 * 4 + j * 4 + c] = 0.0f;
-                            for (int k2 = 0; k2 < 3; k2++) {
-                                Ww[i * 3 * 4 + j * 4 + c] +=
-                                    G_matrix[i][k2] * g[k2 * 3 * channels + j * channels + c_block + c];
-                            }
+                if (ch < 4) {
+                    for (int c = 0; c < ch; c++) {
+                        float val = 0.0f;
+                        for (int k = 0; k < 3; k++) {
+                            val += G_matrix[i][k] * g[k * 3 * channels + j * channels + c_block + c];
                         }
-                    } else {
-                        // Full 4-channel NEON
-                        float32x4_t result = vdupq_n_f32(0.0f);
-                        for (int k2 = 0; k2 < 3; k2++) {
-                            float32x4_t gk = vld1q_f32(g + k2 * 3 * channels + j * channels + c_block);
-                            result = vmlaq_n_f32(result, gk, G_matrix[i][k2]);
-                        }
-                        vst1q_f32(Ww + i * 3 * 4 + j * 4, result);
+                        Ww[i * 3 * 4 + j * 4 + c] = val;
                     }
+                } else {
+                    float32x4_t result = vdupq_n_f32(0.0f);
+                    for (int k = 0; k < 3; k++) {
+                        float32x4_t gk = vld1q_f32(g + k * 3 * channels + j * channels + c_block);
+                        result = vmlaq_n_f32(result, gk, G_matrix[i][k]);
+                    }
+                    vst1q_f32(Ww + i * 3 * 4 + j * 4, result);
                 }
             }
         }
@@ -210,15 +201,12 @@ void weight_transform_neon(
         // Step 2: V = Ww * G^T / normalization (col transform)
         for (int i = 0; i < TILE_SIZE; i++) {
             for (int j = 0; j < TILE_SIZE; j++) {
-                float32x4_t result = vdupq_n_f32(0.0f);
-                for (int k = 0; k < 3; k++) {
-                    if (ch >= 4) {
+                if (ch >= 4) {
+                    float32x4_t result = vdupq_n_f32(0.0f);
+                    for (int k = 0; k < 3; k++) {
                         float32x4_t wwk = vld1q_f32(Ww + i * 3 * 4 + k * 4);
                         result = vmlaq_n_f32(result, wwk, G_matrix[j][k]);
                     }
-                }
-                if (ch >= 4) {
-                    // Apply normalization
                     if (normalization != 1.0f) {
                         result = vmulq_n_f32(result, normalization);
                     }

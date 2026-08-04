@@ -159,13 +159,13 @@ int main(int argc, char** argv) {
         float U[36];
         dispatch_input_transform(d, U, 1, true, isa);
 
-        // Expected: U[i][j] = B^T[i][0] * B^T[j][0]
-        // (because only d[0][0] is non-zero)
-        float Bt0[6] = {4, 0, -5, 0, 1, 0};  // column 0 of B^T = row 0 of B^T
+        // U[i][j] = B^T[i][0] * B^T[j][0] (column 0 of B^T)
+        // B^T[*][0] = first element of each row = [4, 0, 0, 0, 0, 0]
+        float Bt_col0[6] = {4, 0, 0, 0, 0, 0};
         int errors = 0;
         for (int i = 0; i < 6; i++) {
             for (int j = 0; j < 6; j++) {
-                float expected = Bt0[i] * Bt0[j];  // B^T[i][0] * B^T[j][0]
+                float expected = Bt_col0[i] * Bt_col0[j];
                 float got = U[i*6+j];
                 if (fabs(got - expected) > 1e-4) {
                     printf("  U[%d][%d]: expected %.4f, got %.4f  ERROR\n", i, j, expected, got);
@@ -177,33 +177,42 @@ int main(int argc, char** argv) {
         else printf("  Input transform: %d errors\n", errors);
     }
 
-    // ---- Debug: check F(4,4,3,3) output transform ----
-    printf("--- F(4,4,3,3) Output Transform Debug ---\n");
+    // ---- Debug: check F(4,4,3,3) full pipeline (1D-equivalent) ----
+    printf("--- F(4,4,3,3) Full Pipeline Debug ---\n");
     {
-        // M = identity (M[0][0]=1, rest=0), 1 channel, no bias
-        float M[36] = {0};
-        M[0] = 1.0f;  // M[0][0] = 1
-        float f[16];
-        dispatch_output_transform(M, f, 1, nullptr, -1e30f, 1e30f, true, isa);
+        // d_tile[1][1] = 1 (simulates input[0][0]=1 with pad=1), g=[[1,0,0],...]
+        // Expected: y[1][1] = 1, all else 0
+        float d_tile[36] = {0};
+        d_tile[1 * 6 + 1] = 1.0f;  // d[1][1] = 1
+        float U_tile[36];
+        dispatch_input_transform(d_tile, U_tile, 1, true, isa);
 
-        // Expected: f[i][j] = sum_k A^T[i][k] * M[k][l] * A^T[j][l]
-        // With M[0][0]=1: f[i][j] = A^T[i][0] * A^T[j][0]
-        // A^T[*][0] = [1, 0, 0, 0, 0, 0] (first column of A^T = first row of A^T)
-        // Wait, A^T[i][0] is the (i,0) element of A^T = F44_A::val[i][0]
-        float At0[4] = {1, 0, 0, 0};  // F44_A::val[*][0]
+        float g[9] = {1,0,0, 0,0,0, 0,0,0};
+        float V_oc[36];
+        dispatch_weight_transform(g, V_oc, 1, true, isa);
+
+        // M = U ⊙ V
+        float M_tile[36];
+        for (int m = 0; m < 36; m++)
+            M_tile[m] = U_tile[m] * V_oc[m];
+
+        // f = A^T * M * A
+        float f_tile[16];
+        dispatch_output_transform(M_tile, f_tile, 1, nullptr, -1e30f, 1e30f, true, isa);
+
         int errors = 0;
         for (int i = 0; i < 4; i++) {
             for (int j = 0; j < 4; j++) {
-                float expected = At0[i] * At0[j];
-                float got = f[i*4+j];
-                if (fabs(got - expected) > 1e-6) {
-                    printf("  f[%d][%d]: expected %.6f, got %.6f  ERROR\n", i, j, expected, got);
+                float expected = (i == 1 && j == 1) ? 1.0f : 0.0f;
+                float got = f_tile[i*4+j];
+                if (fabs(got - expected) > 1e-3) {
+                    printf("  f[%d][%d]: expected %.4f, got %.4f  ERROR\n", i, j, expected, got);
                     errors++;
                 }
             }
         }
-        if (errors == 0) printf("  Output transform: PASS\n");
-        else printf("  Output transform: %d errors\n", errors);
+        if (errors == 0) printf("  Full pipeline: PASS\n");
+        else printf("  Full pipeline: %d errors\n", errors);
     }
     printf("\n");
 
