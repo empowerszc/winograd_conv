@@ -1,24 +1,27 @@
 # Winograd 卷积复刻项目
 
-> 基于 ACL（Arm Compute Library）的 Winograd 卷积实现思路，用 C++ + NEON intrinsics 复刻的独立可运行项目。
+> 基于 ACL（Arm Compute Library）的 Winograd 卷积实现思路，用 C++ + NEON/SVE intrinsics + SME 内联汇编复刻的独立可运行项目。
 >
-> 支持 F(2,2,3,3) 和 F(4,4,3,3) 两种 Winograd 配置，包含权重/输入/输出三步变换、简化 GEMM、端到端卷积、以及与直接卷积的验证。
+> 支持 F(2,2,3,3) 和 F(4,4,3,3) 两种 Winograd 配置，包含权重/输入/输出三步变换、简化 GEMM、端到端卷积、以及与直接卷积的正确性验证。
 
 ## 目录结构
 
 ```
 winograd_conv/
-├── README.md                        ← 本文件
-├── CMakeLists.txt                   ← 构建配置
+├── CMakeLists.txt                         ← 构建配置
+├── AGENTS.md                              ← AI 代理指南
+├── README.md                              ← 本文件
 ├── include/
-│   ├── winograd_config.hpp          ← 配置：F(2,2)/F(4,4) 选择、ISA 检测
-│   ├── winograd_matrices.hpp        ← G/B^T/A^T 变换矩阵定义
-│   ├── winograd_transforms.hpp      ← NEON intrinsics 变换实现
-│   └── winograd_convolution.hpp     ← 端到端卷积接口
+│   ├── winograd_config.hpp                ← 配置 + ISA 检测/选择
+│   ├── winograd_matrices.hpp              ← G/B^T/A^T 变换矩阵
+│   ├── winograd_transforms.hpp            ← NEON intrinsics 变换
+│   ├── winograd_transforms_sve.hpp        ← SVE intrinsics 变换
+│   ├── winograd_transforms_sme.hpp        ← SME FMOPA 内联汇编变换
+│   └── winograd_convolution.hpp           ← 端到端接口 + dispatch 声明
 ├── src/
-│   └── winograd_conv.cpp            ← 端到端卷积实现 + 直接卷积 + GEMM
+│   └── winograd_conv.cpp                  ← 端到端实现 + GEMM + 直接卷积 + dispatch
 └── tests/
-    └── test_winograd.cpp            ← 验证：Winograd vs 直接卷积
+    └── test_winograd.cpp                  ← 正确性验证 + 变换调试
 ```
 
 ## 快速开始
@@ -75,11 +78,22 @@ WINOGRAD_ISA=sme ./test_winograd
 预期输出：
 ```
 === Winograd Convolution Verification ===
-Using ISA: SVE (detected: SME)
+Using ISA: NEON (detected: NEON)
+
+--- F(4,4,3,3) Weight Transform Debug ---
+  Weight transform: PASS
+--- F(4,4,3,3) Input Transform Debug ---
+  Input transform: PASS
+--- F(4,4,3,3) Full Pipeline Debug ---
+  Full pipeline: PASS
 
 --- F(2,2,3,3) Tests ---
   Test: N=1 IC=3 IH=4 IW=4 OC=3 OH=4 OW=4 F(2,2,3,3)
-    Max error: 0.000012  PASS
+    Max error: 0.000002  PASS
+  ...
+--- F(4,4,3,3) Tests ---
+  Test: N=1 IC=3 IH=4 IW=4 OC=3 OH=4 OW=4 F(4,4,3,3)
+    Max error: 0.000002  PASS
   ...
 === Summary: 12/12 tests passed ===
 ```
@@ -109,53 +123,66 @@ Winograd: src ──[① 输入变换]──→ U ──[② GEMM]──→ M �
 
 **F(2,2,3,3)**:
 ```
-G  = [1,0,0; 0.5,0.5,0.5; 0.5,-0.5,0.5; 0,0,1]        (4×3)
-B^T= [1,0,-1,0; 0,1,1,0; 0,-1,1,0; 0,1,0,-1]         (4×4)
-A^T= [1,1,1,0; 0,-1,-1,-1]                              (2×4)
+G   = [1,0,0; 0.5,0.5,0.5; 0.5,-0.5,0.5; 0,0,1]       (4×3), norm=1
+B^T = [1,0,-1,0; 0,1,1,0; 0,-1,1,0; 0,1,0,-1]          (4×4)
+A^T = [1,1,1,0; 0,1,-1,-1]                              (2×4)
 ```
 
 **F(4,4,3,3)**:
 ```
-G  = [6,0,0; -4,-4,-4; -4,4,-4; 1,2,4; 1,-2,4; 0,0,24]  (6×3), 归一化/576
-B^T= [4,0,-5,0,1,0; 0,-4,-4,1,1,0; ...]                   (6×6)
-A^T= [1,1,1,1,1,0; 0,1,-1,2,-2,0; ...]                   (4×6)
+G   = [6,0,0; -4,-4,-4; -4,4,-4; 1,2,4; 1,-2,4; 0,0,24]  (6×3), norm=1/576
+B^T = [4,0,-5,0,1,0; 0,-4,-4,1,1,0; 0,4,-4,-1,1,0; ...]   (6×6)
+A^T = [1,1,1,1,1,0; 0,1,-1,2,-2,0; 0,1,1,4,4,0; 0,1,-1,8,-8,1]  (4×6)
 ```
+
+> 矩阵系数与 ACL 53.1.0 源码逐一验证一致。
 
 ## 文件说明
 
 ### `winograd_config.hpp`
 - `WinogradConfig` 结构体：定义 tile 大小、kernel 大小、GEMM 数量
 - `F22_33()` / `F44_33()`：创建 F(2,2,3,3) / F(4,4,3,3) 配置
-- `detect_isa()`：运行时检测 NEON/SVE/SME
-- `vec_length()`：返回向量长度（NEON=4, SVE-512=16）
+- `detect_isa()`：编译时检测 NEON/SVE/SME
+- `set_isa_level()` / `parse_isa()`：运行时 ISA 选择
 
 ### `winograd_matrices.hpp`
-- 定义 F(2,2,3,3) 和 F(4,4,3,3) 的 G、B^T、A 矩阵
-- 矩阵系数来自 Winograd 最小滤波算法的标准推导
+- 定义 F(2,2,3,3) 和 F(4,4,3,3) 的 G、B^T、A^T 矩阵
 - F(4,4,3,3) 的 G 用整数系数（最大 24），归一化因子 = 1/576 = 1/24²
 
-### `winograd_transforms.hpp`
-- `transform_1d_neon<>()`：通用 1D 矩阵-向量变换模板
-  - 用 NEON `vld1q_f32`/`vmlaq_n_f32`/`vst1q_f32` 4 通道并行
-  - 支持 tail 处理（2 通道 `float32x2_t`、1 通道标量）
-- `transform_2d_neon<>()`：2D 变换 = 两次 1D 变换（行变换 + 列变换）
+### `winograd_transforms.hpp` (NEON)
+- `transform_1d_neon<>()`：通用 1D 矩阵-向量变换，4 通道并行 + 3 段 tail 降级
+- `transform_2d_neon<>()`：2D 变换 = 两次 1D 变换（列变换 + 行变换）
 - `weight_transform_neon<>()`：权重变换 V = G·g·G^T/norm
 - `input_transform_neon<>()`：输入变换 U = B^T·d·B
-- `output_transform_neon<>()`：输出变换 f = A^T·M·A + bias + ReLU
+- `output_transform_neon<>()`：输出变换 f = A^T·M·A + bias + ReLU clamp
+
+### `winograd_transforms_sve.hpp` (SVE)
+- 与 NEON 版完全对应的 SVE intrinsics 实现
+- `svld1_f32` + `svwhilelt_b32` 谓词化加载，自动处理 tail（无需降级）
+- `svmla_n_f32_x` 谓词化乘加，VL 通道并行（SVE-512 时 16 float/指令）
+
+### `winograd_transforms_sme.hpp` (SME)
+- **输入变换**：SVE 指令 + `SMSTART ZA`/`SMSTOP` 包裹（流式模式 SVE）
+- **输出变换**：直接移植 ACL `sme_fp32_mopa_4x4_3x3.cpp` 的内联汇编
+  - 157 条 FMOPA 指令（`.inst` 编码）
+  - 69 条 MOVA 指令读出 ZA tile
+  - Kronecker 积 + 外积累加算法
+- **权重变换**：复用 NEON（权重变换非热路径，ACL 也只有 NEON 版）
 
 ### `winograd_conv.cpp`
-- `winograd_gemm()`：简化 GEMM（naive 三重循环，生产环境替换为 SVE/SME/AMX 内核）
+- `dispatch_weight/input/output_transform()`：根据 ISA 选择 NEON/SVE/SME 实现
+- `winograd_gemm()`：naive 三重循环 GEMM（可替换为 OpenBLAS `cblas_sgemm`）
 - `direct_convolution_3x3()`：参考直接卷积（用于验证正确性）
-- `winograd_convolution()`：端到端 Winograd 卷积（组装三步）
-  - 步骤 1：权重变换（一次性）
-  - 步骤 2a：输入 tile 提取（含 padding 补零）+ 输入变换
+- `winograd_convolution()`：端到端 Winograd 卷积
+  - 步骤 1：权重变换（通过 dispatch，一次性）
+  - 步骤 2a：输入 tile 提取 + 输入变换（通过 dispatch）
   - 步骤 2b：NM 个 batched GEMM
-  - 步骤 2c：输出变换 + bias + ReLU + 写回特征图
+  - 步骤 2c：输出变换（通过 dispatch，含 bias + ReLU）+ 写回
 
 ### `test_winograd.cpp`
-- 多种形状的测试用例（小图到大图）
-- 对比 Winograd 与直接卷积的输出
-- 容差 1e-3（float32 精度）
+- F(4,4,3,3) 变换级调试（权重/输入/输出/全流水线）
+- 12 个测试用例（小图到大图，F22 和 F44 各 6 个）
+- 对比 Winograd 与直接卷积，容差 1e-3
 
 ## ISA 调度机制
 
@@ -196,46 +223,46 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 // ./test_winograd --sve
 ```
 
-### SME 实现说明
-
-SME 输入变换 = SVE 变换 + `SMSTART ZA` / `SMSTOP` 包裹（与 ACL 的 `sme_fp32_mla_6x6.cpp` 一致）。
-
-SME 输出变换使用 Kronecker 积 + FMOPA 外积累加（与 ACL 的 `sme_fp32_mopa_4x4_3x3.cpp` 一致）。由于 SME C intrinsics 尚不广泛支持，FMOPA 指令通过内嵌汇编 `.inst` 编码实现。当编译器不支持 SME intrinsics 时，自动回退到 SVE 实现（保证正确性）。
-
-SME 权重变换 = NEON（权重变换在 prepare 阶段做一次，非热路径，ACL 也只有 NEON 版）。
-
 ## 与 ACL 实现的对比
 
 | 方面 | 本项目 | ACL |
 |------|--------|-----|
 | 变换实现 | NEON/SVE intrinsics + SME .inst | NEON/SVE 汇编 + SME 汇编 |
-| GEMM | naive 三重循环 | arm_gemm 库（自动选 SVE/SME 内核） |
+| GEMM | naive 三重循环（可替换 OpenBLAS） | arm_gemm 库（自动选 SVE/SME 内核） |
 | 通道并行度 | NEON=4, SVE=16, SME=64 | 同左 |
 | tail 处理 | NEON=3段降级, SVE/SME=谓词 | 同左 |
 | ISA 调度 | 运行时选项（--neon/--sve/--sme） | 编译期选择（注册表顺序） |
 | 多线程 | 可选 OpenMP | NEScheduler |
-| 正确性 | ✅ 验证通过 | ✅ |
+| 正确性 | ✅ 12/12 验证通过 | ✅ |
 | 性能 | 基准（naive GEMM） | 高度优化 |
 
 ## 扩展指南
 
 ### 替换 GEMM
 
-将 `winograd_gemm()` 替换为调优版本：
+将 `winograd_gemm()` 替换为 OpenBLAS：
+
 ```cpp
-// 调用 arm_gemm: GemmHybridIndirect<sve_hybrid_fp32_mla_6x4VL>
-// 或 AMX: tdpbf16ps tile instruction
+#include <cblas.h>
+void winograd_gemm(const float* U, const float* V, float* M,
+                   int n_tiles, int OC, int IC) {
+    // M[n_tiles][OC] = U[n_tiles][IC] × V[OC][IC]^T
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                n_tiles, OC, IC, 1.0f, U, IC, V, IC, 0.0f, M, OC);
+}
 ```
 
-### 添加真正的 FMOPA 汇编
+### 添加 prepare/execute 分离
 
-当前 SME 输出变换用 SVE 回退保证正确性。要启用真正的 FMOPA 路径，参考 ACL 的 `sme_fp32_mopa_4x4_3x3.cpp`：
 ```cpp
-// SMSTART ZA
-// zero {zad0-zad7}
-// fmopa za0.s, p5/M, p5/M, zN.s, zM.s  // 外积累加
-// mova zD.s, p5/M, za0h.s[XZR]          // 读出
-// SMSTOP
+struct WinogradContext {
+    std::vector<float> V;  // 预变换的权重
+    WinogradConfig config;
+    ISALevel isa;
+    std::vector<float> U_workspace, M_workspace;  // 预分配
+};
+WinogradContext prepare(const float* weights, ...);
+void execute(WinogradContext& ctx, const float* input, float* output, ...);
 ```
 
 ## 许可证
