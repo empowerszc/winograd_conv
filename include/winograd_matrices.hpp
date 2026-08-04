@@ -61,7 +61,7 @@ struct F22_A {
     static constexpr int cols = 4;  // input cols
     static constexpr float val[2][4] = {
         {1.0f,  1.0f,  1.0f,  0.0f},
-        {0.0f, -1.0f, -1.0f, -1.0f}
+        {0.0f,  1.0f, -1.0f, -1.0f}
     };
 };
 
