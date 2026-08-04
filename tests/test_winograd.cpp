@@ -520,45 +520,104 @@ int main(int argc, char** argv) {
         }
     }
 
-    // ---- Debug: scalar reference input transform comparison ----
-    printf("--- F(4,4,3,3) Scalar vs NEON Input Transform ---\n");
+    // ---- Debug: compute correct B^T from Winograd condition ----
+    printf("--- F(4,4,3,3) Solve Correct B^T ---\n");
     {
-        int IC = 3;
-        float d[36 * 3];  // [6][6][3]
-        for (int i = 0; i < 36 * 3; i++) d[i] = static_cast<float>(rand()) / RAND_MAX;
+        // Winograd 1D condition:
+        // sum_j A^T[i][j] * B^T[j][a] * G[j][b] = 24 * delta(a, i+b)
+        // For each column a, solve for B^T[0..5][a]
+        // Using d=e_a, g=e_b: y[i] = delta(a-b, i)
 
-        // NEON dispatch
-        float U_neon[36 * 3];
-        dispatch_input_transform(d, U_neon, IC, true, ISALevel::NEON);
+        float At[4][6], Gm[6][3];
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 6; j++) At[i][j] = F44_A::val[i][j];
+        for (int i = 0; i < 6; i++) for (int j = 0; j < 3; j++) Gm[i][j] = F44_G::val[i][j];
 
-        // Scalar reference: U[i][j][c] = sum_k1 sum_k2 B^T[i][k1]*d[k1][k2][c]*B^T[j][k2]
-        float U_scalar[36 * 3];
+        float Bt_correct[6][6] = {0};
+
+        for (int a = 0; a < 6; a++) {
+            // For each a, solve: sum_j (A^T[i][j] * G[j][b]) * B^T[j][a] = 24*delta(a, i+b)
+            // This gives 12 equations (i=0..3, b=0..2) for 6 unknowns (j=0..5)
+            // Use least-squares (normal equations): M^T * M * x = M^T * r
+
+            double MtM[6][6] = {0};
+            double Mtr[6] = {0};
+
+            for (int i = 0; i < 4; i++) {
+                for (int b = 0; b < 3; b++) {
+                    // Equation: sum_j M[i*3+b][j] * x[j] = r[i*3+b]
+                    // where M[i*3+b][j] = A^T[i][j] * G[j][b]
+                    // and r[i*3+b] = 24 * delta(a, i+b)
+                    double Mrow[6];
+                    for (int j = 0; j < 6; j++)
+                        Mrow[j] = At[i][j] * Gm[j][b];
+                    double rval = (a == i + b) ? 24.0 : 0.0;
+
+                    for (int j1 = 0; j1 < 6; j1++) {
+                        Mtr[j1] += Mrow[j1] * rval;
+                        for (int j2 = 0; j2 < 6; j2++)
+                            MtM[j1][j2] += Mrow[j1] * Mrow[j2];
+                    }
+                }
+            }
+
+            // Solve MtM * x = Mtr using Gaussian elimination
+            double aug[6][7];
+            for (int r = 0; r < 6; r++) {
+                for (int c = 0; c < 6; c++) aug[r][c] = MtM[r][c];
+                aug[r][6] = Mtr[r];
+            }
+            // Forward elimination
+            for (int p = 0; p < 6; p++) {
+                // Find pivot
+                int best = p;
+                for (int r = p+1; r < 6; r++)
+                    if (fabs(aug[r][p]) > fabs(aug[best][p])) best = r;
+                if (best != p) for (int c = 0; c <= 6; c++) std::swap(aug[p][c], aug[best][c]);
+                // Eliminate
+                for (int r = p+1; r < 6; r++) {
+                    double f = aug[r][p] / aug[p][p];
+                    for (int c = p; c <= 6; c++) aug[r][c] -= f * aug[p][c];
+                }
+            }
+            // Back substitution
+            double x[6];
+            for (int r = 5; r >= 0; r--) {
+                x[r] = aug[r][6];
+                for (int c = r+1; c < 6; c++) x[r] -= aug[r][c] * x[c];
+                x[r] /= aug[r][r];
+            }
+
+            for (int j = 0; j < 6; j++)
+                Bt_correct[j][a] = (float)x[j];
+        }
+
+        printf("  Correct B^T:\n");
         for (int i = 0; i < 6; i++) {
-            for (int j = 0; j < 6; j++) {
-                for (int c = 0; c < IC; c++) {
-                    float val = 0.0f;
-                    for (int k1 = 0; k1 < 6; k1++) {
-                        for (int k2 = 0; k2 < 6; k2++) {
-                            val += F44_Bt::val[i][k1] * d[(k1*6+k2)*IC + c] * F44_Bt::val[j][k2];
-                        }
-                    }
-                    U_scalar[(i*6+j)*IC + c] = val;
-                }
-            }
+            printf("  {");
+            for (int j = 0; j < 6; j++) printf("%s%.1f", j ? ", " : "", Bt_correct[i][j]);
+            printf("}\n");
+        }
+        printf("  Current B^T:\n");
+        for (int i = 0; i < 6; i++) {
+            printf("  {");
+            for (int j = 0; j < 6; j++) printf("%s%.1f", j ? ", " : "", F44_Bt::val[i][j]);
+            printf("}\n");
         }
 
-        float err = max_error(U_neon, U_scalar, 36 * IC);
-        printf("  Max error: %.6f  %s\n", err, err < 1e-4 ? "PASS" : "FAIL");
-        if (err >= 1e-4) {
-            for (int m = 0; m < 10 && m < 36; m++) {
-                for (int c = 0; c < IC; c++) {
-                    if (fabs(U_neon[m*IC+c] - U_scalar[m*IC+c]) > 1e-4) {
-                        printf("  U[%d][%d]: neon=%.6f scalar=%.6f\n", m, c,
-                               U_neon[m*IC+c], U_scalar[m*IC+c]);
-                    }
+        // Verify: use correct B^T and check 1D Winograd
+        float err = 0;
+        for (int a = 0; a < 6; a++) {
+            for (int b = 0; b < 3; b++) {
+                for (int i = 0; i < 4; i++) {
+                    float val = 0;
+                    for (int j = 0; j < 6; j++)
+                        val += At[i][j] * Bt_correct[j][a] * Gm[j][b];
+                    float expected = (a == i+b) ? 24.0f : 0.0f;
+                    err = std::max(err, (float)fabs(val - expected));
                 }
             }
         }
+        printf("  Verification error: %.6f  %s\n", err, err < 1e-3 ? "PASS" : "FAIL");
     }
     printf("\n");
 
