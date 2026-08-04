@@ -15,6 +15,7 @@
 #include <arm_neon.h>
 #include <cstddef>
 #include <cstring>
+#include <vector>
 #include "winograd_matrices.hpp"
 #include "winograd_config.hpp"
 
@@ -118,67 +119,37 @@ void transform_1d_neon(
 // Step 2: col transform: output = tmp * M^T (transform each row)
 // M is OUT_SIZE x IN_SIZE, input is IN_SIZE x IN_SIZE, output is OUT_SIZE x OUT_SIZE
 
-template <int OUT_SIZE, int IN_SIZE, int CHANNELS>
+template <int OUT_SIZE, int IN_SIZE>
 void transform_2d_neon(
     const float matrix[OUT_SIZE][IN_SIZE],
-    const float* input,   // [IN_SIZE][IN_SIZE][CHANNELS]
-    float* output,         // [OUT_SIZE][OUT_SIZE][CHANNELS]
-    int channel_stride     // stride between elements (= CHANNELS for packed layout)
+    const float* input,   // [IN_SIZE][IN_SIZE][channels]
+    float* output,         // [OUT_SIZE][OUT_SIZE][channels]
+    int channels,
+    int channel_stride     // stride between elements (= channels for packed layout)
 ) {
     // Temporary buffer for intermediate result
-    // tmp[OUT_SIZE][IN_SIZE][CHANNELS]
-    alignas(64) float tmp[OUT_SIZE * IN_SIZE * CHANNELS];
+    // tmp[OUT_SIZE][IN_SIZE][channels]
+    std::vector<float> tmp(OUT_SIZE * IN_SIZE * channels);
 
     // Step 1: Row transform - for each column j, compute tmp[:][j] = M * input[:][j]
     for (int j = 0; j < IN_SIZE; j++) {
         const float* in_col = input + j * channel_stride;  // input[0][j][:]
-        float* tmp_col = tmp + j * channel_stride;          // tmp[0][j][:]
+        float* tmp_col = tmp.data() + j * channel_stride;   // tmp[0][j][:]
         transform_1d_neon<OUT_SIZE, IN_SIZE>(
-            matrix, in_col, tmp_col, CHANNELS,
+            matrix, in_col, tmp_col, channels,
             IN_SIZE * channel_stride,   // in_stride: skip a full row
             IN_SIZE * channel_stride     // out_stride: same
         );
     }
 
     // Step 2: Col transform - for each row i, compute output[i][:] = tmp[i] * M^T
-    // This is equivalent to: for each i, output[i][j] = sum_k tmp[i][k] * M[j][k]
-    // Which is: output[i][:] = transform_1d(M^T, tmp[i][:])
     for (int i = 0; i < OUT_SIZE; i++) {
-        const float* tmp_row = tmp + i * IN_SIZE * channel_stride;
+        const float* tmp_row = tmp.data() + i * IN_SIZE * channel_stride;
         float* out_row = output + i * OUT_SIZE * channel_stride;
-        // We need M^T applied to tmp_row
-        // M^T[j][k] = M[k][j], so output[i][j] = sum_k M[k][j] * tmp[i][k]
-        // This is the same as applying M^T as the transform matrix
-        // But transform_1d expects matrix[out][in], so we need M^T
-        // M^T is IN_SIZE x OUT_SIZE... but we want output of size OUT_SIZE
-        // Actually, transform_1d<OUT_SIZE, IN_SIZE>(M^T, tmp_row, out_row)
-        // where M^T[j][k] = M[k][j]
-
-        // Build M^T on the fly (or use the fact that B = (B^T)^T)
-        // For Winograd: U = B^T * d * B
-        //   Step 1: tmp = B^T * d  (using matrix=B^T, OUT=tile_size, IN=tile_size)
-        //   Step 2: U = tmp * B = (B^T * d) * B = (B^T * d) * (B^T)^T
-        //   So step 2 uses matrix = B^T again (since B = (B^T)^T, and
-        //   output = tmp * B = tmp * (B^T)^T = (B^T * tmp^T)^T... hmm, this is
-        //   getting confusing. Let me think more carefully.
-        //
-        // Actually, for the 2D transform U = B^T * d * B:
-        //   Step 1 (row/col transform): tmp[i][j] = sum_k B^T[i][k] * d[k][j]
-        //     = apply B^T to each column of d
-        //   Step 2 (col/row transform): U[i][j] = sum_k tmp[i][k] * B[k][j]
-        //     = apply B (not B^T!) to each row of tmp
-        //     = apply (B^T)^T to each row
-        //
-        // Since B = (B^T)^T, and our matrix IS B^T, step 2 uses matrix^T.
-        // transform_1d with matrix=B^T gives: out[o] = sum_k B^T[o][k] * in[k]
-        // We need: out[j] = sum_k tmp[i][k] * B[k][j] = sum_k B^T[j][k]... wait no
-        // B[k][j] = B^T[j][k], so out[j] = sum_k B^T[j][k] * tmp[i][k]
-        // That's the same as applying B^T as the transform matrix!
-        // So step 2 uses the SAME matrix as step 1. ✓
 
         transform_1d_neon<OUT_SIZE, IN_SIZE>(
-            matrix, tmp_row, out_row, CHANNELS,
-            channel_stride,      // in_stride: skip one element (= CHANNELS)
+            matrix, tmp_row, out_row, channels,
+            channel_stride,      // in_stride: skip one element (= channels)
             channel_stride        // out_stride
         );
     }

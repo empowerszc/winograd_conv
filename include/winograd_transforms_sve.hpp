@@ -15,6 +15,7 @@
 #include <arm_sve.h>
 #include <cstddef>
 #include <cstring>
+#include <vector>
 #include "winograd_matrices.hpp"
 #include "winograd_config.hpp"
 
@@ -107,22 +108,23 @@ void transform_1d_sve(
 // SVE 2D 变换：output = M * input * M^T
 // ============================================================================
 
-template <int OUT_SIZE, int IN_SIZE, int CHANNELS>
+template <int OUT_SIZE, int IN_SIZE>
 void transform_2d_sve(
     const float matrix[OUT_SIZE][IN_SIZE],
-    const float* input,   // [IN_SIZE][IN_SIZE][CHANNELS]
-    float* output,         // [OUT_SIZE][OUT_SIZE][CHANNELS]
+    const float* input,   // [IN_SIZE][IN_SIZE][channels]
+    float* output,         // [OUT_SIZE][OUT_SIZE][channels]
+    int channels,
     int channel_stride
 ) {
-    alignas(64) float tmp[OUT_SIZE * IN_SIZE * CHANNELS];
+    std::vector<float> tmp(OUT_SIZE * IN_SIZE * channels);
 
     // Step 1: Row transform (apply M to each column)
     for (int j = 0; j < IN_SIZE; j++) {
         transform_1d_sve<OUT_SIZE, IN_SIZE>(
             matrix,
             input + j * channel_stride,
-            tmp + j * channel_stride,
-            CHANNELS,
+            tmp.data() + j * channel_stride,
+            channels,
             IN_SIZE * channel_stride,
             IN_SIZE * channel_stride
         );
@@ -132,9 +134,9 @@ void transform_2d_sve(
     for (int i = 0; i < OUT_SIZE; i++) {
         transform_1d_sve<OUT_SIZE, IN_SIZE>(
             matrix,
-            tmp + i * IN_SIZE * channel_stride,
+            tmp.data() + i * IN_SIZE * channel_stride,
             output + i * OUT_SIZE * channel_stride,
-            CHANNELS,
+            channels,
             channel_stride,
             channel_stride
         );
