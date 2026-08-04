@@ -330,6 +330,17 @@ int main(int argc, char** argv) {
         float err = max_error(ref_dst.data(), wino_dst.data(), OC * IH * IW);
         printf("  Max error: %.6f  %s\n", err, err < 1e-3 ? "PASS" : "FAIL");
 
+        // Dump first few output values to see where they differ
+        for (int oc = 0; oc < OC && oc < 2; oc++) {
+            for (int oh = 0; oh < 4; oh++) {
+                int ow = 0;
+                int idx = oc * IH * IW + oh * IW + ow;
+                printf("  oc=%d oh=%d ow=%d: ref=%.6f wino=%.6f diff=%.6f\n",
+                       oc, oh, ow, ref_dst[idx], wino_dst[idx],
+                       fabs(ref_dst[idx] - wino_dst[idx]));
+            }
+        }
+
         // Also compare with F(2,2,3,3) using same data to check if the
         // direct convolution and Winograd agree for F(2,2) but not F(4,4)
         std::vector<float> ref22_dst(OC * IH * IW, 0.0f);
@@ -340,6 +351,131 @@ int main(int argc, char** argv) {
                                   1, IC, IH, IW, OC, IH, IW, -1e30f, 1e30f);
         float err22 = max_error(ref22_dst.data(), wino22_dst.data(), OC * IH * IW);
         printf("  F(2,2) same data: %.6f  %s\n", err22, err22 < 1e-3 ? "PASS" : "FAIL");
+    }
+
+    // ---- Debug: manual pipeline step-by-step for F(4,4,3,3) ----
+    printf("--- F(4,4,3,3) Manual Pipeline Step-by-Step ---\n");
+    {
+        int IC=3, OC=3, IH=4, IW=4;
+        int TS=6, OT=4, NM=36;
+        std::vector<float> src(IC * IH * IW, 0.0f);
+        for (int ic = 0; ic < IC; ic++)
+            src[ic * IH * IW + 0 * IW + 0] = 1.0f;
+
+        std::vector<float> wei(OC * IC * 9);
+        fill_random(wei);
+        std::vector<float> bias(OC, 0.0f);
+
+        // Step 1: Weight transform (same as winograd_convolution)
+        std::vector<float> V(NM * OC * IC, 0.0f);
+        for (int oc = 0; oc < OC; oc++) {
+            std::vector<float> g(9 * IC);
+            for (int ic = 0; ic < IC; ic++)
+                for (int kh = 0; kh < 3; kh++)
+                    for (int kw = 0; kw < 3; kw++)
+                        g[(kh * 3 + kw) * IC + ic] =
+                            wei[((oc * IC + ic) * 3 + kh) * 3 + kw];
+            std::vector<float> V_oc(NM * IC);
+            dispatch_weight_transform(g.data(), V_oc.data(), IC, true, isa);
+            for (int m = 0; m < NM; m++)
+                for (int ic = 0; ic < IC; ic++)
+                    V[m * OC * IC + oc * IC + ic] = V_oc[m * IC + ic];
+        }
+
+        // Step 2: Tile extraction + input transform
+        int n_tiles = 1;
+        int tile_idx = 0;
+        std::vector<float> d_tile(TS * TS * IC, 0.0f);
+        for (int ti = 0; ti < TS; ti++) {
+            for (int tj = 0; tj < TS; tj++) {
+                int ih = -1 + ti;  // tr=0
+                int iw = -1 + tj;  // tc=0
+                if (ih >= 0 && ih < IH && iw >= 0 && iw < IW) {
+                    for (int ic = 0; ic < IC; ic++)
+                        d_tile[(ti * TS + tj) * IC + ic] =
+                            src[((0 * IC + ic) * IH + ih) * IW + iw];
+                }
+            }
+        }
+
+        std::vector<float> U_tile(TS * TS * IC);
+        dispatch_input_transform(d_tile.data(), U_tile.data(), IC, true, isa);
+
+        // Step 3: Scatter U
+        std::vector<float> U(NM * n_tiles * IC, 0.0f);
+        for (int ti = 0; ti < TS; ti++) {
+            for (int tj = 0; tj < TS; tj++) {
+                int ts_idx = ti * TS + tj;
+                for (int ic = 0; ic < IC; ic++)
+                    U[(ts_idx * n_tiles + tile_idx) * IC + ic] =
+                        U_tile[(ti * TS + tj) * IC + ic];
+            }
+        }
+
+        // Step 4: GEMM
+        std::vector<float> M_buf(NM * n_tiles * OC, 0.0f);
+        for (int ts_idx = 0; ts_idx < NM; ts_idx++) {
+            const float* U_slice = U.data() + ts_idx * n_tiles * IC;
+            const float* V_slice = V.data() + ts_idx * OC * IC;
+            float* M_slice = M_buf.data() + ts_idx * n_tiles * OC;
+            winograd_gemm(U_slice, V_slice, M_slice, n_tiles, OC, IC);
+        }
+
+        // Step 5: Gather M
+        std::vector<float> M_tile(TS * TS * OC, 0.0f);
+        for (int ti = 0; ti < TS; ti++) {
+            for (int tj = 0; tj < TS; tj++) {
+                int ts_idx = ti * TS + tj;
+                for (int oc = 0; oc < OC; oc++)
+                    M_tile[(ti * TS + tj) * OC + oc] =
+                        M_buf[(ts_idx * n_tiles + tile_idx) * OC + oc];
+            }
+        }
+
+        // Step 6: Output transform
+        std::vector<float> f_tile(OT * OT * OC, 0.0f);
+        dispatch_output_transform(M_tile.data(), f_tile.data(), OC,
+                                  bias.data(), -1e30f, 1e30f, true, isa);
+
+        // Step 7: Writeback
+        std::vector<float> manual_dst(OC * IH * IW, 0.0f);
+        for (int oi = 0; oi < OT; oi++) {
+            for (int oj = 0; oj < OT; oj++) {
+                int oh = oi, ow = oj;
+                if (oh < IH && ow < IW) {
+                    for (int oc = 0; oc < OC; oc++)
+                        manual_dst[oc * IH * IW + oh * IW + ow] =
+                            f_tile[(oi * OT + oj) * OC + oc];
+                }
+            }
+        }
+
+        // Compare manual pipeline with winograd_convolution_f44
+        std::vector<float> wino_dst(OC * IH * IW, 0.0f);
+        winograd_convolution_f44(src.data(), wei.data(), bias.data(), wino_dst.data(),
+                                  1, IC, IH, IW, OC, IH, IW, -1e30f, 1e30f);
+
+        // Compare manual pipeline with direct convolution
+        std::vector<float> ref_dst(OC * IH * IW, 0.0f);
+        direct_convolution_3x3(src.data(), wei.data(), bias.data(), ref_dst.data(),
+                                1, IC, IH, IW, OC, IH, IW, -1e30f, 1e30f);
+
+        float err_manual_vs_wino = max_error(manual_dst.data(), wino_dst.data(), OC * IH * IW);
+        float err_manual_vs_ref = max_error(manual_dst.data(), ref_dst.data(), OC * IH * IW);
+        float err_wino_vs_ref = max_error(wino_dst.data(), ref_dst.data(), OC * IH * IW);
+
+        printf("  Manual vs Winograd: %.6f  %s\n", err_manual_vs_wino, err_manual_vs_wino < 1e-3 ? "PASS" : "FAIL");
+        printf("  Manual vs Direct:   %.6f  %s\n", err_manual_vs_ref, err_manual_vs_ref < 1e-3 ? "PASS" : "FAIL");
+        printf("  Winograd vs Direct: %.6f  %s\n", err_wino_vs_ref, err_wino_vs_ref < 1e-3 ? "PASS" : "FAIL");
+
+        // Dump first few values
+        for (int oc = 0; oc < OC && oc < 2; oc++) {
+            for (int oh = 0; oh < 4; oh++) {
+                int idx = oc * IH * IW + oh * IW + 0;
+                printf("  oc=%d oh=%d: ref=%.6f manual=%.6f wino=%.6f\n",
+                       oc, oh, ref_dst[idx], manual_dst[idx], wino_dst[idx]);
+            }
+        }
     }
 
     // ---- Debug: scalar reference weight transform comparison ----
