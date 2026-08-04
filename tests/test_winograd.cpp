@@ -329,6 +329,100 @@ int main(int argc, char** argv) {
 
         float err = max_error(ref_dst.data(), wino_dst.data(), OC * IH * IW);
         printf("  Max error: %.6f  %s\n", err, err < 1e-3 ? "PASS" : "FAIL");
+
+        // Also compare with F(2,2,3,3) using same data to check if the
+        // direct convolution and Winograd agree for F(2,2) but not F(4,4)
+        std::vector<float> ref22_dst(OC * IH * IW, 0.0f);
+        std::vector<float> wino22_dst(OC * IH * IW, 0.0f);
+        direct_convolution_3x3(src.data(), wei.data(), bias.data(), ref22_dst.data(),
+                                1, IC, IH, IW, OC, IH, IW, -1e30f, 1e30f);
+        winograd_convolution_f22(src.data(), wei.data(), bias.data(), wino22_dst.data(),
+                                  1, IC, IH, IW, OC, IH, IW, -1e30f, 1e30f);
+        float err22 = max_error(ref22_dst.data(), wino22_dst.data(), OC * IH * IW);
+        printf("  F(2,2) same data: %.6f  %s\n", err22, err22 < 1e-3 ? "PASS" : "FAIL");
+    }
+
+    // ---- Debug: scalar reference weight transform comparison ----
+    printf("--- F(4,4,3,3) Scalar vs NEON Weight Transform ---\n");
+    {
+        // Random weight, IC=3
+        int IC = 3;
+        float g[27];  // [3][3][3]
+        for (int i = 0; i < 27; i++) g[i] = static_cast<float>(rand()) / RAND_MAX;
+
+        // NEON dispatch
+        float V_neon[36 * 3];  // [36][3]
+        dispatch_weight_transform(g, V_neon, IC, true, ISALevel::NEON);
+
+        // Scalar reference: V[i][j][c] = sum_k1 sum_k2 G[i][k1]*g[k1][k2][c]*G[j][k2] / 576
+        float V_scalar[36 * 3];
+        for (int i = 0; i < 6; i++) {
+            for (int j = 0; j < 6; j++) {
+                for (int c = 0; c < IC; c++) {
+                    float val = 0.0f;
+                    for (int k1 = 0; k1 < 3; k1++) {
+                        for (int k2 = 0; k2 < 3; k2++) {
+                            val += F44_G::val[i][k1] * g[(k1*3+k2)*IC + c] * F44_G::val[j][k2];
+                        }
+                    }
+                    V_scalar[(i*6+j)*IC + c] = val / 576.0f;
+                }
+            }
+        }
+
+        float err = max_error(V_neon, V_scalar, 36 * IC);
+        printf("  Max error: %.6f  %s\n", err, err < 1e-5 ? "PASS" : "FAIL");
+        if (err >= 1e-5) {
+            for (int m = 0; m < 36; m++) {
+                for (int c = 0; c < IC; c++) {
+                    if (fabs(V_neon[m*IC+c] - V_scalar[m*IC+c]) > 1e-5) {
+                        printf("  V[%d][%d]: neon=%.6f scalar=%.6f\n", m, c,
+                               V_neon[m*IC+c], V_scalar[m*IC+c]);
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- Debug: scalar reference input transform comparison ----
+    printf("--- F(4,4,3,3) Scalar vs NEON Input Transform ---\n");
+    {
+        int IC = 3;
+        float d[36 * 3];  // [6][6][3]
+        for (int i = 0; i < 36 * 3; i++) d[i] = static_cast<float>(rand()) / RAND_MAX;
+
+        // NEON dispatch
+        float U_neon[36 * 3];
+        dispatch_input_transform(d, U_neon, IC, true, ISALevel::NEON);
+
+        // Scalar reference: U[i][j][c] = sum_k1 sum_k2 B^T[i][k1]*d[k1][k2][c]*B^T[j][k2]
+        float U_scalar[36 * 3];
+        for (int i = 0; i < 6; i++) {
+            for (int j = 0; j < 6; j++) {
+                for (int c = 0; c < IC; c++) {
+                    float val = 0.0f;
+                    for (int k1 = 0; k1 < 6; k1++) {
+                        for (int k2 = 0; k2 < 6; k2++) {
+                            val += F44_Bt::val[i][k1] * d[(k1*6+k2)*IC + c] * F44_Bt::val[j][k2];
+                        }
+                    }
+                    U_scalar[(i*6+j)*IC + c] = val;
+                }
+            }
+        }
+
+        float err = max_error(U_neon, U_scalar, 36 * IC);
+        printf("  Max error: %.6f  %s\n", err, err < 1e-4 ? "PASS" : "FAIL");
+        if (err >= 1e-4) {
+            for (int m = 0; m < 10 && m < 36; m++) {
+                for (int c = 0; c < IC; c++) {
+                    if (fabs(U_neon[m*IC+c] - U_scalar[m*IC+c]) > 1e-4) {
+                        printf("  U[%d][%d]: neon=%.6f scalar=%.6f\n", m, c,
+                               U_neon[m*IC+c], U_scalar[m*IC+c]);
+                    }
+                }
+            }
+        }
     }
     printf("\n");
 
