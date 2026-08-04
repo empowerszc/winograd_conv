@@ -38,7 +38,7 @@ namespace winograd_conv {
 // The actual transform implementations are in the corresponding headers.
 
 // Weight transform dispatcher
-static void dispatch_weight_transform(
+void dispatch_weight_transform(
     const float* g, float* V, int channels,
     bool is_f44, ISALevel isa
 ) {
@@ -76,7 +76,7 @@ static void dispatch_weight_transform(
 }
 
 // Input transform dispatcher
-static void dispatch_input_transform(
+void dispatch_input_transform(
     const float* d, float* U, int channels,
     bool is_f44, ISALevel isa
 ) {
@@ -114,7 +114,7 @@ static void dispatch_input_transform(
 }
 
 // Output transform dispatcher
-static void dispatch_output_transform(
+void dispatch_output_transform(
     const float* M, float* f, int channels,
     const float* bias, float act_min, float act_max,
     bool is_f44, ISALevel isa

@@ -97,6 +97,21 @@ void winograd_convolution(
     float act_min = -1e30f, float act_max = 1e30f
 );
 
+// ISA-dispatched transform functions (for testing/debugging)
+void dispatch_weight_transform(
+    const float* g, float* V, int channels,
+    bool is_f44, ISALevel isa
+);
+void dispatch_input_transform(
+    const float* d, float* U, int channels,
+    bool is_f44, ISALevel isa
+);
+void dispatch_output_transform(
+    const float* M, float* f, int channels,
+    const float* bias, float act_min, float act_max,
+    bool is_f44, ISALevel isa
+);
+
 // Convenience wrappers
 inline void winograd_convolution_f22(
     const float* src, const float* wei, const float* bias, float* dst,
