@@ -211,8 +211,79 @@ int main(int argc, char** argv) {
                 }
             }
         }
-        if (errors == 0) printf("  Full pipeline: PASS\n");
-        else printf("  Full pipeline: %d errors\n", errors);
+        if (errors == 0) printf("  Full pipeline (direct): PASS\n");
+        else printf("  Full pipeline (direct): %d errors\n", errors);
+    }
+
+    // ---- Debug: check F(4,4,3,3) end-to-end via winograd_convolution ----
+    printf("--- F(4,4,3,3) End-to-End Debug ---\n");
+    {
+        // IC=1, OC=1, IH=4, IW=4
+        // Input: all zeros except input[0][0]=1
+        // Weight: g[0][0][0][0]=1, rest=0 (identity)
+        // Expected: y[1][1] = 1, all else 0 (with pad=1, stride=1)
+        float src[4] = {1,0,0,0};   // [1][1][4][4] but only need 4 values for IC=1
+        float wei[9] = {1,0,0, 0,0,0, 0,0,0};  // [1][1][3][3]
+        float bias_arr[1] = {0};
+        float dst[4] = {0,0,0,0};   // [1][1][4][4]
+
+        winograd_convolution_f44(src, wei, bias_arr, dst,
+                                  1, 1, 4, 4, 1, 4, 4,
+                                  -1e30f, 1e30f);
+
+        int errors = 0;
+        for (int i = 0; i < 4; i++) {
+            float expected = (i == 1) ? 1.0f : 0.0f;
+            if (fabs(dst[i] - expected) > 1e-3) {
+                printf("  dst[%d]: expected %.4f, got %.4f  ERROR\n", i, expected, dst[i]);
+                errors++;
+            }
+        }
+        if (errors == 0) printf("  End-to-end (IC=1): PASS\n");
+        else printf("  End-to-end (IC=1): %d errors\n", errors);
+    }
+
+    // ---- Debug: check F(4,4,3,3) end-to-end with IC=3 ----
+    printf("--- F(4,4,3,3) End-to-End IC=3 Debug ---\n");
+    {
+        // IC=3, OC=3, IH=4, IW=4
+        // Input: all zeros except input[0][ic][0][0]=1 for all ic
+        // Weight: wei[oc][ic][0][0]=1, rest=0 (each oc picks sum of all ic)
+        // Expected: y[1][1][oc] = 3 (sum of 3 input channels), all else 0
+        int IC=3, OC=3, IH=4, IW=4;
+        std::vector<float> src(IC * IH * IW, 0.0f);
+        for (int ic = 0; ic < IC; ic++)
+            src[ic * IH * IW + 0 * IW + 0] = 1.0f;  // input[0][ic][0][0] = 1
+
+        std::vector<float> wei(OC * IC * 9, 0.0f);
+        for (int oc = 0; oc < OC; oc++)
+            for (int ic = 0; ic < IC; ic++)
+                wei[(oc * IC + ic) * 9 + 0] = 1.0f;  // wei[oc][ic][0][0] = 1
+
+        std::vector<float> bias(OC, 0.0f);
+        std::vector<float> dst(OC * IH * IW, 0.0f);
+
+        winograd_convolution_f44(src.data(), wei.data(), bias.data(), dst.data(),
+                                  1, IC, IH, IW, OC, IH, IW,
+                                  -1e30f, 1e30f);
+
+        int errors = 0;
+        for (int oc = 0; oc < OC; oc++) {
+            for (int oh = 0; oh < IH; oh++) {
+                for (int ow = 0; ow < IW; ow++) {
+                    float expected = (oh == 1 && ow == 1) ? (float)IC : 0.0f;
+                    float got = dst[oc * IH * IW + oh * IW + ow];
+                    if (fabs(got - expected) > 1e-2) {
+                        if (errors < 10)  // limit output
+                            printf("  dst[oc=%d][%d][%d]: expected %.4f, got %.4f  ERROR\n",
+                                   oc, oh, ow, expected, got);
+                        errors++;
+                    }
+                }
+            }
+        }
+        if (errors == 0) printf("  End-to-end (IC=3): PASS\n");
+        else printf("  End-to-end (IC=3): %d errors\n", errors);
     }
     printf("\n");
 
