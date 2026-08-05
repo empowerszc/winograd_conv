@@ -98,7 +98,9 @@ make -j && ./test_winograd
 
 ## 关键设计决策
 
-1. **泛型 2D 变换**：`transform_2d_neon<OUT, IN>` 用同一矩阵做列变换和行变换，因为 Winograd 的 B 和 A 满足 `output = M * input * M^T`
+1. **统一矩阵定义**：所有 ISA（NEON/SVE/SME）共用 `winograd_matrices.hpp` 中的矩阵常量。修复矩阵只需改一处，三种 ISA 路径同时修复
+
+2. **泛型 2D 变换**：`transform_2d_neon<OUT, IN>` 用同一矩阵做列变换和行变换，因为 Winograd 的 B 和 A 满足 `output = M * input * M^T`
 
 2. **三层降级（NEON）**：NEON Q 寄存器固定 128-bit，无法用谓词处理 tail，写三份代码（4→2→1 通道）
 
@@ -109,6 +111,8 @@ make -j && ./test_winograd
 5. **权重变换用 NEON**：权重变换在 prepare 阶段做一次，非热路径，ACL 也只有 NEON 版
 
 6. **bias + ReLU 在变换内部**：输出变换函数内部添加 bias 并 clamp，避免端到端函数重复添加
+
+7. **矩阵验证方法**：用 Winograd 多项式条件 `sum_j A^T[i][j]·B^T[j][a]·G[j][b] = C·delta(a, i+b)` 数值验证矩阵正确性。当矩阵来源不可靠时，可用求解器从 A^T 和 G 反解出正确的 B^T
 
 ## 已知限制
 
@@ -122,8 +126,9 @@ make -j && ./test_winograd
 
 | 日期 | 问题 | 根因 |
 |------|------|------|
+| 2026-08 | F44 全部失败 | F44_Bt 矩阵 5 个元素错误（B^T[3][2], B^T[4][2], B^T[5][1,2,3]），违反 Winograd 多项式条件。用数值求解器从 A^T 和 G 反解出正确 B^T |
 | 2026-08 | F22 全部失败 | F22_A 矩阵 [1][1] 符号错误（-1 应为 +1） |
-| 2026-08 | F44 全部失败 | weight_transform_neon 冗余外层 k 循环导致 vld1q 越界读取（UB） |
+| 2026-08 | F44 OOB 读取 | weight_transform_neon 冗余外层 k 循环导致 vld1q 越界读取（UB） |
 | 2026-08 | segfault | transform_2d_neon CHANNELS 模板参数未传，默认 0，零大小数组 |
 | 2026-08 | SME bias 翻倍 | 输出变换内部已加 bias，端到端函数又加一次 |
 | 2026-08 | 权重变换标量 | dispatch_weight_transform 已定义但未调用 |
