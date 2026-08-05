@@ -1,13 +1,11 @@
 // winograd_transforms_sve.hpp - SVE intrinsics 变换实现
 //
-// 用 ARM SVE (Scalable Vector Extension) intrinsics 实现 Winograd 三步变换。
-// SVE 的核心优势：
-//   1. 向量长度可伸缩（SVE-512 时 16 个 float/指令，vs NEON 的 4 个）
-//   2. 谓词（predicate）自动处理 tail，无需降级到窄路径
+// �?ARM SVE (Scalable Vector Extension) intrinsics 实现 Winograd 三步变换�?// SVE 的核心优势：
+//   1. 向量长度可伸缩（SVE-512 �?16 �?float/指令，vs NEON �?4 个）
+//   2. 谓词（predicate）自动处�?tail，无需降级到窄路径
 //   3. whilelt 指令设置谓词，循环无分支
 //
-// 对应 ACL 的 sve_fp32_6x6.cpp 和 sme_fp32_mla_6x6.cpp（SME 版 = SVE + SMSTART）
-//
+// 对应 ACL �?sve_fp32_6x6.cpp �?sme_fp32_mla_6x6.cpp（SME �?= SVE + SMSTART�?//
 // Part of the winograd_conv project.
 
 #pragma once
@@ -34,17 +32,19 @@ static inline int sve_count() {
     return svcntw();  // count of 32-bit words per vector
 }
 
-// SVE 谓词：设置 p0[i] = (start + i < total)
+// SVE 谓词：设�?p0[i] = (start + i < total)
 static inline svbool_t sve_whilelt(int start, int total) {
     return svwhilelt_b32_s32(start, total);
+}
+
+// SVE 谓词非空检查：svptest_first 需�?2 个谓词参�?static inline bool sve_any(svbool_t pg) {
+    return svptest_first(svptrue_b32(), pg);
 }
 
 // ============================================================================
 // SVE 1D 变换：output[OUT_SIZE][channels] = M * input[IN_SIZE][channels]
 // ============================================================================
-// 用 SVE 谓词自动处理 channels 不是 VL 整数倍的情况。
-// 每条 fmla 处理 VL 个通道（SVE-512 时 16 个），无分支 tail 处理。
-
+// �?SVE 谓词自动处理 channels 不是 VL 整数倍的情况�?// 每条 fmla 处理 VL 个通道（SVE-512 �?16 个），无分支 tail 处理�?
 template <int OUT_SIZE, int IN_SIZE>
 void transform_1d_sve(
     const float matrix[OUT_SIZE][IN_SIZE],
@@ -75,7 +75,7 @@ void transform_1d_sve(
                     svst1_f32(pg, out_row + c, result);
                     c += sve_count();
                     pg = sve_whilelt(c, channels);
-                } while (svptest_first(pg));
+                } while (sve_any(pg));
                 first = false;
             } else {
                 // Accumulate: output += coef * input[k]
@@ -87,7 +87,7 @@ void transform_1d_sve(
                     svst1_f32(pg, out_row + c, acc);
                     c += sve_count();
                     pg = sve_whilelt(c, channels);
-                } while (svptest_first(pg));
+                } while (sve_any(pg));
             }
         }
 
@@ -99,7 +99,7 @@ void transform_1d_sve(
                 svst1_f32(pg, out_row + c, svdup_n_f32(0.0f));
                 c += sve_count();
                 pg = sve_whilelt(c, channels);
-            } while (svptest_first(pg));
+            } while (sve_any(pg));
         }
     }
 }
@@ -190,7 +190,7 @@ void weight_transform_sve(
 
         c += sve_count();
         pg = sve_whilelt(c, channels);
-    } while (svptest_first(pg));
+    } while (sve_any(pg));
 }
 
 // ============================================================================
@@ -248,7 +248,7 @@ void output_transform_sve(
                 svst1_f32(pg, fptr + c, v);
                 c += sve_count();
                 pg = sve_whilelt(c, channels);
-            } while (svptest_first(pg));
+            } while (sve_any(pg));
         }
     }
 }

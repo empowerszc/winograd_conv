@@ -18,6 +18,10 @@
 #include <cstdlib>
 #include <arm_neon.h>
 
+#ifdef USE_OPENBLAS
+#include <cblas.h>
+#endif
+
 // Include ISA-specific transform implementations
 #include "winograd_transforms.hpp"           // NEON (always available on AArch64)
 
@@ -153,16 +157,11 @@ void dispatch_output_transform(
 }
 
 // ============================================================================
-// Simple batched GEMM for Winograd domain
+// Batched GEMM for Winograd domain
 // ============================================================================
 // M[n][oc] = sum_ic U[n][ic] * V[oc][ic]
-//
-// TODO: Replace with OpenBLAS cblas_sgemm for production use:
-//   cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-//               n_tiles, OC, IC, 1.0f, U_slice, IC, V_slice, IC, 0.0f, M_slice, OC);
-//
-// The key insight: this GEMM is called n_multis times (16 for F(2,2,3,3),
-// 36 for F(4,4,3,3)), once per Winograd domain element.
+// This is M[n_tiles x OC] = U[n_tiles x IC] * V[OC x IC]^T
+// Called n_multis times (16 for F(2,2,3,3), 36 for F(4,4,3,3)).
 
 void winograd_gemm(
     const float* U,   // [n_tiles][IC]
@@ -172,8 +171,14 @@ void winograd_gemm(
     int OC,
     int IC
 ) {
-    // Naive GEMM: M = U * V^T
-    // For each output tile and output channel, accumulate over input channels
+#ifdef USE_OPENBLAS
+    // M = U * V^T  (U: n_tiles×IC, V: OC×IC, result: n_tiles×OC)
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                n_tiles, OC, IC,
+                1.0f, U, IC, V, IC,
+                0.0f, M, OC);
+#else
+    // Naive fallback: triple loop
     for (int t = 0; t < n_tiles; t++) {
         for (int oc = 0; oc < OC; oc++) {
             float sum = 0.0f;
@@ -183,6 +188,7 @@ void winograd_gemm(
             M[t * OC + oc] = sum;
         }
     }
+#endif
 }
 
 // ============================================================================

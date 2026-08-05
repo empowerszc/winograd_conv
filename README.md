@@ -42,11 +42,14 @@ cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_SVE=ON
 # 启用 SME（包含 SVE）
 cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_SME=ON
 
-# 启用 OpenMP 多线程
-cmake .. -DENABLE_OPENMP=ON
+# 启用 OpenBLAS 高性能 GEMM（需要 openblas-dev）
+cmake .. -DUSE_OPENBLAS=ON
+
+# 指定 OpenBLAS 路径
+cmake .. -DUSE_OPENBLAS=ON -DOPENBLAS_ROOT=/usr/local/openblas
 
 # 全部启用
-cmake .. -DENABLE_SME=ON -DENABLE_OPENMP=ON
+cmake .. -DENABLE_SME=ON -DENABLE_OPENMP=ON -DUSE_OPENBLAS=ON
 
 make -j
 ```

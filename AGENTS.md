@@ -70,12 +70,19 @@ cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_SVE=ON
 # SME (包含 SVE)
 cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_SME=ON
 
+# OpenBLAS GEMM（推荐）
+cmake .. -DUSE_OPENBLAS=ON
+
+# 全部启用
+cmake .. -DENABLE_SME=ON -DENABLE_OPENMP=ON -DUSE_OPENBLAS=ON
+
 make -j && ./test_winograd
 ```
 
-**关键**：`-DENABLE_SME=ON` 会让编译器使用 `-march=armv9-a+sme`，编译器会自动定义 `__ARM_FEATURE_SME` 和 `__ARM_FEATURE_SVE`。不能手动 `#define` 这些宏——它们是编译器内部宏，由 `-march` 触发。
-
-**修改 CMakeLists.txt 后必须 `rm -rf build` 清缓存**，否则旧配置残留。
+**关键**：
+- `__ARM_FEATURE_SVE`/`__ARM_FEATURE_SME` 是编译器内部宏，由 `-march` 触发，不能手动 `#define`
+- 修改 CMakeLists.txt 后必须 `rm -rf build` 清缓存
+- OpenBLAS 需要 `cblas.h` 头文件和 `libopenblas` 库。如系统未安装：`apt install libopenblas-dev`
 
 ## 测试
 
@@ -126,7 +133,7 @@ cat shapes.csv | ./bench_winograd --neon
 
 ## 已知限制
 
-1. **GEMM 是 naive 三重循环**：生产环境需替换为 OpenBLAS `cblas_sgemm` 或 arm_gemm
+1. **GEMM 默认 naive**：生产环境需启用 `-DUSE_OPENBLAS=ON` 替换为 `cblas_sgemm`
 2. **无 prepare/execute 分离**：权重变换每次调用都重做（应预计算一次）
 3. **NCHW 布局**：通道维度非连续，tile 提取和输出写回是标量（无法向量化）
 4. **无多线程**：CMake 有 OpenMP 选项但未使用 `#pragma omp`
