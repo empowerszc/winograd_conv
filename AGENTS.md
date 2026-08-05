@@ -41,7 +41,8 @@ Winograd 卷积复刻项目：基于 ACL（Arm Compute Library）的算法思路
 | `winograd_transforms_sme.hpp` | SME 变换 | `input_transform_sme<>`, `sme_output_transform_f44()` |
 | `winograd_convolution.hpp` | 端到端接口 | `winograd_convolution()`, `dispatch_*()` |
 | `winograd_conv.cpp` | 端到端实现 | `winograd_gemm()`, `direct_convolution_3x3()` |
-| `test_winograd.cpp` | 验证测试 | `run_test()`, 变换级调试 |
+| `test_winograd.cpp` | 正确性验证 | `run_test()`, 变换级调试 |
+| `bench_winograd.cpp` | 性能基准 | CSV 解析, GFLOPS 测量 |
 
 ### ISA 调度
 
@@ -57,29 +58,38 @@ dispatch_output_transform(M, f, OC, bias, act_min, act_max, is_f44, isa);
 ## 构建
 
 ```bash
+# 重要：必须清除旧缓存
+rm -rf build && mkdir build && cd build
+
 # NEON only (默认)
 cmake .. -DCMAKE_BUILD_TYPE=Release
 
 # SVE
-cmake .. -DENABLE_SVE=ON
+cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_SVE=ON
 
 # SME (包含 SVE)
-cmake .. -DENABLE_SME=ON
+cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_SME=ON
 
 make -j && ./test_winograd
 ```
 
-**重要**：SME 输出变换使用内联汇编（`.inst` 编码的 FMOPA/MOVA），必须在编译时启用 SME（`-DENABLE_SME=ON`），且目标 CPU 必须支持 SME。
+**关键**：`-DENABLE_SME=ON` 会让编译器使用 `-march=armv9-a+sme`，编译器会自动定义 `__ARM_FEATURE_SME` 和 `__ARM_FEATURE_SVE`。不能手动 `#define` 这些宏——它们是编译器内部宏，由 `-march` 触发。
+
+**修改 CMakeLists.txt 后必须 `rm -rf build` 清缓存**，否则旧配置残留。
 
 ## 测试
 
 ```bash
+# 正确性验证
 ./test_winograd              # 全部测试
-./test_winograd --neon       # 强制 NEON
-./test_winograd --sve        # 强制 SVE
-./test_winograd --sme        # 强制 SME
+./test_winograd --sme        # 强制 SME（需要 -DENABLE_SME=ON 编译）
 ./test_winograd --f44        # 只测 F(4,4,3,3)
 ./test_winograd --relu       # 测 ReLU
+
+# 性能基准（读 CSV，自动过滤 stride=1 group=1 3x3）
+./bench_winograd --sme shapes.csv
+./bench_winograd --sve --warmup 5 --repeats 20 shapes.csv
+cat shapes.csv | ./bench_winograd --neon
 ```
 
 测试包含：

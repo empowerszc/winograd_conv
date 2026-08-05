@@ -21,7 +21,8 @@ winograd_conv/
 ├── src/
 │   └── winograd_conv.cpp                  ← 端到端实现 + GEMM + 直接卷积 + dispatch
 └── tests/
-    └── test_winograd.cpp                  ← 正确性验证 + 变换调试
+    ├── test_winograd.cpp                  ← 正确性验证 + 变换调试
+    └── bench_winograd.cpp                 ← 性能基准（读 CSV，测 GFLOPS）
 ```
 
 ## 快速开始
@@ -29,7 +30,8 @@ winograd_conv/
 ### 编译（AArch64 环境）
 
 ```bash
-mkdir build && cd build
+# 重要：必须清除旧缓存，否则 CMake 会用旧的 CMakeLists.txt 配置
+rm -rf build && mkdir build && cd build
 
 # 默认：NEON only
 cmake .. -DCMAKE_BUILD_TYPE=Release
@@ -44,10 +46,12 @@ cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_SME=ON
 cmake .. -DENABLE_OPENMP=ON
 
 # 全部启用
-cmake .. -DENABLE_SVE=ON -DENABLE_SME=ON -DENABLE_OPENMP=ON
+cmake .. -DENABLE_SME=ON -DENABLE_OPENMP=ON
 
 make -j
 ```
+
+> **注意**：修改 CMakeLists.txt 后必须清除缓存（`rm -rf build`），否则旧的编译选项不会更新。
 
 ### 运行验证
 
@@ -55,47 +59,45 @@ make -j
 # 自动检测 ISA
 ./test_winograd
 
-# 强制使用 NEON
-./test_winograd --neon
-
-# 强制使用 SVE（需要 SVE 编译）
-./test_winograd --sve
-
-# 强制使用 SME（需要 SME 编译）
+# 强制使用 SME（需要 -DENABLE_SME=ON 编译）
 ./test_winograd --sme
 
 # 或通过环境变量
-WINOGRAD_ISA=sve ./test_winograd
 WINOGRAD_ISA=sme ./test_winograd
-
-# 其他选项
-./test_winograd --f22    # 只测 F(2,2,3,3)
-./test_winograd --f44    # 只测 F(4,4,3,3)
-./test_winograd --relu   # 测 ReLU 激活
-./test_winograd --help   # 帮助
 ```
 
-预期输出：
+### 运行性能测试
+
+```bash
+# 准备 shapes 文件（tab 分隔，第一行是表头）
+# 格式：Input Shape  Weight Shape  Stride  Pad  Dil  Grp  Count
+# 自动过滤 stride=1, group=1, 3x3 kernel 的行
+
+# 用 SME 测试
+./bench_winograd --sme shapes.csv
+
+# 用 SVE 测试
+./bench_winograd --sve shapes.csv
+
+# 用 NEON 测试
+./bench_winograd --neon shapes.csv
+
+# 从 stdin 读取
+cat shapes.csv | ./bench_winograd --sme
+
+# 调整 warmup/repeats
+./bench_winograd --sme --warmup 5 --repeats 20 shapes.csv
 ```
-=== Winograd Convolution Verification ===
-Using ISA: NEON (detected: NEON)
 
---- F(4,4,3,3) Weight Transform Debug ---
-  Weight transform: PASS
---- F(4,4,3,3) Input Transform Debug ---
-  Input transform: PASS
---- F(4,4,3,3) Full Pipeline Debug ---
-  Full pipeline: PASS
+输出示例：
+```
+ISA: SME (detected: SME)
 
---- F(2,2,3,3) Tests ---
-  Test: N=1 IC=3 IH=4 IW=4 OC=3 OH=4 OW=4 F(2,2,3,3)
-    Max error: 0.000002  PASS
-  ...
---- F(4,4,3,3) Tests ---
-  Test: N=1 IC=3 IH=4 IW=4 OC=3 OH=4 OW=4 F(4,4,3,3)
-    Max error: 0.000002  PASS
-  ...
-=== Summary: 12/12 tests passed ===
+Shape (N,IC,IH,IW)              (OC,IC,3,3)          Count   Time(ms)      GFLOPS        ISA
+----------------------------------------------------------------------------------------------------
+(4, 192, 40, 40)                (192, 192, 3, 3)        24     XX.XX       XX.XX        SME
+(4, 96, 80, 80)                 (96, 96, 3, 3)          17     XX.XX       XX.XX        SME
+...
 ```
 
 ## 算法概述

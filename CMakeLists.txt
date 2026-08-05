@@ -5,33 +5,23 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ISA selection options
-option(ENABLE_SVE "Enable SVE intrinsics (requires SVE-capable CPU)" OFF)
-option(ENABLE_SME "Enable SME intrinsics (requires SME-capable CPU)" OFF)
+option(ENABLE_SVE "Enable SVE (-march=armv8.6-a+sve2)" OFF)
+option(ENABLE_SME "Enable SME+SVE (-march=armv9-a+sme)" OFF)
 option(ENABLE_OPENMP "Enable OpenMP threading" OFF)
 
-# Detect AArch64 platform
-set(IS_AARCH64 OFF)
-if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
-    set(IS_AARCH64 ON)
-elseif(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "aarch64" OR CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm64")
-    set(IS_AARCH64 ON)
-endif()
+# Base optimization
+add_compile_options(-O3 -g)
 
-if(IS_AARCH64)
-    add_compile_options(-O3 -g)
-
-    if(ENABLE_SME)
-        # SME requires Armv9 + SME (implies SVE in streaming mode)
-        add_compile_options(-march=armv9-a+sme)
-        message(STATUS "SME+SVE enabled (-march=armv9-a+sme)")
-    elseif(ENABLE_SVE)
-        add_compile_options(-march=armv8.6-a+sve2)
-        message(STATUS "SVE enabled (-march=armv8.6-a+sve2)")
-    else()
-        message(STATUS "Using NEON only (default)")
-    endif()
+# ISA flags — applied directly, no platform detection needed.
+# If compiler doesn't support the -march, it will error (expected behavior).
+if(ENABLE_SME)
+    add_compile_options(-march=armv9-a+sme)
+    message(STATUS "=== SME+SVE enabled (-march=armv9-a+sme) ===")
+elseif(ENABLE_SVE)
+    add_compile_options(-march=armv8.6-a+sve2)
+    message(STATUS "=== SVE enabled (-march=armv8.6-a+sve2) ===")
 else()
-    message(WARNING "Not AArch64 platform; ISA options ignored")
+    message(STATUS "=== NEON only (default) ===")
 endif()
 
 # OpenMP support
@@ -45,16 +35,14 @@ endif()
 # Include directories
 include_directories(include)
 
-# Library target
-add_library(winograd_conv STATIC
-    src/winograd_conv.cpp
-)
+# Library
+add_library(winograd_conv STATIC src/winograd_conv.cpp)
 
-# Test executable
+# Test
 add_executable(test_winograd tests/test_winograd.cpp)
 target_link_libraries(test_winograd winograd_conv)
 
-# Benchmark executable
+# Benchmark
 add_executable(bench_winograd tests/bench_winograd.cpp)
 target_link_libraries(bench_winograd winograd_conv)
 
