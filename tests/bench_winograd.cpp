@@ -152,10 +152,10 @@ int main(int argc, char** argv) {
     printf("\n\n");
 
     int ncols = thread_counts.size() * 2;
-    printf("#  %-4s %-5s %-5s %-5s %-5s %-3s %-3s %-3s %-3s %-4s",
-           "MB", "IC", "IH", "IW", "OC", "KH", "KW", "SH", "SW", "CNT");
+    printf("#  %-4s %-5s %-5s %-5s %-5s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-4s",
+           "MB", "IC", "IH", "IW", "OC", "KH", "KW", "SH", "SW", "PH", "PW", "DH", "DW", "GRP");
     for (int t : thread_counts)
-        printf(" %s_t%d(ms) %s_GFLOPS", isa_name(isa), t, isa_name(isa));
+        printf(" %s_t%d(ms) %s_t%d_GFLOPS", isa_name(isa), t, isa_name(isa), t);
     printf("\n");
 
     int row = 0;
@@ -173,8 +173,9 @@ int main(int argc, char** argv) {
 
         double flops = 2.0 * N * OC * OH * OW * IC * 9.0;
 
-        printf("%-3d %-4d %-5d %-5d %-5d %-5d %-3d %-3d %-3d %-3d %-4d",
-               row, N, IC, IH, IW, OC, s.kh, s.kw, s.stride_h, s.stride_w, s.count);
+        printf("%-3d %-4d %-5d %-5d %-5d %-5d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-4d",
+               row, N, IC, IH, IW, OC, s.kh, s.kw, s.stride_h, s.stride_w,
+               s.pad_h, s.pad_w, s.dil_h, s.dil_w, s.grp, s.count);
 
         for (int nt : thread_counts) {
 #ifdef ENABLE_OPENMP
