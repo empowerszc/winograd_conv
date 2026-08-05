@@ -1,18 +1,21 @@
 // bench_winograd.cpp - Performance benchmark for Winograd convolution
 //
-// Reads shapes from stdin or a file, filters for stride=1, group=1,
-// and benchmarks F(4,4,3,3) Winograd convolution.
+// Reads shapes from a CSV file, filters for stride=1, group=1, 3x3 kernel,
+// and benchmarks F(4,4,3,3) Winograd convolution across different thread counts.
 //
 // Usage:
-//   ./bench_winograd shapes.csv           # read from file
-//   cat shapes.csv | ./bench_winograd     # read from stdin
-//   ./bench_winograd --neon shapes.csv    # force NEON
-//   ./bench_winograd --sve shapes.csv     # force SVE
-//   ./bench_winograd --sme shapes.csv      # force SME
+//   ./bench_winograd [options] shapes.csv
 //
-// CSV format (tab-separated, first line is header):
-//   Input Shape    Weight Shape    Stride    Pad    Dil    Grp    Count
-//   (4, 192, 40, 40)    (192, 192, 3, 3)    [1, 1]    [1, 1]    [1, 1]    1    24
+// Options:
+//   --neon / --sve / --sme   Select ISA
+//   --warmup N               Warmup iterations (default 3)
+//   --repeats N              Timed iterations (default 10)
+//   --threads t1,t2,...      Thread counts to test (default: 1,8,16,32,38)
+//   --output result.csv      Write results to CSV file
+//   --help                   Show help
+//
+// Input CSV format (comma-separated, first line is header):
+//   mb,ic,ih,iw,oc,kh,kw,stride_h,stride_w,pad_h,pad_w,dil_h,dil_w,grp,count
 //
 // Part of the winograd_conv project.
 
@@ -26,41 +29,75 @@
 #include <sstream>
 #include <chrono>
 #include <algorithm>
+#include <fstream>
+#include <iomanip>
+
+#ifdef ENABLE_OPENMP
+#include <omp.h>
+#endif
 
 using namespace winograd_conv;
 
-// Parse a tuple like "(4, 192, 40, 40)" into 4 ints
-bool parse_tuple4(const std::string& s, int& a, int& b, int& c, int& d) {
-    char open_paren, close_paren, comma1, comma2, comma3;
-    std::istringstream iss(s);
-    iss >> open_paren >> a >> comma1 >> b >> comma2 >> c >> comma3 >> d >> close_paren;
-    return open_paren == '(' && close_paren == ')' &&
-           comma1 == ',' && comma2 == ',' && comma3 == ',';
-}
-
-// Parse a bracket pair like "[1, 1]" into 2 ints
-bool parse_bracket2(const std::string& s, int& a, int& b) {
-    char open_b, close_b, comma;
-    std::istringstream iss(s);
-    iss >> open_b >> a >> comma >> b >> close_b;
-    return open_b == '[' && close_b == ']' && comma == ',';
-}
-
 struct ShapeInfo {
-    int N, IC, IH, IW;
-    int OC, WIC, KH, KW;
-    int stride_h, stride_w;
-    int pad_h, pad_w;
-    int dil_h, dil_w;
-    int group;
-    int count;
+    int mb, ic, ih, iw, oc, kh, kw;
+    int stride_h, stride_w, pad_h, pad_w, dil_h, dil_w, grp, count;
 };
+
+std::vector<std::string> split_csv(const std::string& line) {
+    std::vector<std::string> fields;
+    std::string field;
+    for (char ch : line) {
+        if (ch == ',') { fields.push_back(field); field.clear(); }
+        else if (ch != '\r' && ch != '\n') field += ch;
+    }
+    if (!field.empty()) fields.push_back(field);
+    return fields;
+}
+
+bool read_shapes(const std::string& filename, std::vector<ShapeInfo>& shapes) {
+    std::ifstream fin(filename);
+    if (!fin) {
+        fprintf(stderr, "Cannot open %s\n", filename.c_str());
+        return false;
+    }
+    std::string line;
+    std::getline(fin, line); // header
+    while (std::getline(fin, line)) {
+        if (line.empty()) continue;
+        auto f = split_csv(line);
+        if (f.size() < 15) continue;
+        ShapeInfo s;
+        s.mb = atoi(f[0].c_str());
+        s.ic = atoi(f[1].c_str());
+        s.ih = atoi(f[2].c_str());
+        s.iw = atoi(f[3].c_str());
+        s.oc = atoi(f[4].c_str());
+        s.kh = atoi(f[5].c_str());
+        s.kw = atoi(f[6].c_str());
+        s.stride_h = atoi(f[7].c_str());
+        s.stride_w = atoi(f[8].c_str());
+        s.pad_h = atoi(f[9].c_str());
+        s.pad_w = atoi(f[10].c_str());
+        s.dil_h = atoi(f[11].c_str());
+        s.dil_w = atoi(f[12].c_str());
+        s.grp = atoi(f[13].c_str());
+        s.count = atoi(f[14].c_str());
+
+        if (s.stride_h == 1 && s.stride_w == 1 && s.grp == 1 &&
+            s.kh == 3 && s.kw == 3 && s.pad_h == 1 && s.pad_w == 1) {
+            shapes.push_back(s);
+        }
+    }
+    return true;
+}
 
 int main(int argc, char** argv) {
     ISALevel isa = detect_isa();
     std::string input_file;
+    std::string output_file;
     int warmup = 3;
     int repeats = 10;
+    std::vector<int> thread_counts = {1, 8, 16, 32, 38};
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -69,13 +106,25 @@ int main(int argc, char** argv) {
         else if (arg == "--sme") isa = ISALevel::SME;
         else if (arg == "--warmup" && i+1 < argc) { warmup = atoi(argv[++i]); }
         else if (arg == "--repeats" && i+1 < argc) { repeats = atoi(argv[++i]); }
+        else if (arg == "--threads" && i+1 < argc) {
+            thread_counts.clear();
+            std::string t = argv[++i];
+            std::string num;
+            for (char ch : t) {
+                if (ch == ',') { if (!num.empty()) { thread_counts.push_back(atoi(num.c_str())); num.clear(); } }
+                else num += ch;
+            }
+            if (!num.empty()) thread_counts.push_back(atoi(num.c_str()));
+        }
+        else if (arg == "--output" && i+1 < argc) { output_file = argv[++i]; }
         else if (arg == "--help") {
-            printf("Usage: %s [options] [shapes_file]\n", argv[0]);
+            printf("Usage: %s [options] shapes.csv\n", argv[0]);
             printf("Options:\n");
-            printf("  --neon / --sve / --sme  Select ISA\n");
-            printf("  --warmup N              Warmup iterations (default 3)\n");
-            printf("  --repeats N             Repeat iterations (default 10)\n");
-            printf("  --help                  Show this help\n");
+            printf("  --neon / --sve / --sme   Select ISA\n");
+            printf("  --warmup N               Warmup iterations (default 3)\n");
+            printf("  --repeats N              Timed iterations (default 10)\n");
+            printf("  --threads t1,t2,...      Thread counts (default 1,8,16,32,38)\n");
+            printf("  --output result.csv      Write results to CSV file\n");
             return 0;
         } else {
             input_file = arg;
@@ -86,104 +135,126 @@ int main(int argc, char** argv) {
         isa = parse_isa(env);
     }
     set_isa_level(isa);
-    printf("ISA: %s (detected: %s)\n\n", isa_name(isa), isa_name(detect_isa()));
 
-    // Read shapes
-    FILE* fp = input_file.empty() ? stdin : fopen(input_file.c_str(), "r");
-    if (!fp) {
-        fprintf(stderr, "Cannot open %s\n", input_file.c_str());
-        return 1;
-    }
-
-    char line[512];
-    // Skip header
-    if (!fgets(line, sizeof(line), fp)) {
-        fprintf(stderr, "Empty input\n");
+    if (input_file.empty()) {
+        fprintf(stderr, "Usage: %s [options] shapes.csv\n", argv[0]);
         return 1;
     }
 
     std::vector<ShapeInfo> shapes;
-    while (fgets(line, sizeof(line), fp)) {
-        // Parse: Input Shape, Weight Shape, Stride, Pad, Dil, Grp, Count
-        // Tab-separated
-        std::vector<std::string> fields;
-        char* p = line;
-        char* start = p;
-        while (*p) {
-            if (*p == '\t' || *p == '\n') {
-                *p = '\0';
-                fields.push_back(start);
-                start = p + 1;
-            }
-            p++;
-        }
-        if (*start) fields.push_back(start);
+    if (!read_shapes(input_file, shapes)) return 1;
 
-        if (fields.size() < 7) continue;
+    printf("ISA: %s (detected: %s)\n", isa_name(isa), isa_name(detect_isa()));
+    printf("Warmup: %d, Repeats: %d\n", warmup, repeats);
+    printf("Threads: ");
+    for (size_t i = 0; i < thread_counts.size(); i++)
+        printf("%s%d", i ? "," : "", thread_counts[i]);
+    printf("\n\n");
 
-        ShapeInfo s;
-        if (!parse_tuple4(fields[0], s.N, s.IC, s.IH, s.IW)) continue;
-        if (!parse_tuple4(fields[1], s.OC, s.WIC, s.KH, s.KW)) continue;
-        if (!parse_bracket2(fields[2], s.stride_h, s.stride_w)) continue;
-        if (!parse_bracket2(fields[3], s.pad_h, s.pad_w)) continue;
-        if (!parse_bracket2(fields[4], s.dil_h, s.dil_w)) continue;
-        s.group = atoi(fields[5].c_str());
-        s.count = atoi(fields[6].c_str());
+    int ncols = thread_counts.size() * 2;
+    printf("#  %-4s %-5s %-5s %-5s %-5s %-3s %-3s %-3s %-3s %-4s",
+           "MB", "IC", "IH", "IW", "OC", "KH", "KW", "SH", "SW", "CNT");
+    for (int t : thread_counts)
+        printf(" %s_t%d(ms) %s_GFLOPS", isa_name(isa), t, isa_name(isa));
+    printf("\n");
 
-        // Filter: stride=1, group=1, 3x3 kernel
-        if (s.stride_h == 1 && s.stride_w == 1 && s.group == 1 &&
-            s.KH == 3 && s.KW == 3) {
-            shapes.push_back(s);
-        }
-    }
-    if (fp != stdin) fclose(fp);
-
-    printf("%-45s %-20s %8s %12s %12s %10s\n",
-           "Shape (N,IC,IH,IW)", "(OC,IC,3,3)", "Count", "Time(ms)", "GFLOPS", "ISA");
-    printf("%s\n", std::string(120, '-').c_str());
-
+    int row = 0;
     for (const auto& s : shapes) {
-        int N = s.N, IC = s.IC, IH = s.IH, IW = s.IW;
-        int OC = s.OC, OH = IH, OW = IW;
+        int N = s.mb, IC = s.ic, IH = s.ih, IW = s.iw;
+        int OC = s.oc, OH = IH, OW = IW;
 
-        // Allocate
         int src_size = N * IC * IH * IW;
         int wei_size = OC * IC * 3 * 3;
         int dst_size = N * OC * OH * OW;
 
         std::vector<float> src(src_size), wei(wei_size), bias(OC, 0.0f), dst(dst_size);
-
-        // Fill with random data
         for (auto& v : src) v = static_cast<float>(rand()) / RAND_MAX;
         for (auto& v : wei) v = static_cast<float>(rand()) / RAND_MAX;
 
-        // Warmup
-        for (int i = 0; i < warmup; i++) {
-            winograd_convolution_f44(src.data(), wei.data(), bias.data(), dst.data(),
-                                      N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f);
-        }
-
-        // Benchmark
-        double best_ms = 1e30;
-        for (int i = 0; i < repeats; i++) {
-            auto t0 = std::chrono::high_resolution_clock::now();
-            winograd_convolution_f44(src.data(), wei.data(), bias.data(), dst.data(),
-                                      N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f);
-            auto t1 = std::chrono::high_resolution_clock::now();
-            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            best_ms = std::min(best_ms, ms);
-        }
-
-        // GFLOPS = 2 * N * OC * OH * OW * IC * 9 / time
         double flops = 2.0 * N * OC * OH * OW * IC * 9.0;
-        double gflops = flops / (best_ms * 1e-3) / 1e9;
 
-        char shape_str[64], wshape_str[32];
-        snprintf(shape_str, sizeof(shape_str), "(%d, %d, %d, %d)", N, IC, IH, IW);
-        snprintf(wshape_str, sizeof(wshape_str), "(%d, %d, 3, 3)", OC, IC);
+        printf("%-3d %-4d %-5d %-5d %-5d %-5d %-3d %-3d %-3d %-3d %-4d",
+               row, N, IC, IH, IW, OC, s.kh, s.kw, s.stride_h, s.stride_w, s.count);
 
-        printf("%-45s %-20s %8d %10.2f %12.2f %10s\n",
-               shape_str, wshape_str, s.count, best_ms, gflops, isa_name(isa));
+        for (int nt : thread_counts) {
+#ifdef ENABLE_OPENMP
+            omp_set_num_threads(nt);
+#endif
+            // Warmup
+            for (int i = 0; i < warmup; i++) {
+                winograd_convolution_f44(src.data(), wei.data(), bias.data(), dst.data(),
+                                          N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f);
+            }
+
+            // Benchmark
+            double best_ms = 1e30;
+            for (int i = 0; i < repeats; i++) {
+                auto t0 = std::chrono::high_resolution_clock::now();
+                winograd_convolution_f44(src.data(), wei.data(), bias.data(), dst.data(),
+                                          N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f);
+                auto t1 = std::chrono::high_resolution_clock::now();
+                double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                best_ms = std::min(best_ms, ms);
+            }
+
+            double gflops = flops / (best_ms * 1e-3) / 1e9;
+            printf(" %10.3f %10.2f", best_ms, gflops);
+        }
+        printf("\n");
+        row++;
+    }
+
+    // Write results to CSV file
+    if (!output_file.empty()) {
+        std::ofstream fout(output_file);
+        fout << "row,mb,ic,ih,iw,oc,kh,kw,stride_h,stride_w,pad_h,pad_w,dil_h,dil_w,grp,count,isa";
+        for (int t : thread_counts)
+            fout << ",t" << t << "_ms,t" << t << "_gflops";
+        fout << "\n";
+
+        row = 0;
+        for (const auto& s : shapes) {
+            int N = s.mb, IC = s.ic, IH = s.ih, IW = s.iw;
+            int OC = s.oc, OH = IH, OW = IW;
+
+            std::vector<float> src(N * IC * IH * IW), wei(OC * IC * 9), bias(OC, 0.0f), dst(N * OC * OH * OW);
+            for (auto& v : src) v = static_cast<float>(rand()) / RAND_MAX;
+            for (auto& v : wei) v = static_cast<float>(rand()) / RAND_MAX;
+
+            double flops = 2.0 * N * OC * OH * OW * IC * 9.0;
+
+            fout << row << "," << N << "," << IC << "," << IH << "," << IW << ","
+                 << OC << "," << s.kh << "," << s.kw << ","
+                 << s.stride_h << "," << s.stride_w << ","
+                 << s.pad_h << "," << s.pad_w << ","
+                 << s.dil_h << "," << s.dil_w << ","
+                 << s.grp << "," << s.count << "," << isa_name(isa);
+
+            for (int nt : thread_counts) {
+#ifdef ENABLE_OPENMP
+                omp_set_num_threads(nt);
+#endif
+                for (int i = 0; i < warmup; i++) {
+                    winograd_convolution_f44(src.data(), wei.data(), bias.data(), dst.data(),
+                                              N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f);
+                }
+                double best_ms = 1e30;
+                for (int i = 0; i < repeats; i++) {
+                    auto t0 = std::chrono::high_resolution_clock::now();
+                    winograd_convolution_f44(src.data(), wei.data(), bias.data(), dst.data(),
+                                              N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f);
+                    auto t1 = std::chrono::high_resolution_clock::now();
+                    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                    best_ms = std::min(best_ms, ms);
+                }
+                double gflops = flops / (best_ms * 1e-3) / 1e9;
+                fout << "," << std::fixed << std::setprecision(3) << best_ms
+                     << "," << std::setprecision(2) << gflops;
+            }
+            fout << "\n";
+            row++;
+        }
+        printf("\nResults written to %s\n", output_file.c_str());
     }
 
     return 0;
