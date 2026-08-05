@@ -5,39 +5,33 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ISA selection options
-# At least NEON is always available on AArch64.
-# SVE and SME can be enabled independently or together.
 option(ENABLE_SVE "Enable SVE intrinsics (requires SVE-capable CPU)" OFF)
 option(ENABLE_SME "Enable SME intrinsics (requires SME-capable CPU)" OFF)
 option(ENABLE_OPENMP "Enable OpenMP threading" OFF)
 
-if(AARCH64)
-    # Base: NEON always on
-    add_compile_options(-O2 -g)
-    
-    if(ENABLE_SVE)
-        # SVE: add -march with sve feature
-        add_compile_options(-march=armv8.6-a+sve2)
-        add_compile_definitions(ARM_COMPUTE_ENABLE_SVE __ARM_FEATURE_SVE=1)
-        message(STATUS "SVE intrinsics enabled")
-    endif()
-    
+# Detect AArch64 platform
+set(IS_AARCH64 OFF)
+if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+    set(IS_AARCH64 ON)
+elseif(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "aarch64" OR CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm64")
+    set(IS_AARCH64 ON)
+endif()
+
+if(IS_AARCH64)
+    add_compile_options(-O3 -g)
+
     if(ENABLE_SME)
-        # SME: requires Armv9 + SME
-        if(NOT ENABLE_SVE)
-            # SME implies SVE (SME needs streaming SVE)
-            add_compile_options(-march=armv9-a+sme)
-            add_compile_definitions(ARM_COMPUTE_ENABLE_SVE __ARM_FEATURE_SVE=1)
-        else()
-            add_compile_options(-march=armv9-a+sme)
-        endif()
-        add_compile_definitions(ARM_COMPUTE_ENABLE_SME __ARM_FEATURE_SME=1)
-        message(STATUS "SME intrinsics enabled (includes SVE)")
-    endif()
-    
-    if(NOT ENABLE_SVE AND NOT ENABLE_SME)
+        # SME requires Armv9 + SME (implies SVE in streaming mode)
+        add_compile_options(-march=armv9-a+sme)
+        message(STATUS "SME+SVE enabled (-march=armv9-a+sme)")
+    elseif(ENABLE_SVE)
+        add_compile_options(-march=armv8.6-a+sve2)
+        message(STATUS "SVE enabled (-march=armv8.6-a+sve2)")
+    else()
         message(STATUS "Using NEON only (default)")
     endif()
+else()
+    message(WARNING "Not AArch64 platform; ISA options ignored")
 endif()
 
 # OpenMP support
@@ -51,7 +45,7 @@ endif()
 # Include directories
 include_directories(include)
 
-# Library target (header-only for transforms, compiled for convolution)
+# Library target
 add_library(winograd_conv STATIC
     src/winograd_conv.cpp
 )
@@ -60,8 +54,12 @@ add_library(winograd_conv STATIC
 add_executable(test_winograd tests/test_winograd.cpp)
 target_link_libraries(test_winograd winograd_conv)
 
+# Benchmark executable
+add_executable(bench_winograd tests/bench_winograd.cpp)
+target_link_libraries(bench_winograd winograd_conv)
+
 # Install
-install(TARGETS winograd_conv test_winograd
+install(TARGETS winograd_conv test_winograd bench_winograd
         RUNTIME DESTINATION bin
         ARCHIVE DESTINATION lib
         LIBRARY DESTINATION lib)
