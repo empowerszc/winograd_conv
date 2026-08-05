@@ -1,11 +1,13 @@
 // winograd_transforms_sve.hpp - SVE intrinsics 变换实现
 //
-// �?ARM SVE (Scalable Vector Extension) intrinsics 实现 Winograd 三步变换�?// SVE 的核心优势：
-//   1. 向量长度可伸缩（SVE-512 �?16 �?float/指令，vs NEON �?4 个）
-//   2. 谓词（predicate）自动处�?tail，无需降级到窄路径
+// 用 ARM SVE (Scalable Vector Extension) intrinsics 实现 Winograd 三步变换。
+// SVE 的核心优势：
+//   1. 向量长度可伸缩（SVE-512 时 16 个 float/指令，vs NEON 的 4 个）
+//   2. 谓词（predicate）自动处理 tail，无需降级到窄路径
 //   3. whilelt 指令设置谓词，循环无分支
 //
-// 对应 ACL �?sve_fp32_6x6.cpp �?sme_fp32_mla_6x6.cpp（SME �?= SVE + SMSTART�?//
+// 对应 ACL 的 sve_fp32_6x6.cpp 和 sme_fp32_mla_6x6.cpp（SME 版 = SVE + SMSTART）
+//
 // Part of the winograd_conv project.
 
 #pragma once
@@ -23,33 +25,27 @@
 namespace winograd_conv {
 
 // ============================================================================
-// SVE 向量长度辅助
+// SVE 辅助宏（用宏而非函数，避免 C++ 两阶段模板查找问题）
 // ============================================================================
+// GCC 的两阶段模板查找在第一阶段无法解析 svbool_t 等类型的函数声明，
+// 导致模板内调用报 "declaration must be available" 错误。
+// 用宏展开为 SVE intrinsic（编译器 builtin），不受两阶段查找约束。
 
-// 获取当前 SVE 向量长度（float 元素数）
-// SVE-128: 4, SVE-256: 8, SVE-512: 16
-static inline int sve_count() {
-    return svcntw();  // count of 32-bit words per vector
-}
-
-// SVE 谓词：设�?p0[i] = (start + i < total)
-static inline svbool_t sve_whilelt(int start, int total) {
-    return svwhilelt_b32_s32(start, total);
-}
-
-// SVE 谓词非空检查：svptest_first 需�?2 个谓词参�?static inline bool sve_any(svbool_t pg) {
-    return svptest_first(svptrue_b32(), pg);
-}
+#define SVE_COUNT() svcntw()
+#define SVE_WHILELT(start, total) svwhilelt_b32_s32(start, total)
+#define SVE_ANY(pg) svptest_first(svptrue_b32(), pg)
 
 // ============================================================================
 // SVE 1D 变换：output[OUT_SIZE][channels] = M * input[IN_SIZE][channels]
 // ============================================================================
-// �?SVE 谓词自动处理 channels 不是 VL 整数倍的情况�?// 每条 fmla 处理 VL 个通道（SVE-512 �?16 个），无分支 tail 处理�?
+// 用 SVE 谓词自动处理 channels 不是 VL 整数倍的情况。
+// 每条 fmla 处理 VL 个通道（SVE-512 时 16 个），无分支 tail 处理。
+
 template <int OUT_SIZE, int IN_SIZE>
 void transform_1d_sve(
     const float matrix[OUT_SIZE][IN_SIZE],
-    const float* input,    // [IN_SIZE][channels], row-major, stride = in_stride
-    float* output,         // [OUT_SIZE][channels], stride = out_stride
+    const float* input,
+    float* output,
     int channels,
     int in_stride,
     int out_stride
@@ -57,7 +53,6 @@ void transform_1d_sve(
     for (int o = 0; o < OUT_SIZE; o++) {
         float* out_row = output + o * out_stride;
 
-        // First non-zero coefficient
         bool first = true;
         for (int k = 0; k < IN_SIZE; k++) {
             if (matrix[o][k] == 0.0f) continue;
@@ -67,39 +62,36 @@ void transform_1d_sve(
             int c = 0;
 
             if (first) {
-                // Initialize: output = coef * input[k]
-                svbool_t pg = sve_whilelt(c, channels);
+                svbool_t pg = SVE_WHILELT(c, channels);
                 do {
                     svfloat32_t inp = svld1_f32(pg, in_row + c);
                     svfloat32_t result = svmul_n_f32_x(pg, inp, coef);
                     svst1_f32(pg, out_row + c, result);
-                    c += sve_count();
-                    pg = sve_whilelt(c, channels);
-                } while (sve_any(pg));
+                    c += SVE_COUNT();
+                    pg = SVE_WHILELT(c, channels);
+                } while (SVE_ANY(pg));
                 first = false;
             } else {
-                // Accumulate: output += coef * input[k]
-                svbool_t pg = sve_whilelt(c, channels);
+                svbool_t pg = SVE_WHILELT(c, channels);
                 do {
                     svfloat32_t inp = svld1_f32(pg, in_row + c);
                     svfloat32_t acc = svld1_f32(pg, out_row + c);
                     acc = svmla_n_f32_x(pg, acc, inp, coef);
                     svst1_f32(pg, out_row + c, acc);
-                    c += sve_count();
-                    pg = sve_whilelt(c, channels);
-                } while (sve_any(pg));
+                    c += SVE_COUNT();
+                    pg = SVE_WHILELT(c, channels);
+                } while (SVE_ANY(pg));
             }
         }
 
-        // If all coefficients were zero, zero the output
         if (first) {
             int c = 0;
-            svbool_t pg = sve_whilelt(c, channels);
+            svbool_t pg = SVE_WHILELT(c, channels);
             do {
                 svst1_f32(pg, out_row + c, svdup_n_f32(0.0f));
-                c += sve_count();
-                pg = sve_whilelt(c, channels);
-            } while (sve_any(pg));
+                c += SVE_COUNT();
+                pg = SVE_WHILELT(c, channels);
+            } while (SVE_ANY(pg));
         }
     }
 }
@@ -111,8 +103,8 @@ void transform_1d_sve(
 template <int OUT_SIZE, int IN_SIZE>
 void transform_2d_sve(
     const float matrix[OUT_SIZE][IN_SIZE],
-    const float* input,   // [IN_SIZE][IN_SIZE][channels]
-    float* output,         // [OUT_SIZE][OUT_SIZE][channels]
+    const float* input,
+    float* output,
     int channels,
     int channel_stride
 ) {
@@ -149,16 +141,15 @@ void transform_2d_sve(
 
 template <int TILE_SIZE>
 void weight_transform_sve(
-    const float* g,       // [3][3][channels]
-    float* V,             // [TILE_SIZE][TILE_SIZE][channels]
+    const float* g,
+    float* V,
     int channels,
     const float G_matrix[TILE_SIZE][3],
     float normalization
 ) {
-    // Step 1: Ww = G * g (row transform, for each column j of g)
-    alignas(64) float Ww[6 * 3 * 16];  // max TILE_SIZE=6, kw=3, padded to 16
+    alignas(64) float Ww[6 * 3 * 16];
     int c = 0;
-    svbool_t pg = sve_whilelt(c, channels);
+    svbool_t pg = SVE_WHILELT(c, channels);
     do {
         for (int j = 0; j < 3; j++) {
             for (int i = 0; i < TILE_SIZE; i++) {
@@ -168,17 +159,16 @@ void weight_transform_sve(
                         g + k * 3 * channels + j * channels + c);
                     result = svmla_n_f32_x(pg, result, gk, G_matrix[i][k]);
                 }
-                svst1_f32(pg, Ww + i * 3 * sve_count() + j * sve_count(), result);
+                svst1_f32(pg, Ww + i * 3 * SVE_COUNT() + j * SVE_COUNT(), result);
             }
         }
 
-        // Step 2: V = Ww * G^T / norm (col transform)
         for (int i = 0; i < TILE_SIZE; i++) {
             for (int j = 0; j < TILE_SIZE; j++) {
                 svfloat32_t result = svdup_n_f32(0.0f);
                 for (int k = 0; k < 3; k++) {
                     svfloat32_t wwk = svld1_f32(pg,
-                        Ww + i * 3 * sve_count() + k * sve_count());
+                        Ww + i * 3 * SVE_COUNT() + k * SVE_COUNT());
                     result = svmla_n_f32_x(pg, result, wwk, G_matrix[j][k]);
                 }
                 if (normalization != 1.0f) {
@@ -188,9 +178,9 @@ void weight_transform_sve(
             }
         }
 
-        c += sve_count();
-        pg = sve_whilelt(c, channels);
-    } while (sve_any(pg));
+        c += SVE_COUNT();
+        pg = SVE_WHILELT(c, channels);
+    } while (SVE_ANY(pg));
 }
 
 // ============================================================================
@@ -199,8 +189,8 @@ void weight_transform_sve(
 
 template <int TILE_SIZE>
 void input_transform_sve(
-    const float* d,       // [TILE_SIZE][TILE_SIZE][channels]
-    float* U,             // [TILE_SIZE][TILE_SIZE][channels]
+    const float* d,
+    float* U,
     int channels,
     const float Bt_matrix[TILE_SIZE][TILE_SIZE]
 ) {
@@ -215,20 +205,18 @@ void input_transform_sve(
 
 template <int TILE_SIZE, int OUTPUT_TILE>
 void output_transform_sve(
-    const float* M,       // [TILE_SIZE][TILE_SIZE][channels]
-    float* f,             // [OUTPUT_TILE][OUTPUT_TILE][channels]
+    const float* M,
+    float* f,
     int channels,
     const float A_matrix[OUTPUT_TILE][TILE_SIZE],
-    const float* bias,    // [channels] or nullptr
+    const float* bias,
     float act_min,
     float act_max
 ) {
-    // 2D transform
     transform_2d_sve<OUTPUT_TILE, TILE_SIZE>(
         A_matrix, M, f, channels, channels
     );
 
-    // Add bias + clamp per-channel (matches ACL output transform)
     svfloat32_t vmin = svdup_n_f32(act_min);
     svfloat32_t vmax = svdup_n_f32(act_max);
 
@@ -236,7 +224,7 @@ void output_transform_sve(
         for (int oj = 0; oj < OUTPUT_TILE; oj++) {
             float* fptr = f + (oi * OUTPUT_TILE + oj) * channels;
             int c = 0;
-            svbool_t pg = sve_whilelt(c, channels);
+            svbool_t pg = SVE_WHILELT(c, channels);
             do {
                 svfloat32_t v = svld1_f32(pg, fptr + c);
                 if (bias) {
@@ -246,9 +234,9 @@ void output_transform_sve(
                 v = svmin_f32_x(pg, v, vmax);
                 v = svmax_f32_x(pg, v, vmin);
                 svst1_f32(pg, fptr + c, v);
-                c += sve_count();
-                pg = sve_whilelt(c, channels);
-            } while (sve_any(pg));
+                c += SVE_COUNT();
+                pg = SVE_WHILELT(c, channels);
+            } while (SVE_ANY(pg));
         }
     }
 }
