@@ -301,6 +301,21 @@ int main(int argc, char** argv) {
     }
     set_isa_level(isa);
 
+    // OpenMP diagnostic
+#ifdef ENABLE_OPENMP
+    printf("OpenMP: ENABLE_OPENMP defined, omp.h included\n");
+    printf("OpenMP: max threads = %d\n", omp_get_max_threads());
+    omp_set_num_threads(16);
+    printf("OpenMP: after set(16), max threads = %d\n", omp_get_max_threads());
+    #pragma omp parallel
+    {
+        #pragma omp single
+        printf("OpenMP: inside parallel region, actual threads = %d\n", omp_get_num_threads());
+    }
+#else
+    printf("OpenMP: NOT compiled (ENABLE_OPENMP not defined)\n");
+#endif
+
     if (input_file.empty()) {
         fprintf(stderr, "Usage: %s [options] shapes.csv\n", argv[0]);
         return 1;
