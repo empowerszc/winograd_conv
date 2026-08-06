@@ -339,41 +339,51 @@ int main(int argc, char** argv) {
 
     // ---- Timing mode: fine-grained per-step breakdown ----
     if (timing_mode) {
-        printf("#  %-4s %-5s %-5s %-5s %-5s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-4s %-12s %-12s %-12s %-12s %-12s\n",
-               "MB", "IC", "IH", "IW", "OC", "KH", "KW", "SH", "SW", "PH", "PW", "DH", "DW", "GRP",
-               "Weight(ms)", "Input(ms)", "GEMM(ms)", "Output(ms)", "Total(ms)");
+        for (int nt : thread_counts) {
+#ifdef ENABLE_OPENMP
+            omp_set_num_threads(nt);
+#endif
+            printf("=== Timing mode: %d threads, ISA: %s ===\n", nt, isa_name(isa));
+            printf("#  %-4s %-5s %-5s %-5s %-5s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-4s "
+                   "%-12s %-12s %-12s %-12s %-12s %-12s\n",
+                   "MB", "IC", "IH", "IW", "OC", "KH", "KW", "SH", "SW", "PH", "PW", "DH", "DW", "GRP",
+                   "Weight(ms)", "Input(ms)", "GEMM(ms)", "Output(ms)", "Total(ms)", "GFLOPS");
 
-        int row = 0;
-        for (const auto& s : shapes) {
-            int N = s.mb, IC = s.ic, IH = s.ih, IW = s.iw;
-            int OC = s.oc, OH = IH, OW = IW;
+            int row = 0;
+            for (const auto& s : shapes) {
+                int N = s.mb, IC = s.ic, IH = s.ih, IW = s.iw;
+                int OC = s.oc, OH = IH, OW = IW;
 
-            std::vector<float> src(N * IC * IH * IW), wei(OC * IC * 9), bias(OC, 0.0f), dst(N * OC * OH * OW);
-            for (auto& v : src) v = static_cast<float>(rand()) / RAND_MAX;
-            for (auto& v : wei) v = static_cast<float>(rand()) / RAND_MAX;
+                std::vector<float> src(N * IC * IH * IW), wei(OC * IC * 9), bias(OC, 0.0f), dst(N * OC * OH * OW);
+                for (auto& v : src) v = static_cast<float>(rand()) / RAND_MAX;
+                for (auto& v : wei) v = static_cast<float>(rand()) / RAND_MAX;
 
-            // Warmup (1 iteration)
-            winograd_convolution_f44(src.data(), wei.data(), bias.data(), dst.data(),
-                                      N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f);
+                // Warmup
+                winograd_convolution_f44(src.data(), wei.data(), bias.data(), dst.data(),
+                                          N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f);
 
-            // Take best of several runs
-            StepTimings best;
-            best.total_ms = 1e30;
-            for (int i = 0; i < repeats; i++) {
-                auto st = run_with_timing(src.data(), wei.data(), bias.data(), dst.data(),
-                                          N, IC, IH, IW, OC, OH, OW, isa);
-                if (st.total_ms < best.total_ms) best = st;
+                // Take best of several runs
+                StepTimings best;
+                best.total_ms = 1e30;
+                for (int i = 0; i < repeats; i++) {
+                    auto st = run_with_timing(src.data(), wei.data(), bias.data(), dst.data(),
+                                              N, IC, IH, IW, OC, OH, OW, isa);
+                    if (st.total_ms < best.total_ms) best = st;
+                }
+
+                double flops = 2.0 * N * OC * OH * OW * IC * 9.0;
+                double gflops = flops / (best.total_ms * 1e-3) / 1e9;
+
+                printf("%-3d %-4d %-5d %-5d %-5d %-5d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-4d "
+                       "%10.2f %10.2f %10.2f %10.2f %10.2f %10.2f\n",
+                       row, N, IC, IH, IW, OC, s.kh, s.kw, s.stride_h, s.stride_w,
+                       s.pad_h, s.pad_w, s.dil_h, s.dil_w, s.grp, s.count,
+                       best.weight_transform_ms, best.input_transform_ms,
+                       best.gemm_ms, best.output_transform_ms, best.total_ms, gflops);
+                row++;
             }
-
-            printf("%-3d %-4d %-5d %-5d %-5d %-5d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-4d "
-                   "%10.2f %10.2f %10.2f %10.2f %10.2f\n",
-                   row, N, IC, IH, IW, OC, s.kh, s.kw, s.stride_h, s.stride_w,
-                   s.pad_h, s.pad_w, s.dil_h, s.dil_w, s.grp, s.count,
-                   best.weight_transform_ms, best.input_transform_ms,
-                   best.gemm_ms, best.output_transform_ms, best.total_ms);
-            row++;
+            printf("\n");
         }
-        printf("\n");
     }
 
     // ---- Standard mode: multi-thread benchmark ----
