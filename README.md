@@ -248,11 +248,30 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 ./bench_winograd --timing --threads 16 --sme shapes.csv
 ```
 
-已知瓶颈：
-1. **NCHW tile 提取**：通道非连续，标量逐元素拷贝（NCHW → tile 布局）
-2. **transform_2d 内部 `thread_local static std::vector tmp`**：虽然避免了每次堆分配，但首次 resize 仍有开销
-3. **OpenMP 并行收益受限**：tile 提取的标量循环和内存带宽限制了并行加速比
-4. **GEMM 串行**：OpenBLAS 设为单线程（避免与 OpenMP 冲突），如需并行可在 GEMM 循环加 `#pragma omp for`
+细粒度计时将输入/输出各拆为 3 个子步骤：
+
+```
+输入侧: TileExt(标量NCHW提取) → InXform(变换) → InScat(NEON拷贝)
+输出侧: OutGath(NEON拷贝) → OutXform(变换+ReLU) → OutWrite(标量NCHW写回)
+```
+
+实测数据（4×192×40×40, SVE, 16 线程）：
+
+| 阶段 | 时间(ms) | 占比 | 瓶颈 |
+|------|---------|------|------|
+| NCHW tile 提取 | 4.20 | 19% | 标量非连续读，内存带宽 |
+| NCHW 写回 | 2.95 | 13% | 标量非连续写，内存带宽 |
+| 输入变换 | 2.64 | 12% | NEON/SVE 计算 |
+| 输出变换 | 2.16 | 10% | NEON/SVE 计算 |
+| GEMM | 1.86 | 8% | OpenBLAS |
+| NEON gather/scatter | 2.47 | 11% | 向量化拷贝 |
+
+**主要瓶颈**：NCHW 布局导致 tile 提取+写回占 32%（标量逐通道非连续访问，内存带宽饱和，OpenMP 无法加速）。
+
+**优化方向**：
+1. 改用 NHWC 布局（通道连续）→ tile 提取可用 NEON/SVE 批量加载
+2. prepare/execute 分离 → 权重变换只做一次
+3. GEMM 循环加 OpenMP → 多线程 GEMM
 
 ## 扩展指南
 

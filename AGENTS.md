@@ -137,10 +137,25 @@ cat shapes.csv | ./bench_winograd --neon
 
 1. **GEMM 默认 naive**：生产环境需启用 `-DUSE_OPENBLAS=ON` 替换为 `cblas_sgemm`
 2. **无 prepare/execute 分离**：权重变换每次调用都重做（应预计算一次）
-3. **NCHW 布局**：通道维度非连续，tile 提取和输出写回是标量（无法向量化）
-4. **OpenMP 并行效果有限**：tile 循环已加 `#pragma omp parallel`，per-thread 缓冲区已预分配，但输入/输出变换的瓶颈是 NCHW 标量 tile 提取和 transform_2d 内部的 `thread_local static std::vector tmp` resize 开销，并行收益受限
+3. **NCHW 布局是主要瓶颈**：细粒度计时显示 NCHW 标量 tile 提取+写回占总时间 32%，变换计算占 22%，GEMM 仅占 8%。NCHW 下通道非连续，tile 提取/写回是标量逐元素拷贝，内存带宽受限，OpenMP 并行无法加速
+4. **OpenMP 并行收益有限**：tile 循环已加 `#pragma omp parallel`，per-thread 缓冲区已预分配。但瓶颈是 NCHW 标量操作（内存带宽饱和）和每 tile 工作量小（~19μs），线程调度开销可能抵消并行收益
 5. **SME 仅 F(4,4,3,3) 输出变换**：F(2,2,3,3) 输出变换回退到 SVE（ACL 也如此）
 6. **`--timing` 模式是串行的**：`run_with_timing()` 手动重现管道各步骤，不使用 OpenMP 并行。用于分析各阶段时间占比，不代表并行后的实际性能
+
+### 细粒度计时数据（Case: 4×192×40×40, SVE, 16 threads）
+
+| 阶段 | 时间(ms) | 占比 | 类型 |
+|------|---------|------|------|
+| NCHW tile 提取 | 4.20 | 19% | 标量，非连续读，内存带宽 |
+| NCHW 写回 | 2.95 | 13% | 标量，非连续写，内存带宽 |
+| 输入变换 B^T·d·B | 2.64 | 12% | NEON/SVE 计算 |
+| 输出变换 A^T·M·A | 2.16 | 10% | NEON/SVE 计算 |
+| 权重变换 | 1.93 | 9% | 一次性 |
+| GEMM | 1.86 | 8% | OpenBLAS |
+| NEON gather | 1.64 | 7% | 向量化拷贝 |
+| NEON scatter | 0.83 | 4% | 向量化拷贝 |
+
+**结论**：NCHW 布局导致的标量操作（提取+写回）占 32%，是最大瓶颈。改用 NHWC（通道连续）可以从根本上解决此问题。
 
 ## 历史修复记录
 
