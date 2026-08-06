@@ -308,13 +308,17 @@ void winograd_convolution(
 
     // ---- Step 2: For each batch ----
     for (int n = 0; n < N; n++) {
-        // ---- Step 2a: Input transform ----
+        // ---- Step 2a: Input transform (parallelized over tiles) ----
+        #pragma omp parallel for collapse(2) schedule(dynamic)
         for (int tr = 0; tr < n_tile_rows; tr++) {
             for (int tc = 0; tc < n_tile_cols; tc++) {
                 int tile_idx = tr * n_tile_cols + tc;
 
+                // Per-thread buffers
+                std::vector<float> d_tile(TS * TS * IC, 0.0f);
+                std::vector<float> U_tile(TS * TS * IC, 0.0f);
+
                 // Extract input tile [TS][TS][IC] from src (with zero padding)
-                std::fill(d_tile.begin(), d_tile.end(), 0.0f);
                 for (int ti = 0; ti < TS; ti++) {
                     for (int tj = 0; tj < TS; tj++) {
                         int ih = tr * OT - 1 + ti;
@@ -333,7 +337,6 @@ void winograd_convolution(
                                          is_f44, isa);
 
                 // Scatter U_tile into U[ts_idx][tile_idx][ic]
-                // (both sides contiguous in ic → vectorize with NEON)
                 for (int ti = 0; ti < TS; ti++) {
                     for (int tj = 0; tj < TS; tj++) {
                         int ts_idx = ti * TS + tj;
@@ -357,13 +360,17 @@ void winograd_convolution(
             winograd_gemm(U_slice, V_slice, M_slice, n_tiles, OC, IC);
         }
 
-        // ---- Step 2c: Output transform (includes bias + ReLU) ----
+        // ---- Step 2c: Output transform (parallelized over tiles) ----
+        #pragma omp parallel for collapse(2) schedule(dynamic)
         for (int tr = 0; tr < n_tile_rows; tr++) {
             for (int tc = 0; tc < n_tile_cols; tc++) {
                 int tile_idx = tr * n_tile_cols + tc;
 
+                // Per-thread buffers
+                std::vector<float> M_tile(TS * TS * OC, 0.0f);
+                std::vector<float> f_tile(OT * OT * OC, 0.0f);
+
                 // Gather M_tile[TS][TS][OC] from M[ts_idx][tile_idx][oc]
-                // (both sides contiguous in oc → vectorize with NEON)
                 for (int ti = 0; ti < TS; ti++) {
                     for (int tj = 0; tj < TS; tj++) {
                         int ts_idx = ti * TS + tj;

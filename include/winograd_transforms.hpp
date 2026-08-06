@@ -127,18 +127,17 @@ void transform_2d_neon(
     int channels,
     int channel_stride     // stride between elements (= channels for packed layout)
 ) {
-    // Temporary buffer for intermediate result
-    // tmp[OUT_SIZE][IN_SIZE][channels]
-    std::vector<float> tmp(OUT_SIZE * IN_SIZE * channels);
+    // Reuse thread-local buffer to avoid per-call heap allocation
+    thread_local static std::vector<float> tmp;
+    tmp.resize(OUT_SIZE * IN_SIZE * channels);
 
     // Step 1: Row transform - for each column j, compute tmp[:][j] = M * input[:][j]
     for (int j = 0; j < IN_SIZE; j++) {
-        const float* in_col = input + j * channel_stride;  // input[0][j][:]
-        float* tmp_col = tmp.data() + j * channel_stride;   // tmp[0][j][:]
+        const float* in_col = input + j * channel_stride;
+        float* tmp_col = tmp.data() + j * channel_stride;
         transform_1d_neon<OUT_SIZE, IN_SIZE>(
             matrix, in_col, tmp_col, channels,
-            IN_SIZE * channel_stride,   // in_stride: skip a full row
-            IN_SIZE * channel_stride     // out_stride: same
+            IN_SIZE * channel_stride, IN_SIZE * channel_stride
         );
     }
 
@@ -149,8 +148,7 @@ void transform_2d_neon(
 
         transform_1d_neon<OUT_SIZE, IN_SIZE>(
             matrix, tmp_row, out_row, channels,
-            channel_stride,      // in_stride: skip one element (= channels)
-            channel_stride        // out_stride
+            channel_stride, channel_stride
         );
     }
 }

@@ -108,7 +108,9 @@ void transform_2d_sve(
     int channels,
     int channel_stride
 ) {
-    std::vector<float> tmp(OUT_SIZE * IN_SIZE * channels);
+    // Reuse thread-local buffer to avoid per-call heap allocation
+    thread_local static std::vector<float> tmp;
+    tmp.resize(OUT_SIZE * IN_SIZE * channels);
 
     // Step 1: Row transform (apply M to each column)
     for (int j = 0; j < IN_SIZE; j++) {
