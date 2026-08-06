@@ -20,6 +20,8 @@
 
 #ifdef USE_OPENBLAS
 #include <cblas.h>
+// Prevent OpenBLAS from spawning its own threads — conflicts with OpenMP
+extern "C" void openblas_set_num_threads(int);
 #endif
 
 // Include ISA-specific transform implementations
@@ -255,6 +257,11 @@ void winograd_convolution(
     const WinogradConfig& config,
     float act_min, float act_max
 ) {
+#ifdef USE_OPENBLAS
+    // OpenBLAS must use 1 thread — our OpenMP parallelism is on tiles, not GEMM
+    openblas_set_num_threads(1);
+#endif
+
     const int TS = config.input_tile_rows;  // tile size = m + r - 1
     const int OT = config.output_tile_rows;  // output tile = m
     const int NM = config.n_multis;          // number of GEMMs = TS^2
@@ -301,10 +308,6 @@ void winograd_convolution(
     int M_size = NM * n_tiles * OC;
     std::vector<float> U(U_size, 0.0f);
     std::vector<float> M_buf(M_size, 0.0f);
-    std::vector<float> d_tile(TS * TS * IC, 0.0f);
-    std::vector<float> U_tile(TS * TS * IC, 0.0f);
-    std::vector<float> M_tile(TS * TS * OC, 0.0f);
-    std::vector<float> f_tile(OT * OT * OC, 0.0f);
 
     // ---- Step 2: For each batch ----
     for (int n = 0; n < N; n++) {
