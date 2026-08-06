@@ -312,44 +312,50 @@ void winograd_convolution(
     // ---- Step 2: For each batch ----
     for (int n = 0; n < N; n++) {
         // ---- Step 2a: Input transform (parallelized over tiles) ----
-        #pragma omp parallel for collapse(2) schedule(dynamic)
-        for (int tr = 0; tr < n_tile_rows; tr++) {
-            for (int tc = 0; tc < n_tile_cols; tc++) {
-                int tile_idx = tr * n_tile_cols + tc;
+        #pragma omp parallel
+        {
+            // Pre-allocate per-thread buffers ONCE, reuse across tiles
+            std::vector<float> d_tile(TS * TS * IC, 0.0f);
+            std::vector<float> U_tile(TS * TS * IC, 0.0f);
 
-                // Per-thread buffers
-                std::vector<float> d_tile(TS * TS * IC, 0.0f);
-                std::vector<float> U_tile(TS * TS * IC, 0.0f);
+            #pragma omp for collapse(2) schedule(dynamic)
+            for (int tr = 0; tr < n_tile_rows; tr++) {
+                for (int tc = 0; tc < n_tile_cols; tc++) {
+                    int tile_idx = tr * n_tile_cols + tc;
 
-                // Extract input tile [TS][TS][IC] from src (with zero padding)
-                for (int ti = 0; ti < TS; ti++) {
-                    for (int tj = 0; tj < TS; tj++) {
-                        int ih = tr * OT - 1 + ti;
-                        int iw = tc * OT - 1 + tj;
-                        if (ih >= 0 && ih < IH && iw >= 0 && iw < IW) {
-                            for (int ic = 0; ic < IC; ic++) {
-                                d_tile[(ti * TS + tj) * IC + ic] =
-                                    src[((n * IC + ic) * IH + ih) * IW + iw];
+                    // Zero only the tile (reuse buffer, no realloc)
+                    std::fill(d_tile.begin(), d_tile.end(), 0.0f);
+
+                    // Extract input tile [TS][TS][IC] from src (with zero padding)
+                    for (int ti = 0; ti < TS; ti++) {
+                        for (int tj = 0; tj < TS; tj++) {
+                            int ih = tr * OT - 1 + ti;
+                            int iw = tc * OT - 1 + tj;
+                            if (ih >= 0 && ih < IH && iw >= 0 && iw < IW) {
+                                for (int ic = 0; ic < IC; ic++) {
+                                    d_tile[(ti * TS + tj) * IC + ic] =
+                                        src[((n * IC + ic) * IH + ih) * IW + iw];
+                                }
                             }
                         }
                     }
-                }
 
-                // Transform: U_tile = B^T * d * B
-                dispatch_input_transform(d_tile.data(), U_tile.data(), IC,
-                                         is_f44, isa);
+                    // Transform: U_tile = B^T * d * B
+                    dispatch_input_transform(d_tile.data(), U_tile.data(), IC,
+                                             is_f44, isa);
 
-                // Scatter U_tile into U[ts_idx][tile_idx][ic]
-                for (int ti = 0; ti < TS; ti++) {
-                    for (int tj = 0; tj < TS; tj++) {
-                        int ts_idx = ti * TS + tj;
-                        float* dst_ptr = U.data() + (ts_idx * n_tiles + tile_idx) * IC;
-                        const float* src_ptr = U_tile.data() + (ti * TS + tj) * IC;
-                        int ic = 0;
-                        for (; ic + 4 <= IC; ic += 4)
-                            vst1q_f32(dst_ptr + ic, vld1q_f32(src_ptr + ic));
-                        for (; ic < IC; ic++)
-                            dst_ptr[ic] = src_ptr[ic];
+                    // Scatter U_tile into U[ts_idx][tile_idx][ic]
+                    for (int ti = 0; ti < TS; ti++) {
+                        for (int tj = 0; tj < TS; tj++) {
+                            int ts_idx = ti * TS + tj;
+                            float* dst_ptr = U.data() + (ts_idx * n_tiles + tile_idx) * IC;
+                            const float* src_ptr = U_tile.data() + (ti * TS + tj) * IC;
+                            int ic = 0;
+                            for (; ic + 4 <= IC; ic += 4)
+                                vst1q_f32(dst_ptr + ic, vld1q_f32(src_ptr + ic));
+                            for (; ic < IC; ic++)
+                                dst_ptr[ic] = src_ptr[ic];
+                        }
                     }
                 }
             }
@@ -364,42 +370,45 @@ void winograd_convolution(
         }
 
         // ---- Step 2c: Output transform (parallelized over tiles) ----
-        #pragma omp parallel for collapse(2) schedule(dynamic)
-        for (int tr = 0; tr < n_tile_rows; tr++) {
-            for (int tc = 0; tc < n_tile_cols; tc++) {
-                int tile_idx = tr * n_tile_cols + tc;
+        #pragma omp parallel
+        {
+            // Pre-allocate per-thread buffers ONCE, reuse across tiles
+            std::vector<float> M_tile(TS * TS * OC, 0.0f);
+            std::vector<float> f_tile(OT * OT * OC, 0.0f);
 
-                // Per-thread buffers
-                std::vector<float> M_tile(TS * TS * OC, 0.0f);
-                std::vector<float> f_tile(OT * OT * OC, 0.0f);
+            #pragma omp for collapse(2) schedule(dynamic)
+            for (int tr = 0; tr < n_tile_rows; tr++) {
+                for (int tc = 0; tc < n_tile_cols; tc++) {
+                    int tile_idx = tr * n_tile_cols + tc;
 
-                // Gather M_tile[TS][TS][OC] from M[ts_idx][tile_idx][oc]
-                for (int ti = 0; ti < TS; ti++) {
-                    for (int tj = 0; tj < TS; tj++) {
-                        int ts_idx = ti * TS + tj;
-                        const float* src_ptr = M_buf.data() + (ts_idx * n_tiles + tile_idx) * OC;
-                        float* dst_ptr = M_tile.data() + (ti * TS + tj) * OC;
-                        int oc = 0;
-                        for (; oc + 4 <= OC; oc += 4)
-                            vst1q_f32(dst_ptr + oc, vld1q_f32(src_ptr + oc));
-                        for (; oc < OC; oc++)
-                            dst_ptr[oc] = src_ptr[oc];
+                    // Gather M_tile[TS][TS][OC] from M[ts_idx][tile_idx][oc]
+                    for (int ti = 0; ti < TS; ti++) {
+                        for (int tj = 0; tj < TS; tj++) {
+                            int ts_idx = ti * TS + tj;
+                            const float* src_ptr = M_buf.data() + (ts_idx * n_tiles + tile_idx) * OC;
+                            float* dst_ptr = M_tile.data() + (ti * TS + tj) * OC;
+                            int oc = 0;
+                            for (; oc + 4 <= OC; oc += 4)
+                                vst1q_f32(dst_ptr + oc, vld1q_f32(src_ptr + oc));
+                            for (; oc < OC; oc++)
+                                dst_ptr[oc] = src_ptr[oc];
+                        }
                     }
-                }
 
-                // Transform: f_tile = A^T * M * A (bias + ReLU applied inside)
-                dispatch_output_transform(M_tile.data(), f_tile.data(), OC,
-                                          bias, act_min, act_max, is_f44, isa);
+                    // Transform: f_tile = A^T * M * A (bias + ReLU applied inside)
+                    dispatch_output_transform(M_tile.data(), f_tile.data(), OC,
+                                              bias, act_min, act_max, is_f44, isa);
 
-                // Write to output (with bounds checking for edge tiles)
-                for (int oi = 0; oi < OT; oi++) {
-                    for (int oj = 0; oj < OT; oj++) {
-                        int oh = tr * OT + oi;
-                        int ow = tc * OT + oj;
-                        if (oh < OH && ow < OW) {
-                            for (int oc = 0; oc < OC; oc++) {
-                                dst[((n * OC + oc) * OH + oh) * OW + ow] =
-                                    f_tile[(oi * OT + oj) * OC + oc];
+                    // Write to output (with bounds checking for edge tiles)
+                    for (int oi = 0; oi < OT; oi++) {
+                        for (int oj = 0; oj < OT; oj++) {
+                            int oh = tr * OT + oi;
+                            int ow = tc * OT + oj;
+                            if (oh < OH && ow < OW) {
+                                for (int oc = 0; oc < OC; oc++) {
+                                    dst[((n * OC + oc) * OH + oh) * OW + ow] =
+                                        f_tile[(oi * OT + oj) * OC + oc];
+                                }
                             }
                         }
                     }
