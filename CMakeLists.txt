@@ -57,7 +57,7 @@ add_library(winograd_conv STATIC src/winograd_conv.cpp)
 
 # Apply OpenMP to library target (propagates to all consumers)
 if(ENABLE_OPENMP)
-    target_compile_options(winograd_conv PRIVATE ${OpenMP_CXX_FLAGS})
+    target_compile_options(winograd_conv PUBLIC ${OpenMP_CXX_FLAGS})
     target_link_libraries(winograd_conv PUBLIC ${OpenMP_CXX_LIBRARIES})
     target_compile_definitions(winograd_conv PUBLIC ENABLE_OPENMP)
 endif()
