@@ -120,9 +120,13 @@ bool read_shapes(const std::string& filename, std::vector<ShapeInfo>& shapes) {
 // Fine-grained timing: manually run each step
 struct StepTimings {
     double weight_transform_ms;
-    double input_transform_ms;
+    double tile_extract_ms;      // NCHW → tile layout (scalar, non-contiguous)
+    double input_transform_ms;   // B^T * d * B
+    double input_scatter_ms;     // U_tile → U (NEON copy)
     double gemm_ms;
-    double output_transform_ms;
+    double output_gather_ms;      // M_buf → M_tile (NEON copy)
+    double output_transform_ms;  // A^T * M * A + bias + ReLU
+    double output_writeback_ms;  // f_tile → dst (NCHW, scalar, non-contiguous)
     double total_ms;
 };
 
@@ -164,12 +168,17 @@ StepTimings run_with_timing(
     std::vector<float> M_tile(TS * TS * OC, 0.0f);
     std::vector<float> f_tile(OT * OT * OC, 0.0f);
 
-    // Step 2: Input transform + tile extraction
-    auto t2 = std::chrono::high_resolution_clock::now();
+    double time_extract = 0, time_in_xform = 0, time_in_scatter = 0;
+    double time_out_gather = 0, time_out_xform = 0, time_out_writeback = 0;
+
     for (int n = 0; n < N; n++) {
+        // ---- Input side: split into 3 sub-steps ----
         for (int tr = 0; tr < n_tile_rows; tr++) {
             for (int tc = 0; tc < n_tile_cols; tc++) {
                 int tile_idx = tr * n_tile_cols + tc;
+
+                // Sub-step A: tile extraction (NCHW → tile)
+                auto sa = std::chrono::high_resolution_clock::now();
                 std::fill(d_tile.begin(), d_tile.end(), 0.0f);
                 for (int ti = 0; ti < TS; ti++) {
                     for (int tj = 0; tj < TS; tj++) {
@@ -182,7 +191,15 @@ StepTimings run_with_timing(
                         }
                     }
                 }
+                auto sb = std::chrono::high_resolution_clock::now();
+                time_extract += std::chrono::duration<double, std::milli>(sb - sa).count();
+
+                // Sub-step B: input transform
                 dispatch_input_transform(d_tile.data(), U_tile.data(), IC, is_f44, isa);
+                auto sc = std::chrono::high_resolution_clock::now();
+                time_in_xform += std::chrono::duration<double, std::milli>(sc - sb).count();
+
+                // Sub-step C: scatter
                 for (int ti = 0; ti < TS; ti++) {
                     for (int tj = 0; tj < TS; tj++) {
                         int ts_idx = ti * TS + tj;
@@ -195,25 +212,30 @@ StepTimings run_with_timing(
                             dst_ptr[ic] = src_ptr[ic];
                     }
                 }
+                auto sd = std::chrono::high_resolution_clock::now();
+                time_in_scatter += std::chrono::duration<double, std::milli>(sd - sc).count();
             }
         }
     }
-    auto t3 = std::chrono::high_resolution_clock::now();
 
     // Step 3: GEMM
+    auto t_gemm_start = std::chrono::high_resolution_clock::now();
     for (int ts_idx = 0; ts_idx < NM; ts_idx++) {
         const float* U_slice = U.data() + ts_idx * n_tiles * IC;
         const float* V_slice = V.data() + ts_idx * OC * IC;
         float* M_slice = M_buf.data() + ts_idx * n_tiles * OC;
         winograd_gemm(U_slice, V_slice, M_slice, n_tiles, OC, IC);
     }
-    auto t4 = std::chrono::high_resolution_clock::now();
+    auto t_gemm_end = std::chrono::high_resolution_clock::now();
 
-    // Step 4: Output transform
     for (int n = 0; n < N; n++) {
+        // ---- Output side: split into 3 sub-steps ----
         for (int tr = 0; tr < n_tile_rows; tr++) {
             for (int tc = 0; tc < n_tile_cols; tc++) {
                 int tile_idx = tr * n_tile_cols + tc;
+
+                // Sub-step D: gather
+                auto sa = std::chrono::high_resolution_clock::now();
                 for (int ti = 0; ti < TS; ti++) {
                     for (int tj = 0; tj < TS; tj++) {
                         int ts_idx = ti * TS + tj;
@@ -226,8 +248,16 @@ StepTimings run_with_timing(
                             dst_ptr[oc] = src_ptr[oc];
                     }
                 }
+                auto sb = std::chrono::high_resolution_clock::now();
+                time_out_gather += std::chrono::duration<double, std::milli>(sb - sa).count();
+
+                // Sub-step E: output transform
                 dispatch_output_transform(M_tile.data(), f_tile.data(), OC,
                                           bias, -1e30f, 1e30f, is_f44, isa);
+                auto sc = std::chrono::high_resolution_clock::now();
+                time_out_xform += std::chrono::duration<double, std::milli>(sc - sb).count();
+
+                // Sub-step F: writeback (NCHW)
                 for (int oi = 0; oi < OT; oi++) {
                     for (int oj = 0; oj < OT; oj++) {
                         int oh = tr * OT + oi;
@@ -239,17 +269,23 @@ StepTimings run_with_timing(
                         }
                     }
                 }
+                auto sd = std::chrono::high_resolution_clock::now();
+                time_out_writeback += std::chrono::duration<double, std::milli>(sd - sc).count();
             }
         }
     }
-    auto t5 = std::chrono::high_resolution_clock::now();
+    auto t_end = std::chrono::high_resolution_clock::now();
 
     StepTimings st;
     st.weight_transform_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    st.input_transform_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
-    st.gemm_ms = std::chrono::duration<double, std::milli>(t4 - t3).count();
-    st.output_transform_ms = std::chrono::duration<double, std::milli>(t5 - t4).count();
-    st.total_ms = std::chrono::duration<double, std::milli>(t5 - t0).count();
+    st.tile_extract_ms = time_extract;
+    st.input_transform_ms = time_in_xform;
+    st.input_scatter_ms = time_in_scatter;
+    st.gemm_ms = std::chrono::duration<double, std::milli>(t_gemm_end - t_gemm_start).count();
+    st.output_gather_ms = time_out_gather;
+    st.output_transform_ms = time_out_xform;
+    st.output_writeback_ms = time_out_writeback;
+    st.total_ms = std::chrono::duration<double, std::milli>(t_end - t0).count();
     return st;
 }
 
@@ -360,9 +396,10 @@ int main(int argc, char** argv) {
 #endif
             printf("=== Timing mode: %d threads, ISA: %s ===\n", nt, isa_name(isa));
             printf("#  %-4s %-5s %-5s %-5s %-5s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-4s "
-                   "%-12s %-12s %-12s %-12s %-12s %-12s\n",
+                   "%-10s %-10s %-10s %-10s %-10s %-10s %-10s %-10s %-10s %-10s\n",
                    "MB", "IC", "IH", "IW", "OC", "KH", "KW", "SH", "SW", "PH", "PW", "DH", "DW", "GRP",
-                   "Weight(ms)", "Input(ms)", "GEMM(ms)", "Output(ms)", "Total(ms)", "GFLOPS");
+                   "Weight(ms)", "TileExt(ms)", "InXform(ms)", "InScat(ms)",
+                   "GEMM(ms)", "OutGath(ms)", "OutXform(ms)", "OutWrite(ms)", "Total(ms)", "GFLOPS");
 
             int row = 0;
             for (const auto& s : shapes) {
@@ -390,11 +427,14 @@ int main(int argc, char** argv) {
                 double gflops = flops / (best.total_ms * 1e-3) / 1e9;
 
                 printf("%-3d %-4d %-5d %-5d %-5d %-5d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-4d "
-                       "%10.2f %10.2f %10.2f %10.2f %10.2f %10.2f\n",
+                       "%8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f\n",
                        row, N, IC, IH, IW, OC, s.kh, s.kw, s.stride_h, s.stride_w,
                        s.pad_h, s.pad_w, s.dil_h, s.dil_w, s.grp, s.count,
-                       best.weight_transform_ms, best.input_transform_ms,
-                       best.gemm_ms, best.output_transform_ms, best.total_ms, gflops);
+                       best.weight_transform_ms,
+                       best.tile_extract_ms, best.input_transform_ms, best.input_scatter_ms,
+                       best.gemm_ms,
+                       best.output_gather_ms, best.output_transform_ms, best.output_writeback_ms,
+                       best.total_ms, gflops);
                 row++;
             }
             printf("\n");
