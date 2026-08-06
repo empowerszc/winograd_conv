@@ -233,13 +233,26 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 | 方面 | 本项目 | ACL |
 |------|--------|-----|
 | 变换实现 | NEON/SVE intrinsics + SME .inst | NEON/SVE 汇编 + SME 汇编 |
-| GEMM | naive 三重循环（可替换 OpenBLAS） | arm_gemm 库（自动选 SVE/SME 内核） |
+| GEMM | OpenBLAS cblas_sgemm（可切换 naive） | arm_gemm 库（自动选 SVE/SME 内核） |
 | 通道并行度 | NEON=4, SVE=16, SME=64 | 同左 |
 | tail 处理 | NEON=3段降级, SVE/SME=谓词 | 同左 |
 | ISA 调度 | 运行时选项（--neon/--sve/--sme） | 编译期选择（注册表顺序） |
-| 多线程 | 可选 OpenMP | NEScheduler |
+| 多线程 | OpenMP parallel tile 循环 | NEScheduler |
 | 正确性 | ✅ 12/12 验证通过 | ✅ |
-| 性能 | 基准（naive GEMM） | 高度优化 |
+| 性能 | GEMM 接近 ACL；变换有 NCHW 标量开销 | 高度优化（专用数据布局） |
+
+### 性能分析
+
+使用 `--timing` 模式可查看各阶段时间占比：
+```bash
+./bench_winograd --timing --threads 16 --sme shapes.csv
+```
+
+已知瓶颈：
+1. **NCHW tile 提取**：通道非连续，标量逐元素拷贝（NCHW → tile 布局）
+2. **transform_2d 内部 `thread_local static std::vector tmp`**：虽然避免了每次堆分配，但首次 resize 仍有开销
+3. **OpenMP 并行收益受限**：tile 提取的标量循环和内存带宽限制了并行加速比
+4. **GEMM 串行**：OpenBLAS 设为单线程（避免与 OpenMP 冲突），如需并行可在 GEMM 循环加 `#pragma omp for`
 
 ## 扩展指南
 

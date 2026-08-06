@@ -131,13 +131,16 @@ cat shapes.csv | ./bench_winograd --neon
 
 7. **矩阵验证方法**：用 Winograd 多项式条件 `sum_j A^T[i][j]·B^T[j][a]·G[j][b] = C·delta(a, i+b)` 数值验证矩阵正确性。当矩阵来源不可靠时，可用求解器从 A^T 和 G 反解出正确的 B^T
 
+8. **OpenMP 并行策略**：tile 循环用 `#pragma omp parallel { 预分配; #pragma omp for }` 模式，per-thread 缓冲区在 parallel 区域内分配一次、复用。GEMM 不并行（OpenBLAS 设为单线程 `openblas_set_num_threads(1)` 避免线程冲突）
+
 ## 已知限制
 
 1. **GEMM 默认 naive**：生产环境需启用 `-DUSE_OPENBLAS=ON` 替换为 `cblas_sgemm`
 2. **无 prepare/execute 分离**：权重变换每次调用都重做（应预计算一次）
 3. **NCHW 布局**：通道维度非连续，tile 提取和输出写回是标量（无法向量化）
-4. **无多线程**：CMake 有 OpenMP 选项但未使用 `#pragma omp`
+4. **OpenMP 并行效果有限**：tile 循环已加 `#pragma omp parallel`，per-thread 缓冲区已预分配，但输入/输出变换的瓶颈是 NCHW 标量 tile 提取和 transform_2d 内部的 `thread_local static std::vector tmp` resize 开销，并行收益受限
 5. **SME 仅 F(4,4,3,3) 输出变换**：F(2,2,3,3) 输出变换回退到 SVE（ACL 也如此）
+6. **`--timing` 模式是串行的**：`run_with_timing()` 手动重现管道各步骤，不使用 OpenMP 并行。用于分析各阶段时间占比，不代表并行后的实际性能
 
 ## 历史修复记录
 
