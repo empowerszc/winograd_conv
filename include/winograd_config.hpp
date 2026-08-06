@@ -60,6 +60,12 @@ enum class ISALevel {
     SME,    // SME (matrix tile + FMOPA)
 };
 
+// Memory layout for input/output tensors
+enum class Layout {
+    NCHW,   // [N][IC][IH][IW] — channels outermost, non-contiguous tile access
+    NHWC,   // [N][IH][IW][IC] — channels innermost, contiguous tile access (faster)
+};
+
 // Get the best available ISA (compile-time detection)
 inline ISALevel detect_isa() {
 #if defined(__ARM_FEATURE_SME)

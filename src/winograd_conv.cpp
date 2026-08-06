@@ -248,14 +248,15 @@ void direct_convolution_3x3(
 // ============================================================================
 
 void winograd_convolution(
-    const float* src,   // [N][IC][IH][IW] (NCHW)
+    const float* src,   // NCHW: [N][IC][IH][IW]  or  NHWC: [N][IH][IW][IC]
     const float* wei,   // [OC][IC][3][3]
     const float* bias,  // [OC] or nullptr
-    float* dst,         // [N][OC][OH][OW] (NCHW)
+    float* dst,         // NCHW: [N][OC][OH][OW]  or  NHWC: [N][OH][OW][OC]
     int N, int IC, int IH, int IW,
     int OC, int OH, int OW,
     const WinogradConfig& config,
-    float act_min, float act_max
+    float act_min, float act_max,
+    Layout layout
 ) {
 #ifdef USE_OPENBLAS
     // OpenBLAS must use 1 thread — our OpenMP parallelism is on tiles, not GEMM
@@ -323,18 +324,27 @@ void winograd_convolution(
                 for (int tc = 0; tc < n_tile_cols; tc++) {
                     int tile_idx = tr * n_tile_cols + tc;
 
-                    // Zero only the tile (reuse buffer, no realloc)
-                    std::fill(d_tile.begin(), d_tile.end(), 0.0f);
-
                     // Extract input tile [TS][TS][IC] from src (with zero padding)
+                    std::fill(d_tile.begin(), d_tile.end(), 0.0f);
                     for (int ti = 0; ti < TS; ti++) {
                         for (int tj = 0; tj < TS; tj++) {
                             int ih = tr * OT - 1 + ti;
                             int iw = tc * OT - 1 + tj;
                             if (ih >= 0 && ih < IH && iw >= 0 && iw < IW) {
-                                for (int ic = 0; ic < IC; ic++) {
-                                    d_tile[(ti * TS + tj) * IC + ic] =
-                                        src[((n * IC + ic) * IH + ih) * IW + iw];
+                                if (layout == Layout::NHWC) {
+                                    // NHWC: channels contiguous → NEON batch copy
+                                    const float* sp = src + ((n * IH + ih) * IW + iw) * IC;
+                                    float* dp = d_tile.data() + (ti * TS + tj) * IC;
+                                    int ic = 0;
+                                    for (; ic + 4 <= IC; ic += 4)
+                                        vst1q_f32(dp + ic, vld1q_f32(sp + ic));
+                                    for (; ic < IC; ic++)
+                                        dp[ic] = sp[ic];
+                                } else {
+                                    // NCHW: channels non-contiguous → scalar
+                                    for (int ic = 0; ic < IC; ic++)
+                                        d_tile[(ti * TS + tj) * IC + ic] =
+                                            src[((n * IC + ic) * IH + ih) * IW + iw];
                                 }
                             }
                         }
@@ -405,9 +415,21 @@ void winograd_convolution(
                             int oh = tr * OT + oi;
                             int ow = tc * OT + oj;
                             if (oh < OH && ow < OW) {
-                                for (int oc = 0; oc < OC; oc++) {
-                                    dst[((n * OC + oc) * OH + oh) * OW + ow] =
-                                        f_tile[(oi * OT + oj) * OC + oc];
+                                if (layout == Layout::NHWC) {
+                                    // NHWC: channels contiguous → NEON batch copy
+                                    float* dp = dst + ((n * OH + oh) * OW + ow) * OC;
+                                    const float* sp = f_tile.data() + (oi * OT + oj) * OC;
+                                    int oc = 0;
+                                    for (; oc + 4 <= OC; oc += 4)
+                                        vst1q_f32(dp + oc, vld1q_f32(sp + oc));
+                                    for (; oc < OC; oc++)
+                                        dp[oc] = sp[oc];
+                                } else {
+                                    // NCHW: channels non-contiguous → scalar
+                                    for (int oc = 0; oc < OC; oc++) {
+                                        dst[((n * OC + oc) * OH + oh) * OW + ow] =
+                                            f_tile[(oi * OT + oj) * OC + oc];
+                                    }
                                 }
                             }
                         }

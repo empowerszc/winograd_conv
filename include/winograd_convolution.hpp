@@ -94,7 +94,8 @@ void winograd_convolution(
     int N, int IC, int IH, int IW,
     int OC, int OH, int OW,
     const WinogradConfig& config,
-    float act_min = -1e30f, float act_max = 1e30f
+    float act_min = -1e30f, float act_max = 1e30f,
+    Layout layout = Layout::NCHW
 );
 
 // ISA-dispatched transform functions (for testing/debugging)
@@ -116,19 +117,21 @@ void dispatch_output_transform(
 inline void winograd_convolution_f22(
     const float* src, const float* wei, const float* bias, float* dst,
     int N, int IC, int IH, int IW, int OC, int OH, int OW,
-    float act_min = -1e30f, float act_max = 1e30f
+    float act_min = -1e30f, float act_max = 1e30f,
+    Layout layout = Layout::NCHW
 ) {
     winograd_convolution(src, wei, bias, dst, N, IC, IH, IW, OC, OH, OW,
-                         WinogradConfig::F22_33(), act_min, act_max);
+                         WinogradConfig::F22_33(), act_min, act_max, layout);
 }
 
 inline void winograd_convolution_f44(
     const float* src, const float* wei, const float* bias, float* dst,
     int N, int IC, int IH, int IW, int OC, int OH, int OW,
-    float act_min = -1e30f, float act_max = 1e30f
+    float act_min = -1e30f, float act_max = 1e30f,
+    Layout layout = Layout::NCHW
 ) {
     winograd_convolution(src, wei, bias, dst, N, IC, IH, IW, OC, OH, OW,
-                         WinogradConfig::F44_33(), act_min, act_max);
+                         WinogradConfig::F44_33(), act_min, act_max, layout);
 }
 
 } // namespace winograd_conv

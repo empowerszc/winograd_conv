@@ -133,7 +133,7 @@ struct StepTimings {
 StepTimings run_with_timing(
     const float* src, const float* wei, const float* bias, float* dst,
     int N, int IC, int IH, int IW, int OC, int OH, int OW,
-    ISALevel isa
+    ISALevel isa, bool use_nhwc
 ) {
     const int TS = 6, OT = 4, NM = 36;
     const bool is_f44 = true;
@@ -177,7 +177,7 @@ StepTimings run_with_timing(
             for (int tc = 0; tc < n_tile_cols; tc++) {
                 int tile_idx = tr * n_tile_cols + tc;
 
-                // Sub-step A: tile extraction (NCHW → tile)
+                // Sub-step A: tile extraction (NCHW or NHWC)
                 auto sa = std::chrono::high_resolution_clock::now();
                 std::fill(d_tile.begin(), d_tile.end(), 0.0f);
                 for (int ti = 0; ti < TS; ti++) {
@@ -185,9 +185,18 @@ StepTimings run_with_timing(
                         int ih = tr * OT - 1 + ti;
                         int iw = tc * OT - 1 + tj;
                         if (ih >= 0 && ih < IH && iw >= 0 && iw < IW) {
-                            for (int ic = 0; ic < IC; ic++)
-                                d_tile[(ti * TS + tj) * IC + ic] =
-                                    src[((n * IC + ic) * IH + ih) * IW + iw];
+                            if (use_nhwc) {
+                                const float* sp = src + ((n * IH + ih) * IW + iw) * IC;
+                                float* dp = d_tile.data() + (ti * TS + tj) * IC;
+                                int ic = 0;
+                                for (; ic + 4 <= IC; ic += 4)
+                                    vst1q_f32(dp + ic, vld1q_f32(sp + ic));
+                                for (; ic < IC; ic++) dp[ic] = sp[ic];
+                            } else {
+                                for (int ic = 0; ic < IC; ic++)
+                                    d_tile[(ti * TS + tj) * IC + ic] =
+                                        src[((n * IC + ic) * IH + ih) * IW + iw];
+                            }
                         }
                     }
                 }
@@ -257,15 +266,24 @@ StepTimings run_with_timing(
                 auto sc = std::chrono::high_resolution_clock::now();
                 time_out_xform += std::chrono::duration<double, std::milli>(sc - sb).count();
 
-                // Sub-step F: writeback (NCHW)
+                // Sub-step F: writeback (NCHW or NHWC)
                 for (int oi = 0; oi < OT; oi++) {
                     for (int oj = 0; oj < OT; oj++) {
                         int oh = tr * OT + oi;
                         int ow = tc * OT + oj;
                         if (oh < OH && ow < OW) {
-                            for (int oc = 0; oc < OC; oc++)
-                                dst[((n * OC + oc) * OH + oh) * OW + ow] =
-                                    f_tile[(oi * OT + oj) * OC + oc];
+                            if (use_nhwc) {
+                                float* dp = dst + ((n * OH + oh) * OW + ow) * OC;
+                                const float* sp = f_tile.data() + (oi * OT + oj) * OC;
+                                int oc = 0;
+                                for (; oc + 4 <= OC; oc += 4)
+                                    vst1q_f32(dp + oc, vld1q_f32(sp + oc));
+                                for (; oc < OC; oc++) dp[oc] = sp[oc];
+                            } else {
+                                for (int oc = 0; oc < OC; oc++)
+                                    dst[((n * OC + oc) * OH + oh) * OW + ow] =
+                                        f_tile[(oi * OT + oj) * OC + oc];
+                            }
                         }
                     }
                 }
@@ -296,6 +314,7 @@ int main(int argc, char** argv) {
     int warmup = 3;
     int repeats = 10;
     bool timing_mode = false;
+    bool use_nhwc = false;
     std::vector<int> thread_counts = {1, 8, 16, 32, 38};
 
     for (int i = 1; i < argc; i++) {
@@ -306,6 +325,7 @@ int main(int argc, char** argv) {
         else if (arg == "--warmup" && i+1 < argc) { warmup = atoi(argv[++i]); }
         else if (arg == "--repeats" && i+1 < argc) { repeats = atoi(argv[++i]); }
         else if (arg == "--timing") { timing_mode = true; }
+        else if (arg == "--nhwc") { use_nhwc = true; }
         else if (arg == "--threads" && i+1 < argc) {
             thread_counts.clear();
             std::string t = argv[++i];
@@ -326,6 +346,7 @@ int main(int argc, char** argv) {
             printf("  --threads t1,t2,...      Thread counts (default 1,8,16,32,38)\n");
             printf("  --output result.csv      Write results to CSV file\n");
             printf("  --timing                 Fine-grained per-step timing\n");
+            printf("  --nhwc                   Use NHWC layout (channels contiguous)\n");
             return 0;
         } else {
             input_file = arg;
@@ -412,14 +433,15 @@ int main(int argc, char** argv) {
 
                 // Warmup
                 winograd_convolution_f44(src.data(), wei.data(), bias.data(), dst.data(),
-                                          N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f);
+                                          N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f,
+                                          use_nhwc ? Layout::NHWC : Layout::NCHW);
 
                 // Take best of several runs
                 StepTimings best;
                 best.total_ms = 1e30;
                 for (int i = 0; i < repeats; i++) {
                     auto st = run_with_timing(src.data(), wei.data(), bias.data(), dst.data(),
-                                              N, IC, IH, IW, OC, OH, OW, isa);
+                                              N, IC, IH, IW, OC, OH, OW, isa, use_nhwc);
                     if (st.total_ms < best.total_ms) best = st;
                 }
 
@@ -490,7 +512,8 @@ int main(int argc, char** argv) {
             // Warmup
             for (int i = 0; i < warmup; i++) {
                 winograd_convolution_f44(src.data(), wei.data(), bias.data(), dst.data(),
-                                          N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f);
+                                          N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f,
+                                          use_nhwc ? Layout::NHWC : Layout::NCHW);
             }
 
             // Benchmark
@@ -498,7 +521,8 @@ int main(int argc, char** argv) {
             for (int i = 0; i < repeats; i++) {
                 auto t0 = std::chrono::high_resolution_clock::now();
                 winograd_convolution_f44(src.data(), wei.data(), bias.data(), dst.data(),
-                                          N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f);
+                                          N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f,
+                                          use_nhwc ? Layout::NHWC : Layout::NCHW);
                 auto t1 = std::chrono::high_resolution_clock::now();
                 double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
                 best_ms = std::min(best_ms, ms);
