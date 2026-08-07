@@ -234,44 +234,54 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 |------|--------|-----|
 | 变换实现 | NEON/SVE intrinsics + SME .inst | NEON/SVE 汇编 + SME 汇编 |
 | GEMM | OpenBLAS cblas_sgemm（可切换 naive） | arm_gemm 库（自动选 SVE/SME 内核） |
-| 通道并行度 | NEON=4, SVE=16, SME=64 | 同左 |
-| tail 处理 | NEON=3段降级, SVE/SME=谓词 | 同左 |
-| ISA 调度 | 运行时选项（--neon/--sve/--sme） | 编译期选择（注册表顺序） |
-| 多线程 | OpenMP parallel tile 循环 | NEScheduler |
-| 正确性 | ✅ 12/12 验证通过 | ✅ |
-| 性能 | GEMM 接近 ACL；变换有 NCHW 标量开销 | 高度优化（专用数据布局） |
+| 数据布局 | NCHW + NHWC（`--nhwc` 切换） | NHWC + Winograd 专用布局 |
+| 多线程 | OpenMP（3 阶段合并 1 区域 + GEMM 并行） | NEScheduler |
+| 正确性 | ✅ 22/22 验证通过（NCHW + NHWC） | ✅ |
+| 性能 | t32=6.7ms vs oneDNN 3.6ms（1.86x） | 高度优化 |
 
 ### 性能分析
 
 使用 `--timing` 模式可查看各阶段时间占比：
 ```bash
-./bench_winograd --timing --threads 16 --sme shapes.csv
+./bench_winograd --timing --threads 16 --sve --nhwc shapes.csv
 ```
 
 细粒度计时将输入/输出各拆为 3 个子步骤：
 
 ```
-输入侧: TileExt(标量NCHW提取) → InXform(变换) → InScat(NEON拷贝)
-输出侧: OutGath(NEON拷贝) → OutXform(变换+ReLU) → OutWrite(标量NCHW写回)
+输入侧: TileExt(NCHW/NHWC提取) → InXform(变换) → InScat(NEON拷贝)
+输出侧: OutGath(NEON拷贝) → OutXform(变换+ReLU) → OutWrite(NCHW/NHWC写回)
 ```
 
-实测数据（4×192×40×40, SVE, 16 线程）：
+实测数据（4×192×40×40, NHWC, SVE, 1 线程）：
 
 | 阶段 | 时间(ms) | 占比 | 瓶颈 |
 |------|---------|------|------|
-| NCHW tile 提取 | 4.20 | 19% | 标量非连续读，内存带宽 |
-| NCHW 写回 | 2.95 | 13% | 标量非连续写，内存带宽 |
-| 输入变换 | 2.64 | 12% | NEON/SVE 计算 |
-| 输出变换 | 2.16 | 10% | NEON/SVE 计算 |
-| GEMM | 1.86 | 8% | OpenBLAS |
-| NEON gather/scatter | 2.47 | 11% | 向量化拷贝 |
+| 权重变换 | 3.18 | 19% | 串行，模板 intrinsics |
+| 输入变换 | 2.79 | 17% | NEON/SVE 计算 |
+| 输出变换 | 1.94 | 12% | NEON/SVE 计算 |
+| GEMM | 1.99 | 12% | OpenBLAS |
+| NEON gather/scatter | 2.25 | 14% | 向量化拷贝 |
+| NHWC tile 提取 | 1.10 | 7% | NEON 连续读 |
+| NHWC 写回 | 0.40 | 2% | NEON 连续写 |
 
-**主要瓶颈**：NCHW 布局导致 tile 提取+写回占 32%（标量逐通道非连续访问，内存带宽饱和，OpenMP 无法加速）。
+**主要瓶颈**：权重变换（串行，占 t32 的 47%）、GEMM 内核质量（OpenBLAS vs arm_gemm JIT）、OpenMP barrier 开销。
 
-**优化方向**：
-1. 改用 NHWC 布局（通道连续）→ tile 提取可用 NEON/SVE 批量加载
-2. prepare/execute 分离 → 权重变换只做一次
-3. GEMM 循环加 OpenMP → 多线程 GEMM
+**已实施的优化**：
+1. NHWC 布局（tile 提取 3.8x 加速）
+2. GEMM 并行（36 个 GEMM 分布到所有线程）
+3. 合并 OpenMP 区域（3→1 个 parallel region，fork/join 减 3x）
+4. `schedule(dynamic, 2)` 减少 tile 调度开销
+5. `thread_local static float*` + `malloc` 替代 `std::vector::resize`
+6. 内部 tile 跳过 `memset` 清零 + 预计算有效行列范围
+7. 输出变换 `nowait` 消除多余 barrier
+8. OpenBLAS 单线程避免 GEMM 线程冲突
+
+**优化历程**（Case 0, t32）：
+```
+NCHW 基线:  14.0ms → +NHWC: 14.0ms → +GEMM并行: 9.1ms → +合并OMP: 6.7ms
+                                                              3.89x → 1.86x (vs oneDNN)
+```
 
 ## 扩展指南
 
