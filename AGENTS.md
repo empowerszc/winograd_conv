@@ -131,31 +131,31 @@ cat shapes.csv | ./bench_winograd --neon
 
 7. **矩阵验证方法**：用 Winograd 多项式条件 `sum_j A^T[i][j]·B^T[j][a]·G[j][b] = C·delta(a, i+b)` 数值验证矩阵正确性。当矩阵来源不可靠时，可用求解器从 A^T 和 G 反解出正确的 B^T
 
-8. **OpenMP 并行策略**：tile 循环用 `#pragma omp parallel { 预分配; #pragma omp for }` 模式，per-thread 缓冲区在 parallel 区域内分配一次、复用。GEMM 不并行（OpenBLAS 设为单线程 `openblas_set_num_threads(1)` 避免线程冲突）
+8. **OpenMP 并行策略**：tile 循环用 `#pragma omp parallel { 预分配; #pragma omp for schedule(dynamic,2) }` 模式，per-thread 缓冲区在 parallel 区域内分配一次、复用。GEMM 循环用 `#pragma omp parallel for schedule(dynamic)` 并行 36 个 GEMM。OpenBLAS 设为单线程 `openblas_set_num_threads(1)` 避免 GEMM 内部线程与 OpenMP 线程冲突
+
+9. **NHWC 布局优化**：`Layout` 枚举选择 NCHW 或 NHWC。NHWC 下通道连续，tile 提取用 `vld1q_f32` NEON 批量加载（4 float/指令 vs NCHW 标量逐元素）。输出写回同理。tile 提取从 4.20ms → 1.10ms（3.8x），写回从 2.95ms → 0.40ms（7.4x）
+
+10. **transform_2d 临时缓冲区**：用 `thread_local static float*` + `malloc`/`free`，避免 `std::vector::resize()` 的函数调用和容量检查开销。仅在容量不足时才重新分配
 
 ## 已知限制
 
-1. **GEMM 默认 naive**：生产环境需启用 `-DUSE_OPENBLAS=ON` 替换为 `cblas_sgemm`
-2. **无 prepare/execute 分离**：权重变换每次调用都重做（应预计算一次）
-3. **NCHW 布局是主要瓶颈**：细粒度计时显示 NCHW 标量 tile 提取+写回占总时间 32%，变换计算占 22%，GEMM 仅占 8%。NCHW 下通道非连续，tile 提取/写回是标量逐元素拷贝，内存带宽受限，OpenMP 并行无法加速
-4. **OpenMP 并行收益有限**：tile 循环已加 `#pragma omp parallel`，per-thread 缓冲区已预分配。但瓶颈是 NCHW 标量操作（内存带宽饱和）和每 tile 工作量小（~19μs），线程调度开销可能抵消并行收益
+1. **GEMM 用 OpenBLAS**：启用 `-DUSE_OPENBLAS=ON`。OpenBLAS 单线程（`openblas_set_num_threads(1)`），GEMM 循环用 `#pragma omp parallel for` 并行。与 oneDNN 的 arm_gemm JIT 相比仍有 2-3x GEMM 性能差距
+2. **NCHW/NHWC 双布局**：默认 NCHW（`Layout::NCHW`），可用 `--nhwc` 切换 NHWC。NHWC 的 tile 提取/写回用 NEON 批量加载（3.8x/7.4x 快于 NCHW 标量）
+3. **OpenMP 并行**：tile 循环 + GEMM 循环均并行。每 batch 有 3 个并行区域（输入→GEMM→输出），有 fork/join 开销
+4. **多线程扩展性受限**：8 线程后加速停滞，原因：GEMM 内核质量、OpenMP fork/join 开销（12 次/batch）、NUMA 远程访问（920F 16 NUMA）
 5. **SME 仅 F(4,4,3,3) 输出变换**：F(2,2,3,3) 输出变换回退到 SVE（ACL 也如此）
-6. **`--timing` 模式是串行的**：`run_with_timing()` 手动重现管道各步骤，不使用 OpenMP 并行。用于分析各阶段时间占比，不代表并行后的实际性能
+6. **`--timing` 模式是串行的**：`run_with_timing()` 手动重现管道各步骤，不使用 OpenMP。用于分析各阶段时间占比
 
-### 细粒度计时数据（Case: 4×192×40×40, SVE, 16 threads）
+### 性能对比（Case 0: 4×192×40×40, NHWC, SVE）
 
-| 阶段 | 时间(ms) | 占比 | 类型 |
-|------|---------|------|------|
-| NCHW tile 提取 | 4.20 | 19% | 标量，非连续读，内存带宽 |
-| NCHW 写回 | 2.95 | 13% | 标量，非连续写，内存带宽 |
-| 输入变换 B^T·d·B | 2.64 | 12% | NEON/SVE 计算 |
-| 输出变换 A^T·M·A | 2.16 | 10% | NEON/SVE 计算 |
-| 权重变换 | 1.93 | 9% | 一次性 |
-| GEMM | 1.86 | 8% | OpenBLAS |
-| NEON gather | 1.64 | 7% | 向量化拷贝 |
-| NEON scatter | 0.83 | 4% | 向量化拷贝 |
+| 线程 | 本项目(ms) | oneDNN(ms) | 差距 |
+|------|-----------|-----------|------|
+| 1 | 21.6 | 18.0 | 1.20x |
+| 8 | 10.3 | 4.9 | 2.10x |
+| 16 | 9.5 | 4.0 | 2.38x |
+| 32 | 9.1 | 3.6 | 2.53x |
 
-**结论**：NCHW 布局导致的标量操作（提取+写回）占 32%，是最大瓶颈。改用 NHWC（通道连续）可以从根本上解决此问题。
+差距来源：GEMM 内核（OpenBLAS vs arm_gemm JIT）、OpenMP fork/join 开销、NUMA 效应。详见 `PERFORMANCE_ANALYSIS.md`
 
 ## 历史修复记录
 

@@ -312,13 +312,16 @@ void winograd_convolution(
 
     // ---- Step 2: For each batch ----
     for (int n = 0; n < N; n++) {
-        // ---- Step 2a: Input transform (parallelized over tiles) ----
+        // Single OpenMP region: input → GEMM → output (reduces fork/join overhead)
         #pragma omp parallel
         {
-            // Pre-allocate per-thread buffers ONCE, reuse across tiles
+            // Allocate ALL per-thread buffers once, reuse across all 3 phases
             std::vector<float> d_tile(TS * TS * IC, 0.0f);
             std::vector<float> U_tile(TS * TS * IC, 0.0f);
+            std::vector<float> M_tile(TS * TS * OC, 0.0f);
+            std::vector<float> f_tile(OT * OT * OC, 0.0f);
 
+            // ---- Phase 1: Input transform (parallelized over tiles) ----
             #pragma omp for collapse(2) schedule(dynamic, 2)
             for (int tr = 0; tr < n_tile_rows; tr++) {
                 for (int tc = 0; tc < n_tile_cols; tc++) {
@@ -332,7 +335,6 @@ void winograd_convolution(
                             int iw = tc * OT - 1 + tj;
                             if (ih >= 0 && ih < IH && iw >= 0 && iw < IW) {
                                 if (layout == Layout::NHWC) {
-                                    // NHWC: channels contiguous → NEON batch copy
                                     const float* sp = src + ((n * IH + ih) * IW + iw) * IC;
                                     float* dp = d_tile.data() + (ti * TS + tj) * IC;
                                     int ic = 0;
@@ -341,7 +343,6 @@ void winograd_convolution(
                                     for (; ic < IC; ic++)
                                         dp[ic] = sp[ic];
                                 } else {
-                                    // NCHW: channels non-contiguous → scalar
                                     for (int ic = 0; ic < IC; ic++)
                                         d_tile[(ti * TS + tj) * IC + ic] =
                                             src[((n * IC + ic) * IH + ih) * IW + iw];
@@ -369,24 +370,19 @@ void winograd_convolution(
                     }
                 }
             }
-        }
+            // implicit barrier after #pragma omp for — ensures U is complete before GEMM
 
-        // ---- Step 2b: GEMM (parallelized over Winograd domain elements) ----
-        #pragma omp parallel for schedule(dynamic)
-        for (int ts_idx = 0; ts_idx < NM; ts_idx++) {
-            const float* U_slice = U.data() + ts_idx * n_tiles * IC;
-            const float* V_slice = V.data() + ts_idx * OC * IC;
-            float* M_slice = M_buf.data() + ts_idx * n_tiles * OC;
-            winograd_gemm(U_slice, V_slice, M_slice, n_tiles, OC, IC);
-        }
+            // ---- Phase 2: GEMM (parallelized over Winograd domain elements) ----
+            #pragma omp for schedule(dynamic)
+            for (int ts_idx = 0; ts_idx < NM; ts_idx++) {
+                const float* U_slice = U.data() + ts_idx * n_tiles * IC;
+                const float* V_slice = V.data() + ts_idx * OC * IC;
+                float* M_slice = M_buf.data() + ts_idx * n_tiles * OC;
+                winograd_gemm(U_slice, V_slice, M_slice, n_tiles, OC, IC);
+            }
+            // implicit barrier — ensures M_buf is complete before output transform
 
-        // ---- Step 2c: Output transform (parallelized over tiles) ----
-        #pragma omp parallel
-        {
-            // Pre-allocate per-thread buffers ONCE, reuse across tiles
-            std::vector<float> M_tile(TS * TS * OC, 0.0f);
-            std::vector<float> f_tile(OT * OT * OC, 0.0f);
-
+            // ---- Phase 3: Output transform (parallelized over tiles) ----
             #pragma omp for collapse(2) schedule(dynamic, 2)
             for (int tr = 0; tr < n_tile_rows; tr++) {
                 for (int tc = 0; tc < n_tile_cols; tc++) {
@@ -417,7 +413,6 @@ void winograd_convolution(
                             int ow = tc * OT + oj;
                             if (oh < OH && ow < OW) {
                                 if (layout == Layout::NHWC) {
-                                    // NHWC: channels contiguous → NEON batch copy
                                     float* dp = dst + ((n * OH + oh) * OW + ow) * OC;
                                     const float* sp = f_tile.data() + (oi * OT + oj) * OC;
                                     int oc = 0;
@@ -426,7 +421,6 @@ void winograd_convolution(
                                     for (; oc < OC; oc++)
                                         dp[oc] = sp[oc];
                                 } else {
-                                    // NCHW: channels non-contiguous → scalar
                                     for (int oc = 0; oc < OC; oc++) {
                                         dst[((n * OC + oc) * OH + oh) * OW + ow] =
                                             f_tile[(oi * OT + oj) * OC + oc];
@@ -437,7 +431,7 @@ void winograd_convolution(
                     }
                 }
             }
-        }
+        } // end single parallel region (1 fork/join per batch)
     }
 }
 
