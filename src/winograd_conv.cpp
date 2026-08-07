@@ -24,6 +24,10 @@
 extern "C" void openblas_set_num_threads(int);
 #endif
 
+#ifdef USE_ARM_GEMM
+#include <arm_gemm.hpp>
+#endif
+
 // Include ISA-specific transform implementations
 #include "winograd_transforms.hpp"           // NEON (always available on AArch64)
 
@@ -173,14 +177,22 @@ void winograd_gemm(
     int OC,
     int IC
 ) {
-#ifdef USE_OPENBLAS
-    // M = U * V^T  (U: n_tiles×IC, V: OC×IC, result: n_tiles×OC)
+#if defined(USE_ARM_GEMM)
+    // arm_gemm: use GemmHybrid with SVE kernel
+    // Requires: -DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/arm_gemm
+    // arm_gemm computes M = U * V^T (V is transposed)
+    arm_gemm::GemmHybrid<arm_gemm::gemm_wide, float, float> gemm(
+        n_tiles, OC, IC, false /* transpose A */, true /* transpose B */);
+    gemm.matmul(M, U, V, 1.0f, 0.0f);
+#elif defined(USE_OPENBLAS)
+    // OpenBLAS: cblas_sgemm
+    // Requires: -DUSE_OPENBLAS=ON
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                 n_tiles, OC, IC,
                 1.0f, U, IC, V, IC,
                 0.0f, M, OC);
 #else
-    // Naive fallback: triple loop
+    // Naive fallback: triple loop (no external dependency)
     for (int t = 0; t < n_tiles; t++) {
         for (int oc = 0; oc < OC; oc++) {
             float sum = 0.0f;
@@ -280,28 +292,34 @@ void winograd_convolution(
     int n_tile_cols = config.n_tile_cols(OW);
     int n_tiles = n_tile_rows * n_tile_cols;
 
-    // ---- Step 1: Weight transform (one-time, via ISA dispatch) ----
+    // ---- Step 1: Weight transform (parallelized over OC) ----
     // V[TS*TS][OC*IC], layout: V[m][oc*IC+ic]
     int V_size = TS * TS * OC * IC;
     std::vector<float> V(V_size, 0.0f);
 
-    for (int oc = 0; oc < OC; oc++) {
-        // Rearrange wei[oc][IC][3][3] → g[3][3][IC] (channels-contiguous)
+    #pragma omp parallel
+    {
+        // Per-thread buffers, reused across OC iterations
         std::vector<float> g(9 * IC);
-        for (int ic = 0; ic < IC; ic++)
-            for (int kh = 0; kh < 3; kh++)
-                for (int kw = 0; kw < 3; kw++)
-                    g[(kh * 3 + kw) * IC + ic] =
-                        wei[((oc * IC + ic) * 3 + kh) * 3 + kw];
-
-        // Transform via ISA dispatch (NEON/SVE/SME)
         std::vector<float> V_oc(TS * TS * IC);
-        dispatch_weight_transform(g.data(), V_oc.data(), IC, is_f44, isa);
 
-        // Store into V[m][oc*IC+ic]
-        for (int m = 0; m < TS * TS; m++)
+        #pragma omp for schedule(dynamic, 4)
+        for (int oc = 0; oc < OC; oc++) {
+            // Rearrange wei[oc][IC][3][3] → g[3][3][IC] (channels-contiguous)
             for (int ic = 0; ic < IC; ic++)
-                V[m * OC * IC + oc * IC + ic] = V_oc[m * IC + ic];
+                for (int kh = 0; kh < 3; kh++)
+                    for (int kw = 0; kw < 3; kw++)
+                        g[(kh * 3 + kw) * IC + ic] =
+                            wei[((oc * IC + ic) * 3 + kh) * 3 + kw];
+
+            // Transform via ISA dispatch (NEON/SVE/SME)
+            dispatch_weight_transform(g.data(), V_oc.data(), IC, is_f44, isa);
+
+            // Store into V[m][oc*IC+ic]
+            for (int m = 0; m < TS * TS; m++)
+                for (int ic = 0; ic < IC; ic++)
+                    V[m * OC * IC + oc * IC + ic] = V_oc[m * IC + ic];
+        }
     }
 
     // ---- Pre-allocate workspace (reused across batches) ----

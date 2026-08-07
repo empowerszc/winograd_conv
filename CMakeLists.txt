@@ -9,7 +9,9 @@ option(ENABLE_SVE "Enable SVE (-march=armv8.6-a+sve2)" OFF)
 option(ENABLE_SME "Enable SME+SVE (-march=armv9-a+sme)" OFF)
 option(ENABLE_OPENMP "Enable OpenMP threading" OFF)
 option(USE_OPENBLAS "Use OpenBLAS for GEMM (cblas_sgemm)" OFF)
+option(USE_ARM_GEMM "Use arm_gemm for GEMM (requires arm_gemm library)" OFF)
 set(OPENBLAS_ROOT "" CACHE PATH "Path to OpenBLAS installation")
+set(ARM_GEMM_ROOT "" CACHE PATH "Path to arm_gemm library (e.g. ComputeLibrary/src/core/NEON/kernels/convolution/common/gemm")
 
 # Base optimization
 add_compile_options(-O3 -g)
@@ -32,7 +34,7 @@ if(ENABLE_OPENMP)
 endif()
 
 # OpenBLAS support
-if(USE_OPENBLAS)
+if(USE_OPENBLAS AND NOT USE_ARM_GEMM)
     find_path(OPENBLAS_INCLUDE_DIR cblas.h
               PATHS ${OPENBLAS_ROOT}/include /usr/include /usr/local/include
                     /usr/include/aarch64-linux-gnu)
@@ -46,6 +48,22 @@ if(USE_OPENBLAS)
         message(STATUS "OpenBLAS found: ${OPENBLAS_LIBRARIES}")
     else()
         message(FATAL_ERROR "OpenBLAS not found. Install openblas-dev or set -DOPENBLAS_ROOT=/path")
+    endif()
+endif()
+
+# arm_gemm support (requires ACL source tree)
+if(USE_ARM_GEMM)
+    find_path(ARM_GEMM_INCLUDE_DIR arm_gemm.hpp
+              PATHS ${ARM_GEMM_ROOT} ${ARM_GEMM_ROOT}/include)
+    if(ARM_GEMM_INCLUDE_DIR)
+        add_compile_definitions(USE_ARM_GEMM)
+        include_directories(${ARM_GEMM_INCLUDE_DIR})
+        message(STATUS "arm_gemm found: ${ARM_GEMM_INCLUDE_DIR}")
+        # arm_gemm is header-only with JIT, needs to be compiled as source
+        # The user needs to add arm_gemm.cpp to the build or compile it as a library
+        # See: https://github.com/ARM-software/ComputeLibrary/tree/main/src/core/NEON/kernels/convolution/common/gemm
+    else()
+        message(FATAL_ERROR "arm_gemm.hpp not found. Set -DARM_GEMM_ROOT=/path/to/gemm")
     endif()
 endif()
 
