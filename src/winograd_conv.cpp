@@ -327,26 +327,37 @@ void winograd_convolution(
                 for (int tc = 0; tc < n_tile_cols; tc++) {
                     int tile_idx = tr * n_tile_cols + tc;
 
-                    // Extract input tile [TS][TS][IC] from src (with zero padding)
-                    std::fill(d_tile.begin(), d_tile.end(), 0.0f);
-                    for (int ti = 0; ti < TS; ti++) {
-                        for (int tj = 0; tj < TS; tj++) {
-                            int ih = tr * OT - 1 + ti;
+                    // Optimization B: only zero padding for edge tiles
+                    // Interior tiles have all positions valid → no zero needed
+                    bool is_edge = (tr == 0 || tr == n_tile_rows - 1 ||
+                                    tc == 0 || tc == n_tile_cols - 1);
+                    if (is_edge) {
+                        memset(d_tile.data(), 0, TS * TS * IC * sizeof(float));
+                    }
+
+                    // Pre-compute valid row/col range for this tile
+                    int ti_start = (tr == 0) ? 1 : 0;
+                    int ti_end   = (tr == n_tile_rows - 1) ? TS - 1 : TS;
+                    int tj_start = (tc == 0) ? 1 : 0;
+                    int tj_end   = (tc == n_tile_cols - 1) ? TS - 1 : TS;
+
+                    // Extract input tile [TS][TS][IC] — only valid rows/cols
+                    for (int ti = ti_start; ti < ti_end; ti++) {
+                        int ih = tr * OT - 1 + ti;
+                        for (int tj = tj_start; tj < tj_end; tj++) {
                             int iw = tc * OT - 1 + tj;
-                            if (ih >= 0 && ih < IH && iw >= 0 && iw < IW) {
-                                if (layout == Layout::NHWC) {
-                                    const float* sp = src + ((n * IH + ih) * IW + iw) * IC;
-                                    float* dp = d_tile.data() + (ti * TS + tj) * IC;
-                                    int ic = 0;
-                                    for (; ic + 4 <= IC; ic += 4)
-                                        vst1q_f32(dp + ic, vld1q_f32(sp + ic));
-                                    for (; ic < IC; ic++)
-                                        dp[ic] = sp[ic];
-                                } else {
-                                    for (int ic = 0; ic < IC; ic++)
-                                        d_tile[(ti * TS + tj) * IC + ic] =
-                                            src[((n * IC + ic) * IH + ih) * IW + iw];
-                                }
+                            if (layout == Layout::NHWC) {
+                                const float* sp = src + ((n * IH + ih) * IW + iw) * IC;
+                                float* dp = d_tile.data() + (ti * TS + tj) * IC;
+                                int ic = 0;
+                                for (; ic + 4 <= IC; ic += 4)
+                                    vst1q_f32(dp + ic, vld1q_f32(sp + ic));
+                                for (; ic < IC; ic++)
+                                    dp[ic] = sp[ic];
+                            } else {
+                                for (int ic = 0; ic < IC; ic++)
+                                    d_tile[(ti * TS + tj) * IC + ic] =
+                                        src[((n * IC + ic) * IH + ih) * IW + iw];
                             }
                         }
                     }
@@ -383,7 +394,8 @@ void winograd_convolution(
             // implicit barrier — ensures M_buf is complete before output transform
 
             // ---- Phase 3: Output transform (parallelized over tiles) ----
-            #pragma omp for collapse(2) schedule(dynamic, 2)
+            // nowait: skip implicit barrier — this is the last phase, no one waits
+            #pragma omp for collapse(2) schedule(dynamic, 2) nowait
             for (int tr = 0; tr < n_tile_rows; tr++) {
                 for (int tc = 0; tc < n_tile_cols; tc++) {
                     int tile_idx = tr * n_tile_cols + tc;
