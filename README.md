@@ -11,8 +11,10 @@ winograd_conv/
 ├── CMakeLists.txt                         ← 构建配置
 ├── AGENTS.md                              ← AI 代理指南
 ├── README.md                              ← 本文件
+├── PERFORMANCE_ANALYSIS.md                ← 性能分析与优化历程
+├── OPTIMIZATION_ANALYSIS.md               ← 优化方案详细展开
 ├── include/
-│   ├── winograd_config.hpp                ← 配置 + ISA 检测/选择
+│   ├── winograd_config.hpp                ← 配置 + ISA 检测/选择 + Layout 枚举
 │   ├── winograd_matrices.hpp              ← G/B^T/A^T 变换矩阵
 │   ├── winograd_transforms.hpp            ← NEON intrinsics 变换
 │   ├── winograd_transforms_sve.hpp        ← SVE intrinsics 变换
@@ -20,9 +22,20 @@ winograd_conv/
 │   └── winograd_convolution.hpp           ← 端到端接口 + dispatch 声明
 ├── src/
 │   └── winograd_conv.cpp                  ← 端到端实现 + GEMM + 直接卷积 + dispatch
-└── tests/
-    ├── test_winograd.cpp                  ← 正确性验证 + 变换调试
-    └── bench_winograd.cpp                 ← 性能基准（读 CSV，测 GFLOPS）
+├── tests/
+│   ├── test_winograd.cpp                  ← 正确性验证 + 变换调试
+│   └── bench_winograd.cpp                 ← 性能基准（读 CSV，测 GFLOPS）
+└── docs/
+    └── acl_reference/                     ← ACL 参考文档（从 oneDNN 源码树复制）
+        ├── README.md                      ← 文档索引与使用场景
+        ├── acl_wino_neon_intrinsics_annotated.md
+        ├── acl_wino_neon_asm_annotated.md
+        ├── acl_wino_sve_asm_annotated.md
+        ├── acl_wino_sme_asm_annotated.md
+        ├── acl_wino_implementation_details.md
+        ├── acl_wino_transform_kernels_explained.md
+        ├── acl_23.11_wino_transform_kernels_explained.md
+        └── acl_23.11_vs_53.1.0_wino_analysis.md
 ```
 
 ## 快速开始

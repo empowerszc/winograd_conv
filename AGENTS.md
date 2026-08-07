@@ -206,6 +206,6 @@ void execute(WinogradContext& ctx, const float* input, float* output, ...);
 
 ## 相关文档
 
-- ACL 源码：`D:\300Code\ComputeLibrary-53.1.0\src\core\NEON\kernels\convolution\winograd\`
-- ACL 注释文档：`D:\300Code\oneDNN-3.12.1\...\src\cpu\aarch64\acl_wino_*_annotated.md`（4 个文件）
-- 项目分析：`D:\300Code\oneDNN-3.12.1\...\src\cpu\aarch64\winograd_conv_project_analysis.md`
+- **ACL 参考文档**：`docs/acl_reference/` — 从 oneDNN 源码树复制的 ACL Winograd 实现分析文档（8 个文件）。用于指导后续优化（SVE/SME 汇编变换、arm_gemm GEMM 内核、权重变换手写公式等）。当前与 ACL SVE 版本仍有 1.86x 性能差距
+- **性能分析**：`PERFORMANCE_ANALYSIS.md` — 优化历程、差距分解、下一步建议
+- **优化方案**：`OPTIMIZATION_ANALYSIS.md` — 5 个优化提案的详细展开
