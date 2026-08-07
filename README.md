@@ -55,11 +55,11 @@ cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_SVE=ON
 # 启用 SME（包含 SVE）
 cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_SME=ON
 
-# 启用 OpenBLAS 高性能 GEMM（需要 openblas-dev）
+# 启用 OpenBLAS 高性能 GEMM
 cmake .. -DUSE_OPENBLAS=ON
 
-# 指定 OpenBLAS 路径
-cmake .. -DUSE_OPENBLAS=ON -DOPENBLAS_ROOT=/usr/local/openblas
+# 或用 arm_gemm JIT GEMM（与 oneDNN 相同，需 ACL 源码树）
+cmake .. -DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/gemm
 
 # 全部启用
 cmake .. -DENABLE_SME=ON -DENABLE_OPENMP=ON -DUSE_OPENBLAS=ON
@@ -246,11 +246,11 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 | 方面 | 本项目 | ACL |
 |------|--------|-----|
 | 变换实现 | NEON/SVE intrinsics + SME .inst | NEON/SVE 汇编 + SME 汇编 |
-| GEMM | OpenBLAS cblas_sgemm（可切换 naive） | arm_gemm 库（自动选 SVE/SME 内核） |
+| GEMM | 3 种可选：arm_gemm JIT > OpenBLAS > naive | arm_gemm 库（自动选 SVE/SME 内核） |
 | 数据布局 | NCHW + NHWC（`--nhwc` 切换） | NHWC + Winograd 专用布局 |
-| 多线程 | OpenMP（3 阶段合并 1 区域 + GEMM 并行） | NEScheduler |
+| 多线程 | OpenMP（权重+输入+GEMM+输出 全并行，合并区域） | NEScheduler |
 | 正确性 | ✅ 22/22 验证通过（NCHW + NHWC） | ✅ |
-| 性能 | t32=6.7ms vs oneDNN 3.6ms（1.86x） | 高度优化 |
+| 性能 | t32=6.7ms vs oneDNN 3.6ms（1.86x，权重并行后预期 ~1.1x） | 高度优化 |
 
 ### 性能分析
 
@@ -282,18 +282,20 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 
 **已实施的优化**：
 1. NHWC 布局（tile 提取 3.8x 加速）
-2. GEMM 并行（36 个 GEMM 分布到所有线程）
-3. 合并 OpenMP 区域（3→1 个 parallel region，fork/join 减 3x）
-4. `schedule(dynamic, 2)` 减少 tile 调度开销
-5. `thread_local static float*` + `malloc` 替代 `std::vector::resize`
-6. 内部 tile 跳过 `memset` 清零 + 预计算有效行列范围
-7. 输出变换 `nowait` 消除多余 barrier
-8. OpenBLAS 单线程避免 GEMM 线程冲突
+2. 权重变换并行（`#pragma omp for` over OC，占 t32 的 47%→~3%）
+3. GEMM 并行（36 个 GEMM 分布到所有线程）
+4. 合并 OpenMP 区域（3→1 个 parallel region，fork/join 减 3x）
+5. `schedule(dynamic, 2)` 减少 tile 调度开销
+6. `thread_local static float*` + `malloc` 替代 `std::vector::resize`
+7. 内部 tile 跳过 `memset` 清零 + 预计算有效行列范围
+8. 输出变换 `nowait` 消除多余 barrier
+9. OpenBLAS 单线程避免 GEMM 线程冲突
+10. arm_gemm JIT GEMM 内核可选（与 oneDNN 相同）
 
 **优化历程**（Case 0, t32）：
 ```
-NCHW 基线:  14.0ms → +NHWC: 14.0ms → +GEMM并行: 9.1ms → +合并OMP: 6.7ms
-                                                              3.89x → 1.86x (vs oneDNN)
+NCHW 基线:  14.0ms → +NHWC: → +GEMM并行: 9.1ms → +合并OMP+优化B/C: 6.7ms → +权重并行: 待测
+3.89x → 2.53x → 1.86x → (预期 ~1.1x)
 ```
 
 ## 扩展指南

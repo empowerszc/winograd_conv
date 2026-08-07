@@ -58,6 +58,7 @@ oneDNN 使用 ACL 的 Winograd 实现：
 | ③ +GEMM并行+schedule(2)+raw malloc | 21.6 | 10.3 | 9.5 | 9.1 | 9.0 | 2.53x |
 | ④ +合并OpenMP区域 | 18.9 | 7.9 | 7.0 | 6.7 | 6.6 | **1.86x** |
 | ⑤ +优化B+C(跳过fill+nowait) | 待测 | 待测 | 待测 | 待测 | 待测 | — |
+| ⑥ +权重变换并行 | 待测 | 待测 | 待测 | 待测 | 待测 | — |
 | oneDNN 参考 | 18.0 | 4.9 | 4.0 | 3.6 | — | 1.0x |
 
 ### 3.2 优化 ② 后的细粒度计时（NHWC, SVE, 1 线程）
@@ -107,6 +108,8 @@ oneDNN 使用 ACL 的 Winograd 实现：
 | 7 | 预计算有效行列范围 | `ti_start/ti_end` 消除 `if` 分支 | 内层循环无分支 |
 | 8 | 输出 `nowait` | 消除最后阶段的多余 barrier | -1 barrier/batch |
 | 9 | OpenBLAS `openblas_set_num_threads(1)` | 避免 GEMM 线程与 OpenMP 冲突 | 消除 double free |
+| 10 | 权重变换并行 | `#pragma omp for schedule(dynamic,4)` over OC，per-thread 缓冲区复用 | 权重 3.18ms→~0.2ms (32线程) |
+| 11 | arm_gemm JIT GEMM 可选 | `#if defined(USE_ARM_GEMM)` 切换到 ACL JIT 内核 | 与 oneDNN 相同 GEMM 内核 |
 
 ---
 

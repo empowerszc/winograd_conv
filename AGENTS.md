@@ -73,8 +73,14 @@ cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_SME=ON
 # OpenBLAS GEMM（推荐）
 cmake .. -DUSE_OPENBLAS=ON
 
-# 全部启用
+# arm_gemm GEMM（与 oneDNN 相同的 JIT 内核，需 ACL 源码树）
+cmake .. -DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/gemm
+
+# 全部启用（OpenBLAS 版）
 cmake .. -DENABLE_SME=ON -DENABLE_OPENMP=ON -DUSE_OPENBLAS=ON
+
+# 全部启用（arm_gemm 版）
+cmake .. -DENABLE_SME=ON -DENABLE_OPENMP=ON -DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=...
 
 make -j && ./test_winograd
 ```
@@ -82,7 +88,9 @@ make -j && ./test_winograd
 **关键**：
 - `__ARM_FEATURE_SVE`/`__ARM_FEATURE_SME` 是编译器内部宏，由 `-march` 触发，不能手动 `#define`
 - 修改 CMakeLists.txt 后必须 `rm -rf build` 清缓存
-- OpenBLAS 需要 `cblas.h` 头文件和 `libopenblas` 库。如系统未安装：`apt install libopenblas-dev`
+- GEMM 内核优先级：arm_gemm > OpenBLAS > naive（互斥，arm_gemm 优先）
+- OpenBLAS 需要 `cblas.h` + `libopenblas`：`apt install libopenblas-dev`
+- arm_gemm 是 ACL 的 JIT GEMM 库（header-only + JIT），路径示例：`ComputeLibrary-53.1.0/src/core/NEON/kernels/convolution/common/gemm`
 
 ## 测试
 
@@ -131,22 +139,32 @@ cat shapes.csv | ./bench_winograd --neon
 
 7. **矩阵验证方法**：用 Winograd 多项式条件 `sum_j A^T[i][j]·B^T[j][a]·G[j][b] = C·delta(a, i+b)` 数值验证矩阵正确性。当矩阵来源不可靠时，可用求解器从 A^T 和 G 反解出正确的 B^T
 
-8. **OpenMP 并行策略**：3 阶段合并为 1 个 `#pragma omp parallel` 区域。Phase 1（输入变换）→ barrier → Phase 2（GEMM）→ barrier → Phase 3（输出变换）`nowait`。per-thread 缓冲区在 parallel 区域入口一次性分配。`schedule(dynamic, 2)` 减少调度开销。GEMM 用 `#pragma omp parallel for schedule(dynamic)` 并行 36 个 GEMM，OpenBLAS 单线程避免冲突
+8. **OpenMP 并行策略**：4 个并行区域：
+   - 权重变换：`#pragma omp for schedule(dynamic, 4)` over OC
+   - Phase 1（输入变换）：`#pragma omp for collapse(2) schedule(dynamic, 2)` over tiles
+   - Phase 2（GEMM）：`#pragma omp for schedule(dynamic)` over 36 Winograd domain elements
+   - Phase 3（输出变换）：`#pragma omp for collapse(2) schedule(dynamic, 2) nowait` over tiles
+   - Phase 1-3 合并在 1 个 `#pragma omp parallel` 区域内，per-thread 缓冲区一次性分配复用。OpenBLAS 单线程 `openblas_set_num_threads(1)` 避免冲突
 
-9. **NHWC 布局优化**：`Layout` 枚举选择 NCHW 或 NHWC。NHWC 下通道连续，tile 提取用 `vld1q_f32` NEON 批量加载（4 float/指令 vs NCHW 标量逐元素）。输出写回同理。tile 提取从 4.20ms → 1.10ms（3.8x），写回从 2.95ms → 0.40ms（7.4x）
+9. **GEMM 内核切换**：编译期选择，优先级 arm_gemm > OpenBLAS > naive
+   - `USE_ARM_GEMM`：ACL JIT SVE 内核（与 oneDNN 相同），`-DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=...`
+   - `USE_OPENBLAS`：`cblas_sgemm`，`-DUSE_OPENBLAS=ON`
+   - 默认：naive 三重循环
 
-10. **transform_2d 临时缓冲区**：用 `thread_local static float*` + `malloc`/`free`，避免 `std::vector::resize()` 的函数调用和容量检查开销。仅在容量不足时才重新分配
+10. **NHWC 布局优化**：`Layout` 枚举选择 NCHW 或 NHWC。NHWC 下 tile 提取用 `vld1q_f32` 连续加载（3.8x 快于 NCHW 标量）
 
-11. **tile 提取优化**：内部 tile（非边缘）跳过 `memset` 清零（所有位置有效，无需 padding）。边缘 tile 用 `memset`（比 `std::fill` 快）。预计算有效行列范围（`ti_start/ti_end`），消除内层 `if` 分支判断
+11. **transform_2d 临时缓冲区**：`thread_local static float*` + `malloc`/`free`，仅容量不足时重新分配
+
+12. **tile 提取优化**：内部 tile 跳过 `memset` 清零，预计算有效行列范围消除 `if` 分支
 
 ## 已知限制
 
-1. **GEMM 用 OpenBLAS**：启用 `-DUSE_OPENBLAS=ON`。OpenBLAS 单线程（`openblas_set_num_threads(1)`），GEMM 循环用 `#pragma omp for` 并行。与 oneDNN 的 arm_gemm JIT 相比仍有 GEMM 性能差距
-2. **NCHW/NHWC 双布局**：默认 NCHW（`Layout::NCHW`），可用 `--nhwc` 切换 NHWC。NHWC 的 tile 提取/写回用 NEON 批量加载（3.8x/7.4x 快于 NCHW 标量）
-3. **OpenMP 并行**：3 阶段合并为 1 个 parallel 区域，2 个必要 barrier（输入→GEMM, GEMM→输出）。`nowait` 消除输出后的多余 barrier。`schedule(dynamic, 2)` 减少 tile 调度开销
-4. **多线程扩展性受限**：8 线程后加速停滞，原因：权重变换串行（占 t32 的 47%）、OpenMP barrier 开销、GEMM 内核质量（OpenBLAS vs arm_gemm JIT）、NUMA 远程访问（920F 16 NUMA）
-5. **SME 仅 F(4,4,3,3) 输出变换**：F(2,2,3,3) 输出变换回退到 SVE（ACL 也如此）
-6. **`--timing` 模式是串行的**：`run_with_timing()` 手动重现管道各步骤，不使用 OpenMP。用于分析各阶段时间占比
+1. **GEMM 内核**：3 种可选（arm_gemm JIT > OpenBLAS > naive）。默认 naive，生产环境推荐 arm_gemm
+2. **NCHW/NHWC 双布局**：默认 NCHW，`--nhwc` 切换 NHWC。NHWC tile 提取 3.8x 快于 NCHW
+3. **OpenMP 并行**：权重变换 + 输入/输出变换 + GEMM 均已并行。Phase 1-3 合并 1 区域，2 barrier（输入→GEMM, GEMM→输出），输出 `nowait`。权重变换独立并行区域
+4. **多线程扩展性受限**：8 线程后加速停滞，剩余瓶颈：OpenMP barrier 开销、GEMM 内核质量（OpenBLAS vs arm_gemm JIT）、NUMA 远程访问（920F 16 NUMA）
+5. **SME 仅 F(4,4,3,3) 输出变换**：F(2,2,3,3) 输出变换回退到 SVE
+6. **`--timing` 模式是串行的**：用于分析各阶段时间占比，不代表并行后的实际性能
 
 ### 性能对比（Case 0: 4×192×40×40, NHWC, SVE）
 
@@ -157,7 +175,7 @@ cat shapes.csv | ./bench_winograd --neon
 | 16 | 7.0 | 4.0 | 1.75x |
 | 32 | 6.7 | 3.6 | 1.86x |
 
-差距来源：权重变换（47% of t32）、GEMM 内核质量、OpenMP barrier 开销。详见 `PERFORMANCE_ANALYSIS.md`
+权重变换并行化后的预期：t32 从 6.7ms → ~3.7ms（权重 3.18ms→~0.2ms）。详见 `PERFORMANCE_ANALYSIS.md`
 
 ## 历史修复记录
 
