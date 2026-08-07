@@ -319,7 +319,7 @@ void winograd_convolution(
             std::vector<float> d_tile(TS * TS * IC, 0.0f);
             std::vector<float> U_tile(TS * TS * IC, 0.0f);
 
-            #pragma omp for collapse(2) schedule(dynamic)
+            #pragma omp for collapse(2) schedule(dynamic, 2)
             for (int tr = 0; tr < n_tile_rows; tr++) {
                 for (int tc = 0; tc < n_tile_cols; tc++) {
                     int tile_idx = tr * n_tile_cols + tc;
@@ -371,7 +371,8 @@ void winograd_convolution(
             }
         }
 
-        // ---- Step 2b: GEMM ----
+        // ---- Step 2b: GEMM (parallelized over Winograd domain elements) ----
+        #pragma omp parallel for schedule(dynamic)
         for (int ts_idx = 0; ts_idx < NM; ts_idx++) {
             const float* U_slice = U.data() + ts_idx * n_tiles * IC;
             const float* V_slice = V.data() + ts_idx * OC * IC;
@@ -386,7 +387,7 @@ void winograd_convolution(
             std::vector<float> M_tile(TS * TS * OC, 0.0f);
             std::vector<float> f_tile(OT * OT * OC, 0.0f);
 
-            #pragma omp for collapse(2) schedule(dynamic)
+            #pragma omp for collapse(2) schedule(dynamic, 2)
             for (int tr = 0; tr < n_tile_rows; tr++) {
                 for (int tc = 0; tc < n_tile_cols; tc++) {
                     int tile_idx = tr * n_tile_cols + tc;

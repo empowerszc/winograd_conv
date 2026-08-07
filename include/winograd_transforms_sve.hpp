@@ -108,16 +108,23 @@ void transform_2d_sve(
     int channels,
     int channel_stride
 ) {
-    // Reuse thread-local buffer to avoid per-call heap allocation
-    thread_local static std::vector<float> tmp;
-    tmp.resize(OUT_SIZE * IN_SIZE * channels);
+    // Reuse thread-local raw buffer to avoid per-call allocation + resize overhead
+    thread_local static float* tmp = nullptr;
+    thread_local static size_t tmp_cap = 0;
+    size_t needed = (size_t)OUT_SIZE * IN_SIZE * channels;
+    if (tmp_cap < needed) {
+        free(tmp);
+        tmp = (float*)malloc(needed * sizeof(float));
+        tmp_cap = needed;
+    }
+    float* tmp_ptr = tmp;
 
     // Step 1: Row transform (apply M to each column)
     for (int j = 0; j < IN_SIZE; j++) {
         transform_1d_sve<OUT_SIZE, IN_SIZE>(
             matrix,
             input + j * channel_stride,
-            tmp.data() + j * channel_stride,
+            tmp_ptr + j * channel_stride,
             channels,
             IN_SIZE * channel_stride,
             IN_SIZE * channel_stride
@@ -128,7 +135,7 @@ void transform_2d_sve(
     for (int i = 0; i < OUT_SIZE; i++) {
         transform_1d_sve<OUT_SIZE, IN_SIZE>(
             matrix,
-            tmp.data() + i * IN_SIZE * channel_stride,
+            tmp_ptr + i * IN_SIZE * channel_stride,
             output + i * OUT_SIZE * channel_stride,
             channels,
             channel_stride,

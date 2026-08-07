@@ -127,14 +127,21 @@ void transform_2d_neon(
     int channels,
     int channel_stride     // stride between elements (= channels for packed layout)
 ) {
-    // Reuse thread-local buffer to avoid per-call heap allocation
-    thread_local static std::vector<float> tmp;
-    tmp.resize(OUT_SIZE * IN_SIZE * channels);
+    // Reuse thread-local raw buffer to avoid per-call allocation + resize overhead
+    thread_local static float* tmp = nullptr;
+    thread_local static size_t tmp_cap = 0;
+    size_t needed = (size_t)OUT_SIZE * IN_SIZE * channels;
+    if (tmp_cap < needed) {
+        free(tmp);
+        tmp = (float*)malloc(needed * sizeof(float));
+        tmp_cap = needed;
+    }
+    float* tmp_ptr = tmp;
 
     // Step 1: Row transform - for each column j, compute tmp[:][j] = M * input[:][j]
     for (int j = 0; j < IN_SIZE; j++) {
         const float* in_col = input + j * channel_stride;
-        float* tmp_col = tmp.data() + j * channel_stride;
+        float* tmp_col = tmp_ptr + j * channel_stride;
         transform_1d_neon<OUT_SIZE, IN_SIZE>(
             matrix, in_col, tmp_col, channels,
             IN_SIZE * channel_stride, IN_SIZE * channel_stride
@@ -143,7 +150,7 @@ void transform_2d_neon(
 
     // Step 2: Col transform - for each row i, compute output[i][:] = tmp[i] * M^T
     for (int i = 0; i < OUT_SIZE; i++) {
-        const float* tmp_row = tmp.data() + i * IN_SIZE * channel_stride;
+        const float* tmp_row = tmp_ptr + i * IN_SIZE * channel_stride;
         float* out_row = output + i * OUT_SIZE * channel_stride;
 
         transform_1d_neon<OUT_SIZE, IN_SIZE>(
