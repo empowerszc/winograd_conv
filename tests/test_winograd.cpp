@@ -40,50 +40,91 @@ float max_error(const float* a, const float* b, int size) {
     return max_err;
 }
 
+// Convert NCHW [N][C][H][W] to NHWC [N][H][W][C]
+void nchw_to_nhwc(const float* nchw, float* nhwc, int N, int C, int H, int W) {
+    for (int n = 0; n < N; n++)
+        for (int h = 0; h < H; h++)
+            for (int w = 0; w < W; w++)
+                for (int c = 0; c < C; c++)
+                    nhwc[((n * H + h) * W + w) * C + c] =
+                        nchw[((n * C + c) * H + h) * W + w];
+}
+
 // Run a single test case
 bool run_test(int N, int IC, int IH, int IW, int OC,
-              bool use_relu, bool use_f44) {
+              bool use_relu, bool use_f44, bool use_nhwc = false) {
     int OH = IH;  // stride=1, pad=1
     int OW = IW;
 
-    printf("  Test: N=%d IC=%d IH=%d IW=%d OC=%d OH=%d OW=%d %s %s\n",
+    const char* layout_str = use_nhwc ? "NHWC" : "NCHW";
+    printf("  Test: N=%d IC=%d IH=%d IW=%d OC=%d OH=%d OW=%d %s %s %s\n",
            N, IC, IH, IW, OC, OH, OW,
            use_f44 ? "F(4,4,3,3)" : "F(2,2,3,3)",
+           layout_str,
            use_relu ? "+ReLU" : "");
 
-    // Allocate and fill inputs
+    // Allocate and fill inputs (NCHW format, as used by direct convolution)
     int src_size = N * IC * IH * IW;
     int wei_size = OC * IC * 3 * 3;
     int dst_size = N * OC * OH * OW;
-    std::vector<float> src(src_size), wei(wei_size);
+    std::vector<float> src_nchw(src_size), wei(wei_size);
     std::vector<float> bias(OC);
-    fill_random(src);
+    fill_random(src_nchw);
     fill_random(wei);
     for (auto& b : bias) b = static_cast<float>(rand()) / static_cast<float>(RAND_MAX) * 0.5f;
 
     float act_min = use_relu ? 0.0f : -1e30f;
     float act_max = 1e30f;
 
-    // Reference: direct convolution
+    // Reference: direct convolution (always NCHW)
     std::vector<float> ref_dst(dst_size, 0.0f);
-    direct_convolution_3x3(src.data(), wei.data(), bias.data(), ref_dst.data(),
+    direct_convolution_3x3(src_nchw.data(), wei.data(), bias.data(), ref_dst.data(),
                            N, IC, IH, IW, OC, OH, OW, act_min, act_max);
 
     // Winograd convolution
     std::vector<float> wino_dst(dst_size, 0.0f);
-    if (use_f44) {
-        winograd_convolution_f44(src.data(), wei.data(), bias.data(), wino_dst.data(),
-                                 N, IC, IH, IW, OC, OH, OW, act_min, act_max);
-    } else {
-        winograd_convolution_f22(src.data(), wei.data(), bias.data(), wino_dst.data(),
-                                 N, IC, IH, IW, OC, OH, OW, act_min, act_max);
-    }
+    Layout layout = use_nhwc ? Layout::NHWC : Layout::NCHW;
 
-    // Compare
-    float err = max_error(ref_dst.data(), wino_dst.data(), dst_size);
-    bool pass = (err < 1e-3f);  // tolerance for float32
-    printf("    Max error: %.6f  %s\n", err, pass ? "PASS" : "FAIL");
-    return pass;
+    if (use_nhwc) {
+        // Convert input to NHWC
+        std::vector<float> src_nhwc(src_size);
+        nchw_to_nhwc(src_nchw.data(), src_nhwc.data(), N, IC, IH, IW);
+
+        if (use_f44) {
+            winograd_convolution_f44(src_nhwc.data(), wei.data(), bias.data(), wino_dst.data(),
+                                     N, IC, IH, IW, OC, OH, OW, act_min, act_max, Layout::NHWC);
+        } else {
+            winograd_convolution_f22(src_nhwc.data(), wei.data(), bias.data(), wino_dst.data(),
+                                     N, IC, IH, IW, OC, OH, OW, act_min, act_max, Layout::NHWC);
+        }
+
+        // Convert output back to NCHW for comparison
+        std::vector<float> wino_nchw(dst_size);
+        // NHWC → NCHW is the inverse of NCHW → NHWC
+        for (int n = 0; n < N; n++)
+            for (int oh = 0; oh < OH; oh++)
+                for (int ow = 0; ow < OW; ow++)
+                    for (int oc = 0; oc < OC; oc++)
+                        wino_nchw[((n * OC + oc) * OH + oh) * OW + ow] =
+                            wino_dst[((n * OH + oh) * OW + ow) * OC + oc];
+        float err = max_error(ref_dst.data(), wino_nchw.data(), dst_size);
+        bool pass = (err < 1e-3f);
+        printf("    Max error: %.6f  %s\n", err, pass ? "PASS" : "FAIL");
+        return pass;
+    } else {
+        if (use_f44) {
+            winograd_convolution_f44(src_nchw.data(), wei.data(), bias.data(), wino_dst.data(),
+                                     N, IC, IH, IW, OC, OH, OW, act_min, act_max, Layout::NCHW);
+        } else {
+            winograd_convolution_f22(src_nchw.data(), wei.data(), bias.data(), wino_dst.data(),
+                                     N, IC, IH, IW, OC, OH, OW, act_min, act_max, Layout::NCHW);
+        }
+
+        float err = max_error(ref_dst.data(), wino_dst.data(), dst_size);
+        bool pass = (err < 1e-3f);
+        printf("    Max error: %.6f  %s\n", err, pass ? "PASS" : "FAIL");
+        return pass;
+    }
 }
 
 int main(int argc, char** argv) {
@@ -92,6 +133,7 @@ int main(int argc, char** argv) {
     bool test_f22 = true;
     bool test_f44 = true;
     bool test_relu = false;
+    bool test_nhwc = false;
     ISALevel isa = detect_isa();
 
     // Parse environment variable first
@@ -104,6 +146,7 @@ int main(int argc, char** argv) {
         if (arg == "--f22") { test_f44 = false; test_f22 = true; }
         else if (arg == "--f44") { test_f22 = false; test_f44 = true; }
         else if (arg == "--relu") { test_relu = true; }
+        else if (arg == "--nhwc") { test_nhwc = true; }
         else if (arg == "--neon") { isa = ISALevel::NEON; }
         else if (arg == "--sve") { isa = ISALevel::SVE; }
         else if (arg == "--sme") { isa = ISALevel::SME; }
@@ -112,6 +155,7 @@ int main(int argc, char** argv) {
             printf("  --f22    Test only F(2,2,3,3)\n");
             printf("  --f44    Test only F(4,4,3,3)\n");
             printf("  --relu   Test with ReLU activation\n");
+            printf("  --nhwc   Test NHWC layout (channels contiguous)\n");
             printf("  --neon   Force NEON transforms\n");
             printf("  --sve    Force SVE transforms\n");
             printf("  --sme    Force SME transforms\n");
@@ -642,6 +686,25 @@ int main(int argc, char** argv) {
     pass = run_test(1, 32, 16, 16, 32, test_relu, true); total++; passed += pass;
     pass = run_test(1, 64, 28, 28, 64, test_relu, true); total++; passed += pass;
     printf("\n");
+
+    // NHWC layout tests (if --nhwc specified, also run default NCHW for comparison)
+    if (test_nhwc) {
+        printf("--- F(2,2,3,3) NHWC Tests ---\n");
+        pass = run_test(1, 3, 4, 4, 3, test_relu, false, true); total++; passed += pass;
+        pass = run_test(1, 4, 4, 4, 4, test_relu, false, true); total++; passed += pass;
+        pass = run_test(1, 8, 8, 8, 8, test_relu, false, true); total++; passed += pass;
+        pass = run_test(1, 32, 14, 14, 32, test_relu, false, true); total++; passed += pass;
+        pass = run_test(1, 64, 28, 28, 64, test_relu, false, true); total++; passed += pass;
+        printf("\n");
+
+        printf("--- F(4,4,3,3) NHWC Tests ---\n");
+        pass = run_test(1, 3, 4, 4, 3, test_relu, true, true); total++; passed += pass;
+        pass = run_test(1, 4, 8, 8, 4, test_relu, true, true); total++; passed += pass;
+        pass = run_test(1, 8, 8, 8, 8, test_relu, true, true); total++; passed += pass;
+        pass = run_test(1, 32, 16, 16, 32, test_relu, true, true); total++; passed += pass;
+        pass = run_test(1, 64, 28, 28, 64, test_relu, true, true); total++; passed += pass;
+        printf("\n");
+    }
 
     printf("=== Summary: %d/%d tests passed ===\n", passed, total);
     return (passed == total) ? 0 : 1;
