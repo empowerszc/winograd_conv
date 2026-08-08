@@ -292,53 +292,41 @@ void winograd_convolution(
     int n_tile_cols = config.n_tile_cols(OW);
     int n_tiles = n_tile_rows * n_tile_cols;
 
-    // ---- Step 1: Weight transform (parallelized over OC) ----
-    // V[TS*TS][OC*IC], layout: V[m][oc*IC+ic]
-    int V_size = TS * TS * OC * IC;
-    std::vector<float> V(V_size, 0.0f);
-
-    #pragma omp parallel
-    {
-        // Per-thread buffers, reused across OC iterations
-        std::vector<float> g(9 * IC);
-        std::vector<float> V_oc(TS * TS * IC);
-
-        #pragma omp for schedule(dynamic, 4)
-        for (int oc = 0; oc < OC; oc++) {
-            // Rearrange wei[oc][IC][3][3] → g[3][3][IC] (channels-contiguous)
-            for (int ic = 0; ic < IC; ic++)
-                for (int kh = 0; kh < 3; kh++)
-                    for (int kw = 0; kw < 3; kw++)
-                        g[(kh * 3 + kw) * IC + ic] =
-                            wei[((oc * IC + ic) * 3 + kh) * 3 + kw];
-
-            // Transform via ISA dispatch (NEON/SVE/SME)
-            dispatch_weight_transform(g.data(), V_oc.data(), IC, is_f44, isa);
-
-            // Store into V[m][oc*IC+ic]
-            for (int m = 0; m < TS * TS; m++)
-                for (int ic = 0; ic < IC; ic++)
-                    V[m * OC * IC + oc * IC + ic] = V_oc[m * IC + ic];
-        }
-    }
-
-    // ---- Pre-allocate workspace (reused across batches) ----
+    // ---- Step 1+2: Single OpenMP region for everything ----
+    // Weight transform → batch loop (input → GEMM → output)
+    // All in one parallel region to avoid extra fork/join
     int U_size = NM * n_tiles * IC;
     int M_size = NM * n_tiles * OC;
     std::vector<float> U(U_size, 0.0f);
     std::vector<float> M_buf(M_size, 0.0f);
 
+    #pragma omp parallel
+    {
+        // ---- Per-thread buffers (allocated once, reused everywhere) ----
+        std::vector<float> d_tile(TS * TS * IC, 0.0f);
+        std::vector<float> U_tile(TS * TS * IC, 0.0f);
+        std::vector<float> M_tile(TS * TS * OC, 0.0f);
+        std::vector<float> f_tile(OT * OT * OC, 0.0f);
+        std::vector<float> g_wt(9 * IC);
+        std::vector<float> V_oc_wt(TS * TS * IC);
+
+        // ---- Step 1: Weight transform (parallelized over OC) ----
+        #pragma omp for schedule(dynamic, 4)
+        for (int oc = 0; oc < OC; oc++) {
+            for (int ic = 0; ic < IC; ic++)
+                for (int kh = 0; kh < 3; kh++)
+                    for (int kw = 0; kw < 3; kw++)
+                        g_wt[(kh * 3 + kw) * IC + ic] =
+                            wei[((oc * IC + ic) * 3 + kh) * 3 + kw];
+            dispatch_weight_transform(g_wt.data(), V_oc_wt.data(), IC, is_f44, isa);
+            for (int m = 0; m < TS * TS; m++)
+                for (int ic = 0; ic < IC; ic++)
+                    V[m * OC * IC + oc * IC + ic] = V_oc_wt[m * IC + ic];
+        }
+        // implicit barrier: V must be complete before batch loop
+
     // ---- Step 2: For each batch ----
     for (int n = 0; n < N; n++) {
-        // Single OpenMP region: input → GEMM → output (reduces fork/join overhead)
-        #pragma omp parallel
-        {
-            // Allocate ALL per-thread buffers once, reuse across all 3 phases
-            std::vector<float> d_tile(TS * TS * IC, 0.0f);
-            std::vector<float> U_tile(TS * TS * IC, 0.0f);
-            std::vector<float> M_tile(TS * TS * OC, 0.0f);
-            std::vector<float> f_tile(OT * OT * OC, 0.0f);
-
             // ---- Phase 1: Input transform (parallelized over tiles) ----
             #pragma omp for collapse(2) schedule(dynamic, 2)
             for (int tr = 0; tr < n_tile_rows; tr++) {
@@ -461,8 +449,8 @@ void winograd_convolution(
                     }
                 }
             }
-        } // end single parallel region (1 fork/join per batch)
-    }
+        } // end for each batch
+    } // end single parallel region (1 fork/join for weight + all batches)
 }
 
 } // namespace winograd_conv
