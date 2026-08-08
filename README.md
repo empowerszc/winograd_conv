@@ -294,9 +294,15 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 
 **优化历程**（Case 0, t32）：
 ```
-NCHW 基线:  14.0ms → +NHWC: → +GEMM并行: 9.1ms → +合并OMP+优化B/C: 6.7ms → +权重并行: 待测
-3.89x → 2.53x → 1.86x → (预期 ~1.1x)
+NCHW 基线:  14.0ms → +NHWC: → +GEMM并行: 9.1ms → +合并OMP+优化B/C: 6.7ms
+3.89x → 2.53x → 1.86x
+
++权重独立并行(⑥): 7.2ms ↑(回退！额外fork/join)
++合并权重到主region(⑦): 待测
 ```
+
+**教训**：权重变换放独立 `#pragma omp parallel` 导致 Case 0/1 变慢。合并进主 region 修复。
+Case 3/4/5 在⑥阶段改善明显（t32: -19%~-57%），⑦应保留此改善。
 
 ## 扩展指南
 

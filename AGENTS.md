@@ -139,12 +139,15 @@ cat shapes.csv | ./bench_winograd --neon
 
 7. **矩阵验证方法**：用 Winograd 多项式条件 `sum_j A^T[i][j]·B^T[j][a]·G[j][b] = C·delta(a, i+b)` 数值验证矩阵正确性。当矩阵来源不可靠时，可用求解器从 A^T 和 G 反解出正确的 B^T
 
-8. **OpenMP 并行策略**：4 个并行区域：
+8. **OpenMP 并行策略**：单个 `#pragma omp parallel` 区域包含全部阶段：
    - 权重变换：`#pragma omp for schedule(dynamic, 4)` over OC
-   - Phase 1（输入变换）：`#pragma omp for collapse(2) schedule(dynamic, 2)` over tiles
-   - Phase 2（GEMM）：`#pragma omp for schedule(dynamic)` over 36 Winograd domain elements
-   - Phase 3（输出变换）：`#pragma omp for collapse(2) schedule(dynamic, 2) nowait` over tiles
-   - Phase 1-3 合并在 1 个 `#pragma omp parallel` 区域内，per-thread 缓冲区一次性分配复用。OpenBLAS 单线程 `openblas_set_num_threads(1)` 避免冲突
+   - barrier（V 必须完成才能进入 batch 循环）
+   - 每个 batch：Phase 1（输入变换）`#pragma omp for collapse(2) schedule(dynamic, 2)` → barrier → Phase 2（GEMM）`#pragma omp for schedule(dynamic)` → barrier → Phase 3（输出变换）`#pragma omp for collapse(2) schedule(dynamic, 2) nowait`
+   - 权重 + 所有 batch 合并在 1 个 parallel region，仅 1 次 fork/join
+   - 6 个 per-thread 缓冲区（d_tile, U_tile, M_tile, f_tile, g_wt, V_oc_wt）在入口一次性分配、全程复用
+   - OpenBLAS 单线程 `openblas_set_num_threads(1)` 避免冲突
+
+   **教训**：权重变换最初放在独立 `#pragma omp parallel` 中，导致 Case 0/1 变慢（额外 fork/join ~1-2ms 抵消权重并行收益）。修复方法是合并进主 parallel region。Case 4/5（大 IC）则受益明显（-19%~-30%）。
 
 9. **GEMM 内核切换**：编译期选择，优先级 arm_gemm > OpenBLAS > naive
    - `USE_ARM_GEMM`：ACL JIT SVE 内核（与 oneDNN 相同），`-DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=...`
@@ -181,39 +184,105 @@ cat shapes.csv | ./bench_winograd --neon
 
 | 日期 | 问题 | 根因 |
 |------|------|------|
-| 2026-08 | F44 全部失败 | F44_Bt 矩阵 5 个元素错误（B^T[3][2], B^T[4][2], B^T[5][1,2,3]），违反 Winograd 多项式条件。用数值求解器从 A^T 和 G 反解出正确 B^T |
+| 2026-08 | F44 全部失败 | F44_Bt 矩阵 5 个元素错误，用数值求解器从 A^T 和 G 反解出正确 B^T |
 | 2026-08 | F22 全部失败 | F22_A 矩阵 [1][1] 符号错误（-1 应为 +1） |
 | 2026-08 | F44 OOB 读取 | weight_transform_neon 冗余外层 k 循环导致 vld1q 越界读取（UB） |
 | 2026-08 | segfault | transform_2d_neon CHANNELS 模板参数未传，默认 0，零大小数组 |
 | 2026-08 | SME bias 翻倍 | 输出变换内部已加 bias，端到端函数又加一次 |
 | 2026-08 | 权重变换标量 | dispatch_weight_transform 已定义但未调用 |
+| 2026-08 | SVE 编译报错 | `svptest_first` 需要 2 参数；`static inline` 函数在模板中触发两阶段查找，改用宏 |
+| 2026-08 | OpenMP 不生效 | CMake `PRIVATE`→`PUBLIC`；`omp_set_num_threads` 原为桩函数 |
+| 2026-08 | double free | OpenBLAS 内部线程与 OpenMP 冲突，`openblas_set_num_threads(1)` |
+| 2026-08 | OpenMP 无加速 | 每 tile 在循环内 `std::vector` 分配导致堆锁竞争 |
+| 2026-08 | 权重并行后变慢 | 独立 `#pragma omp parallel` 增加额外 fork/join，合并进主 region 修复 |
+
+## 性能优化记录
+
+### 优化历程（Case 0: 4×192×40×40, NHWC, SVE）
+
+| 阶段 | t1(ms) | t8(ms) | t16(ms) | t32(ms) | vs oneDNN t32 |
+|------|--------|--------|---------|---------|-------------|
+| ① NCHW 基线 | 22.5 | 14.6 | 14.2 | 14.0 | 3.89x |
+| ② +NHWC 布局 | 16.3 | ~14 | ~14 | ~14 | ~3.89x |
+| ③ +GEMM并行+schedule(2)+raw malloc | 21.6 | 10.3 | 9.5 | 9.1 | 2.53x |
+| ④ +合并OpenMP区域 | 18.9 | 7.9 | 7.0 | 6.7 | **1.86x** |
+| ⑤ +优化B+C(跳过fill+nowait) | — | — | — | — | — |
+| ⑥ +权重变换并行（独立region） | 20.2 | 8.5 | 7.4 | 7.2 | 2.00x ↑变慢！ |
+| ⑦ +合并权重到主region | 待测 | 待测 | 待测 | 待测 | — |
+| oneDNN 参考 | 18.0 | 4.9 | 4.0 | 3.6 | 1.0x |
+
+**关键教训**：
+- ⑥ 权重变换放独立 `#pragma omp parallel`，Case 0 变慢（t32: 6.7→7.2），Case 4/5 改善（-19~-30%）。原因：额外 fork/join ~1-2ms 抵消小 OC 的权重并行收益
+- ⑦ 合并进主 region 修复，预期 Case 0 恢复到 ⑥之前的 6.7ms 或更好，同时保留 Case 4/5 的改善
+
+### 细粒度计时数据（NHWC, SVE, 1 线程, timing 模式）
+
+注意：timing 模式是串行的（不含 `#pragma omp`），OpenBLAS 可能用默认多线程
+
+| 阶段 | Case 0 (192×192) | Case 4 (384×96) | Case 5 (768×96) |
+|------|-----------------|----------------|-----------------|
+| 权重变换 | 1.96ms (12%) | 1.05ms (2%) | 1.96ms (8%) |
+| Tile 提取(NHWC) | 1.08ms (7%) | 9.14ms (20%) | 4.58ms (20%) |
+| 输入变换 | 2.78ms (18%) | 20.83ms (45%) | 9.81ms (42%) |
+| Scatter | 0.77ms (5%) | 4.97ms (11%) | 2.32ms (10%) |
+| GEMM | 1.22ms (8%) | 1.62ms (3%) | 2.16ms (9%) |
+| Gather | 1.82ms (12%) | 2.71ms (6%) | 0.43ms (2%) |
+| 输出变换 | 2.02ms (13%) | 4.70ms (10%) | 1.17ms (5%) |
+| 输出写回 | 0.38ms (2%) | 1.06ms (2%) | 0.28ms (1%) |
+
+### 多线程扩展性（合并 OpenMP 区域后，标准模式）
+
+| Case | Shape | Tiles | t1 | t8 | t8加速 | t32 | t32加速 |
+|------|-------|-------|-----|-----|--------|-----|--------|
+| 0 | 4,192,40,40 | 100 | 18.9 | 7.9 | 2.39x | 6.7 | 2.82x |
+| 1 | 4,96,80,80 | 400 | 25.3 | 7.4 | 3.42x | 5.3 | 4.78x |
+| 2 | 4,48,160,160 | 1600 | 69.6 | 14.3 | 4.87x | 8.9 | 7.82x |
+| 3 | 4,192,20,20 | 25 | 8.6 | 2.9 | 2.96x | 2.3 | 3.74x |
+| 4 | 4,384,80,80 | 400 | 54.7 | 12.5 | 4.38x | 6.3 | 8.68x |
+| 5 | 4,768,40,40 | 100 | 32.3 | 8.4 | 3.84x | 5.6 | 5.77x |
+
+### 权重变换独立并行后的多线程数据（⑥，有回退）
+
+| Case | Shape | t1 | t8 | t16 | t32 | t38 | vs ④ t32 |
+|------|-------|-----|-----|-----|-----|-----|---------|
+| 0 | 4,192,40,40 | 20.2 | 8.5 | 7.4 | 7.2 | 7.1 | ↑ +0.5ms |
+| 1 | 4,96,80,80 | 26.4 | 8.4 | 6.9 | 6.3 | 6.0 | ↑ +1.0ms |
+| 2 | 4,48,160,160 | 67.6 | 13.9 | 10.3 | 8.7 | 8.0 | ↓ -0.2ms |
+| 3 | 4,192,20,20 | 8.4 | 1.7 | 1.2 | 1.0 | 1.1 | ↓ -1.3ms |
+| 4 | 4,384,80,80 | 53.9 | 11.3 | 7.0 | 5.1 | 4.3 | ↓ -1.2ms |
+| 5 | 4,768,40,40 | 31.1 | 7.0 | 4.8 | 4.0 | 3.6 | ↓ -1.6ms |
+
+Case 3/4/5（大 IC 或少 tile）改善，Case 0/1（中 IC 多 tile）变慢
 
 ## 扩展指南
 
-### 替换 GEMM 为 OpenBLAS
+### GEMM 内核切换
+
+已有 3 种 GEMM 内核（编译期选择，互斥）：
 
 ```cpp
-// 在 winograd_conv.cpp 中替换 winograd_gemm() 函数体
-#include <cblas.h>
-void winograd_gemm(const float* U, const float* V, float* M,
-                   int n_tiles, int OC, int IC) {
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                n_tiles, OC, IC, 1.0f, U, IC, V, IC, 0.0f, M, OC);
-}
+#if defined(USE_ARM_GEMM)      // ACL JIT SVE 内核（与 oneDNN 相同）
+    arm_gemm::GemmHybrid<...> gemm(...); gemm.matmul(...);
+#elif defined(USE_OPENBLAS)     // OpenBLAS cblas_sgemm
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, ...);
+#else                           // naive 三重循环
+    for (...) ...
+#endif
 ```
 
-### 添加 prepare/execute 分离
+CMake 选项：
+- `-DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/gemm`（优先级最高）
+- `-DUSE_OPENBLAS=ON`（推荐，已验证可用）
+- 默认 naive（开发/验证用）
 
-```cpp
-struct WinogradContext {
-    std::vector<float> V;
-    WinogradConfig config;
-    ISALevel isa;
-    std::vector<float> U_workspace, M_workspace;
-};
-WinogradContext prepare(const float* weights, int OC, int IC, ...);
-void execute(WinogradContext& ctx, const float* input, float* output, ...);
-```
+### 下一步优化方向（按预期收益排序）
+
+详见 `PERFORMANCE_ANALYSIS.md` 和 `OPTIMIZATION_ANALYSIS.md`。
+
+1. **重构数据布局消除 barrier**（预期 -0.8ms）：U[tile][ts][ic] 替代 U[ts][tile][ic]，每 tile 独立 pipeline，0 barrier
+2. **arm_gemm 替换 OpenBLAS**（预期 -0.5ms）：JIT 针对小矩阵优化，需 ACL 源码树
+3. **变换汇编化**（预期 -0.3ms）：参考 `docs/acl_reference/acl_wino_sve_asm_annotated.md`
+4. **权重变换手写公式**（预期 -0.5ms）：参考 `docs/acl_reference/acl_wino_neon_intrinsics_annotated.md`
 
 ### 添加新配置（如 F(6,6,3,3)）
 
