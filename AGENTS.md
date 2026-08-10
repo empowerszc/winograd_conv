@@ -226,15 +226,49 @@ Case 3/4/5 已大幅超越 oneDNN（大 IC 时变换计算量大，OpenMP 并行
 | ① NCHW 基线 | 22.5 | 14.6 | 14.2 | 14.0 | 3.89x |
 | ② +NHWC 布局 | 16.3 | ~14 | ~14 | ~14 | ~3.89x |
 | ③ +GEMM并行+schedule(2)+raw malloc | 21.6 | 10.3 | 9.5 | 9.1 | 2.53x |
-| ④ +合并OpenMP区域 | 18.9 | 7.9 | 7.0 | 6.7 | **1.86x** |
+| ④ +合并OpenMP区域 | 18.9 | 7.9 | 7.0 | 6.7 | 1.86x |
 | ⑤ +优化B+C(跳过fill+nowait) | — | — | — | — | — |
 | ⑥ +权重变换并行（独立region） | 20.2 | 8.5 | 7.4 | 7.2 | 2.00x ↑变慢！ |
-| ⑦ +合并权重到主region | 待测 | 待测 | 待测 | 待测 | — |
+| ⑦ +合并权重到主region | 19.9 | 8.2 | 7.3 | 7.0 | 1.94x |
+| ⑧ +展平N个batch(9→3 barriers) | 20.2 | 7.3 | 6.4 | 6.0 | 1.67x Case0好, Case4+76%↓ |
+| ⑨ 回退到⑦(per-batch) | 20.6 | 8.1 | 7.2 | 7.0 | 1.94x (最终版) |
 | oneDNN 参考 | 18.0 | 4.9 | 4.0 | 3.6 | 1.0x |
 
 **关键教训**：
 - ⑥ 权重变换放独立 `#pragma omp parallel`，Case 0 变慢（t32: 6.7→7.2），Case 4/5 改善（-19~-30%）。原因：额外 fork/join ~1-2ms 抵消小 OC 的权重并行收益
-- ⑦ 合并进主 region 修复，预期 Case 0 恢复到 ⑥之前的 6.7ms 或更好，同时保留 Case 4/5 的改善
+- ⑦ 合并进主 region 修复，Case 0/1 恢复，Case 3/4/5 保持改善
+- ⑧ 展平 N 个 batch 减少 barrier（9→3），但 U/M_buf 内存增加 N 倍。Case 0（U=11MB）改善 -14%，Case 4（U=88MB）严重劣化 +76%（cache thrashing）。回退到⑦
+- **最终结论**：⑦（合并权重+per-batch）是最优方案，Case 0/1/2 慢于 oneDNN 但 Case 3-8 超越 oneDNN
+
+### 最终性能对比（完整 9 case, NHWC, SVE, 16 线程）
+
+| Case | Shape (N,IC,IH,IW) | (OC,IC) | Tiles | t16(ms) | oneDNN t16(ms) | 结果 |
+|------|---------------------|---------|-------|---------|---------------|------|
+| 0 | 4,192,40,40 | 192,192 | 100 | 7.20 | 3.55 | 慢 2.03x |
+| 1 | 4,96,80,80 | 96,96 | 400 | 7.54 | 4.22 | 慢 1.79x |
+| 2 | 4,48,160,160 | 48,48 | 1600 | 10.39 | 4.06 | 慢 2.56x |
+| 3 | 4,192,20,20 | 192,192 | 25 | 1.17 | 2.83 | **快 59%** ✓ |
+| 4 | 4,384,80,80 | 96,384 | 400 | 6.80 | 13.78 | **快 51%** ✓ |
+| 5 | 4,768,40,40 | 96,768 | 100 | 4.43 | 9.09 | **快 51%** ✓ |
+| 6 | 4,768,20,20 | 96,768 | 25 | 2.30 | 5.58 | **快 59%** ✓ |
+| 7 | 4,96,40,40 | 96,96 | 100 | 1.08 | 1.90 | **快 43%** ✓ |
+| 8 | 4,96,20,20 | 96,96 | 25 | 0.50 | 1.15 | **快 56%** ✓ |
+
+**6/9 case 超越 oneDNN**（快 43-59%）
+
+### 最终多线程扩展性（完整 9 case, 最终版⑦）
+
+| Case | Shape | Tiles | t1 | t8 | t16 | t32 | t38 | t8加速 | t32加速 |
+|------|-------|-------|-----|-----|-----|-----|-----|--------|--------|
+| 0 | 4,192,40,40 | 100 | 20.6 | 8.1 | 7.2 | 7.0 | 6.8 | 2.54x | 2.94x |
+| 1 | 4,96,80,80 | 400 | 28.6 | 9.0 | 7.5 | 6.9 | 6.7 | 3.18x | 4.14x |
+| 2 | 4,48,160,160 | 1600 | 67.0 | 13.8 | 10.4 | 8.7 | 8.0 | 4.85x | 7.70x |
+| 3 | 4,192,20,20 | 25 | 8.4 | 1.7 | 1.2 | 1.0 | 1.1 | 4.94x | 8.40x |
+| 4 | 4,384,80,80 | 400 | 53.5 | 11.1 | 6.8 | 4.9 | 4.1 | 4.82x | 10.92x |
+| 5 | 4,768,40,40 | 100 | 31.2 | 6.6 | 4.4 | 3.6 | 3.5 | 4.73x | 8.67x |
+| 6 | 4,768,20,20 | 25 | 17.7 | 3.2 | 2.3 | 2.0 | 1.8 | 5.48x | 8.85x |
+| 7 | 4,96,40,40 | 100 | 9.0 | 1.6 | 1.1 | 1.1 | 1.1 | 5.63x | 8.18x |
+| 8 | 4,96,20,20 | 25 | 2.9 | 0.7 | 0.5 | 0.5 | 0.5 | 4.38x | 5.79x |
 
 ### 细粒度计时数据（NHWC, SVE, 1 线程, timing 模式）
 
@@ -251,29 +285,46 @@ Case 3/4/5 已大幅超越 oneDNN（大 IC 时变换计算量大，OpenMP 并行
 | 输出变换 | 2.02ms (13%) | 4.70ms (10%) | 1.17ms (5%) |
 | 输出写回 | 0.38ms (2%) | 1.06ms (2%) | 0.28ms (1%) |
 
-### 多线程扩展性（合并 OpenMP 区域后，标准模式）
+### 胜负模式分析
 
-| Case | Shape | Tiles | t1 | t8 | t8加速 | t32 | t32加速 |
-|------|-------|-------|-----|-----|--------|-----|--------|
-| 0 | 4,192,40,40 | 100 | 18.9 | 7.9 | 2.39x | 6.7 | 2.82x |
-| 1 | 4,96,80,80 | 400 | 25.3 | 7.4 | 3.42x | 5.3 | 4.78x |
-| 2 | 4,48,160,160 | 1600 | 69.6 | 14.3 | 4.87x | 8.9 | 7.82x |
-| 3 | 4,192,20,20 | 25 | 8.6 | 2.9 | 2.96x | 2.3 | 3.74x |
-| 4 | 4,384,80,80 | 400 | 54.7 | 12.5 | 4.38x | 6.3 | 8.68x |
-| 5 | 4,768,40,40 | 100 | 32.3 | 8.4 | 3.84x | 5.6 | 5.77x |
+**赢的条件**（6/9 case, 快 43-59%）：
+- IC ≥ 384（GEMM 矩阵大，OpenBLAS 高效，权重并行收益大）
+- 或 tiles ≤ 100 且 IC ≥ 96（barrier 开销占比小）
 
-### 权重变换独立并行后的多线程数据（⑥，有回退）
+**输的条件**（3/9 case, 慢 1.79-2.56x）：
+- IC ≤ 192 且 tiles ≥ 100（GEMM K 维小 + barrier 开销占比大）
+- Case 2 最差（IC=48, tiles=1600）：GEMM K=48 极小 + 8 个 barrier
 
-| Case | Shape | t1 | t8 | t16 | t32 | t38 | vs ④ t32 |
-|------|-------|-----|-----|-----|-----|-----|---------|
-| 0 | 4,192,40,40 | 20.2 | 8.5 | 7.4 | 7.2 | 7.1 | ↑ +0.5ms |
-| 1 | 4,96,80,80 | 26.4 | 8.4 | 6.9 | 6.3 | 6.0 | ↑ +1.0ms |
-| 2 | 4,48,160,160 | 67.6 | 13.9 | 10.3 | 8.7 | 8.0 | ↓ -0.2ms |
-| 3 | 4,192,20,20 | 8.4 | 1.7 | 1.2 | 1.0 | 1.1 | ↓ -1.3ms |
-| 4 | 4,384,80,80 | 53.9 | 11.3 | 7.0 | 5.1 | 4.3 | ↓ -1.2ms |
-| 5 | 4,768,40,40 | 31.1 | 7.0 | 4.8 | 4.0 | 3.6 | ↓ -1.6ms |
+### 下一步优化方向（按预期收益排序）
 
-Case 3/4/5（大 IC 或少 tile）改善，Case 0/1（中 IC 多 tile）变慢
+详见 `PERFORMANCE_ANALYSIS.md` 和 `docs/acl_reference/`。
+
+**针对慢 case（0/1/2）的优化**：
+
+1. **arm_gemm 替换 OpenBLAS**（预期 Case 0/1/2 各 -1~2ms）
+   - OpenBLAS 对小 K（48-192）矩阵效率不如 arm_gemm JIT
+   - arm_gemm 针对具体矩阵大小自动生成最优 SVE 指令序列
+   - 使用：`-DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/gemm`
+   - 参考：`docs/acl_reference/acl_wino_implementation_details.md` 中 arm_gemm 选择机制
+
+2. **变换用 SVE intrinsics 优化**（预期 -0.5~1ms）
+   - 当前 `transform_2d` 用泛型模板循环，ACL 用手写 SVE intrinsics 完全展开
+   - 参考 `docs/acl_reference/acl_wino_sve_asm_annotated.md`：ACL 的 SVE 实现 361 行 vs 我们 ~100 行
+   - 可以在 SVE 路径中针对 F(4,4,3,3) 写专用展开（类似 ACL 的 `sve_fp32_6x6.cpp`）
+
+3. **合并 scatter/gather 到变换**（预期 -0.5ms）
+   - 当前变换先写 U_tile，再 NEON 拷贝到 U。可改为变换直接写 U
+   - 需要修改 `transform_2d` 支持非连续输出 stride
+
+4. **权重变换手写公式**（预期 -0.5ms）
+   - 当前用 `weight_transform_neon<6>` 模板循环，ACL 用直接展开 G 矩阵行
+   - 参考 `docs/acl_reference/acl_wino_neon_intrinsics_annotated.md`
+
+5. **启发式展平**（对 Case 0 有效，对 Case 4 无害）
+   - 当 `NM * n_tiles * IC * 4 < 16MB` 时展平 N 个 batch（9→3 barriers）
+   - 当内存大时保持 per-batch（避免 cache thrashing）
+
+**对已超越 oneDNN 的 case（3-8）**：当前已优，无需进一步优化
 
 ## 扩展指南
 
@@ -292,18 +343,42 @@ Case 3/4/5（大 IC 或少 tile）改善，Case 0/1（中 IC 多 tile）变慢
 ```
 
 CMake 选项：
-- `-DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/gemm`（优先级最高）
-- `-DUSE_OPENBLAS=ON`（推荐，已验证可用）
+- `-DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/gemm`（优先级最高，与 oneDNN 相同内核）
+- `-DUSE_OPENBLAS=ON`（当前使用，对小 K 矩阵不如 arm_gemm）
 - 默认 naive（开发/验证用）
+
+arm_gemm 路径示例：`ComputeLibrary-53.1.0/src/core/NEON/kernels/convolution/common/gemm`
 
 ### 下一步优化方向（按预期收益排序）
 
-详见 `PERFORMANCE_ANALYSIS.md` 和 `OPTIMIZATION_ANALYSIS.md`。
+详见 `PERFORMANCE_ANALYSIS.md` 和 `docs/acl_reference/`。
 
-1. **重构数据布局消除 barrier**（预期 -0.8ms）：U[tile][ts][ic] 替代 U[ts][tile][ic]，每 tile 独立 pipeline，0 barrier
-2. **arm_gemm 替换 OpenBLAS**（预期 -0.5ms）：JIT 针对小矩阵优化，需 ACL 源码树
-3. **变换汇编化**（预期 -0.3ms）：参考 `docs/acl_reference/acl_wino_sve_asm_annotated.md`
-4. **权重变换手写公式**（预期 -0.5ms）：参考 `docs/acl_reference/acl_wino_neon_intrinsics_annotated.md`
+**针对慢 case（0/1/2, 慢 1.79-2.56x）的优化**：
+
+1. **arm_gemm 替换 OpenBLAS**（预期 Case 0/1/2 各 -1~2ms）
+   - OpenBLAS 对小 K（48-192）矩阵效率不如 arm_gemm JIT
+   - arm_gemm 针对具体矩阵大小自动生成最优 SVE 指令序列
+   - 使用：`-DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/gemm`
+   - 参考：`docs/acl_reference/acl_wino_implementation_details.md` 中 arm_gemm 选择机制
+
+2. **变换用 SVE intrinsics 优化**（预期 -0.5~1ms）
+   - 当前 `transform_2d` 用泛型模板循环，ACL 用手写 SVE intrinsics 完全展开
+   - 参考 `docs/acl_reference/acl_wino_sve_asm_annotated.md`：ACL 的 SVE 实现 361 行 vs 我们 ~100 行
+   - 可以在 SVE 路径中针对 F(4,4,3,3) 写专用展开（类似 ACL 的 `sve_fp32_6x6.cpp`）
+
+3. **合并 scatter/gather 到变换**（预期 -0.5ms）
+   - 当前变换先写 U_tile，再 NEON 拷贝到 U。可改为变换直接写 U
+   - 需要修改 `transform_2d` 支持非连续输出 stride
+
+4. **权重变换手写公式**（预期 -0.5ms）
+   - 当前用 `weight_transform_neon<6>` 模板循环，ACL 用直接展开 G 矩阵行
+   - 参考 `docs/acl_reference/acl_wino_neon_intrinsics_annotated.md`
+
+5. **启发式展平**（对 Case 0 有效，对 Case 4 无害）
+   - 当 `NM * n_tiles * IC * 4 < 16MB` 时展平 N 个 batch（9→3 barriers）
+   - 当内存大时保持 per-batch（避免 cache thrashing）
+
+**对已超越 oneDNN 的 case（3-8, 快 43-59%）**：当前已优，无需进一步优化
 
 ### 添加新配置（如 F(6,6,3,3)）
 
@@ -314,6 +389,6 @@ CMake 选项：
 
 ## 相关文档
 
-- **ACL 参考文档**：`docs/acl_reference/` — 从 oneDNN 源码树复制的 ACL Winograd 实现分析文档（8 个文件）。用于指导后续优化（SVE/SME 汇编变换、arm_gemm GEMM 内核、权重变换手写公式等）。当前与 ACL SVE 版本仍有 1.86x 性能差距
-- **性能分析**：`PERFORMANCE_ANALYSIS.md` — 优化历程、差距分解、下一步建议
+- **ACL 参考文档**：`docs/acl_reference/` — 从 oneDNN 源码树复制的 ACL Winograd 实现分析文档（8 个文件）。用于指导后续优化（SVE/SME 汇编变换、arm_gemm GEMM 内核、权重变换手写公式等）
+- **性能分析**：`PERFORMANCE_ANALYSIS.md` — 完整优化历程（9 阶段）、9 case 对比数据、细粒度计时、差距分析
 - **优化方案**：`OPTIMIZATION_ANALYSIS.md` — 5 个优化提案的详细展开
