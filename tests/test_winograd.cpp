@@ -275,9 +275,11 @@ int main(int argc, char** argv) {
                                   1, IC, IH, IW, OC, IH, IW,
                                   -1e30f, 1e30f);
 
+        // With input[0][0]=1 and kernel tap (0,0), dst[oh][ow] = src[oh-1][ow-1],
+        // so the delta lands at output (1,1) = flat index 5 (not index 1).
         int errors = 0;
-        for (int i = 0; i < 4; i++) {
-            float expected = (i == 1) ? 1.0f : 0.0f;
+        for (int i = 0; i < 16; i++) {
+            float expected = (i == 5) ? 1.0f : 0.0f;
             if (fabs(dst[i] - expected) > 1e-3) {
                 printf("  dst[%d]: expected %.4f, got %.4f  ERROR\n", i, expected, dst[i]);
                 errors++;

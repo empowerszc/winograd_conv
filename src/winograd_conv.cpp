@@ -394,10 +394,20 @@ void winograd_convolution(
                         memset(d_tile, 0, TS * TS * IC * sizeof(float));
                     }
 
-                    int ti_start = (tr == 0) ? 1 : 0;
-                    int ti_end   = (tr == n_tile_rows - 1) ? TS - 1 : TS;
-                    int tj_start = (tc == 0) ? 1 : 0;
-                    int tj_end   = (tc == n_tile_cols - 1) ? TS - 1 : TS;
+                    // Clip the input-tile rows/cols to the actual input extent.
+                    // A tile spans ih in [tr*OT-1, tr*OT-1+TS); rows outside
+                    // [0, IH) stay zero (from the edge memset above). The old
+                    // "TS-1 for the last tile" rule only held for even sizes —
+                    // odd IH/IW (e.g. IH=7, last tile row reads ih=7) read one
+                    // past the last valid row, i.e. the next channel's row 0.
+                    int ih_begin = tr * OT - 1;
+                    int ti_start = (ih_begin < 0) ? -ih_begin : 0;
+                    int ti_end   = (ih_begin + TS > IH) ? (IH - ih_begin) : TS;
+                    if (ti_end < ti_start) ti_end = ti_start;
+                    int iw_begin = tc * OT - 1;
+                    int tj_start = (iw_begin < 0) ? -iw_begin : 0;
+                    int tj_end   = (iw_begin + TS > IW) ? (IW - iw_begin) : TS;
+                    if (tj_end < tj_start) tj_end = tj_start;
 
                     for (int ti = ti_start; ti < ti_end; ti++) {
                         int ih = tr * OT - 1 + ti;

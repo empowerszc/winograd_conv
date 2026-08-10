@@ -275,6 +275,8 @@ Case 3/4/5 已大幅超越 oneDNN（大 IC 时变换计算量大，OpenMP 并行
 
 **⚠️ 坑（2026-08-10 修复）**：`scratch_f32` 每个逻辑缓冲必须持有**独立的** `thread_local Scratch`（U/M/V 各一、6 个 tile 缓冲各一）。最初用一个 `Scratch` 服务所有缓冲，导致 9 个缓冲全部别名同一内存，正确性测试全挂（天文数字错误）。此坑已在代码注释中标注。
 
+**⚠️ 坑（2026-08-10 修复，预存 bug）**：tile 提取的边界裁剪原为「最后一个 tile 行/列用 `TS-1`」，只对**偶数** IH/IW 成立。奇数维度（如 IH=7，最后一行 tile 读 ih=7）会越界读到**下一通道的第 0 行**（batch 最后通道甚至读到缓冲外），正确性测试 F(2,2) N=2 IC=16 IH=7 挂。已改为按实际边界裁剪：`ti_end = (ih_begin+TS > IH) ? (IH - ih_begin) : TS`（`ih_begin = tr*OT-1`），偶数维行为不变。同时修正了 test_winograd.cpp End-to-End Debug 的错误期望（tap (0,0) 的 delta 输出在 (1,1) 即 flat index 5，不是 1）。
+
 **待验证**：在 920F 上重新跑 9 case 对比，重点看 Case 2（1600 tiles，拷贝量大）和 Case 4（tile 提取串行 9.14ms）。预期 tile 提取/scatter/gather/写回 4 项各 -50~75%（NEON→SVE-512），同时消除 ~33MB/调用的 memset 和每次调用的堆分配。
 
 ### 最终性能对比（完整 9 case, NHWC, SVE, 16 线程）
