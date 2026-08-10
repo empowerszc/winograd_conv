@@ -13,6 +13,7 @@
 //   --threads t1,t2,...      Thread counts to test (default: 1,8,16,32,38)
 //   --output result.csv      Write results to CSV file
 //   --timing                 Fine-grained per-step timing mode
+//   --verify                 Verify each case against direct convolution before benching
 //   --help                   Show help
 //
 // Input CSV format (comma-separated, first line is header):
@@ -115,6 +116,115 @@ bool read_shapes(const std::string& filename, std::vector<ShapeInfo>& shapes) {
         shapes.push_back(s);
     }
     return true;
+}
+
+// Compute max absolute difference between two arrays
+float max_error(const float* a, const float* b, int size) {
+    float max_err = 0.0f;
+    for (int i = 0; i < size; i++) {
+        float err = std::fabs(a[i] - b[i]);
+        if (err > max_err) max_err = err;
+    }
+    return max_err;
+}
+
+// Convert NCHW [N][C][H][W] to NHWC [N][H][W][C]
+void nchw_to_nhwc(const float* nchw, float* nhwc, int N, int C, int H, int W) {
+    for (int n = 0; n < N; n++)
+        for (int h = 0; h < H; h++)
+            for (int w = 0; w < W; w++)
+                for (int c = 0; c < C; c++)
+                    nhwc[((n * H + h) * W + w) * C + c] =
+                        nchw[((n * C + c) * H + h) * W + w];
+}
+
+// Parallel direct 3x3 convolution (stride=1, pad=1) used as verification
+// reference. Mirrors direct_convolution_3x3 but parallelizes the batch
+// dimension with OpenMP; without -fopenmp the pragma is a no-op and it
+// simply runs serially (slower, still correct).
+void direct_convolution_3x3_parallel(
+    const float* src,   // [N][IC][IH][IW]
+    const float* wei,   // [OC][IC][3][3]
+    const float* bias,  // [OC] or nullptr
+    float* dst,         // [N][OC][OH][OW]
+    int N, int IC, int IH, int IW,
+    int OC, int OH, int OW
+) {
+    #pragma omp parallel for
+    for (int n = 0; n < N; n++) {
+        for (int oc = 0; oc < OC; oc++) {
+            for (int oh = 0; oh < OH; oh++) {
+                for (int ow = 0; ow < OW; ow++) {
+                    float sum = bias ? bias[oc] : 0.0f;
+                    for (int ic = 0; ic < IC; ic++) {
+                        for (int kh = 0; kh < 3; kh++) {
+                            for (int kw = 0; kw < 3; kw++) {
+                                int ih = oh - 1 + kh;   // pad=1
+                                int iw = ow - 1 + kw;
+                                if (ih >= 0 && ih < IH && iw >= 0 && iw < IW) {
+                                    sum += src[((n * IC + ic) * IH + ih) * IW + iw] *
+                                           wei[((oc * IC + ic) * 3 + kh) * 3 + kw];
+                                }
+                            }
+                        }
+                    }
+                    dst[((n * OC + oc) * OH + oh) * OW + ow] = sum;
+                }
+            }
+        }
+    }
+}
+
+struct VerifyResult {
+    float max_err;
+    bool pass;
+    double ref_ms;
+};
+
+// Verify one shape: F44 Winograd (in the bench's layout) vs direct
+// convolution reference (NCHW). Tolerance matches test_winograd.cpp.
+VerifyResult verify_case(int N, int IC, int IH, int IW, int OC,
+                         int OH, int OW, bool use_nhwc) {
+    int src_size = N * IC * IH * IW;
+    int wei_size = OC * IC * 9;
+    int dst_size = N * OC * OH * OW;
+
+    std::vector<float> src_nchw(src_size), wei(wei_size), bias(OC);
+    for (auto& v : src_nchw) v = static_cast<float>(rand()) / RAND_MAX;
+    for (auto& v : wei) v = static_cast<float>(rand()) / RAND_MAX;
+    for (auto& b : bias) b = static_cast<float>(rand()) / RAND_MAX;
+
+    // Reference: parallel direct convolution (NCHW)
+    std::vector<float> ref_dst(dst_size, 0.0f);
+    auto t0 = std::chrono::high_resolution_clock::now();
+    direct_convolution_3x3_parallel(src_nchw.data(), wei.data(), bias.data(),
+                                    ref_dst.data(), N, IC, IH, IW, OC, OH, OW);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double ref_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    // Winograd in the bench's layout
+    std::vector<float> wino_dst(dst_size, 0.0f);
+    float err;
+    if (use_nhwc) {
+        std::vector<float> src_nhwc(src_size);
+        nchw_to_nhwc(src_nchw.data(), src_nhwc.data(), N, IC, IH, IW);
+        winograd_convolution_f44(src_nhwc.data(), wei.data(), bias.data(), wino_dst.data(),
+                                 N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f, Layout::NHWC);
+        // Convert output back to NCHW for comparison
+        std::vector<float> wino_nchw(dst_size);
+        for (int n = 0; n < N; n++)
+            for (int oh = 0; oh < OH; oh++)
+                for (int ow = 0; ow < OW; ow++)
+                    for (int oc = 0; oc < OC; oc++)
+                        wino_nchw[((n * OC + oc) * OH + oh) * OW + ow] =
+                            wino_dst[((n * OH + oh) * OW + ow) * OC + oc];
+        err = max_error(ref_dst.data(), wino_nchw.data(), dst_size);
+    } else {
+        winograd_convolution_f44(src_nchw.data(), wei.data(), bias.data(), wino_dst.data(),
+                                 N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f, Layout::NCHW);
+        err = max_error(ref_dst.data(), wino_dst.data(), dst_size);
+    }
+    return {err, err < 1e-3f, ref_ms};
 }
 
 // Fine-grained timing: manually run each step
@@ -297,6 +407,7 @@ int main(int argc, char** argv) {
     int repeats = 10;
     bool timing_mode = false;
     bool use_nhwc = false;
+    bool verify = false;
     std::vector<int> thread_counts = {1, 8, 16, 32, 38};
 
     for (int i = 1; i < argc; i++) {
@@ -307,6 +418,7 @@ int main(int argc, char** argv) {
         else if (arg == "--warmup" && i+1 < argc) { warmup = atoi(argv[++i]); }
         else if (arg == "--repeats" && i+1 < argc) { repeats = atoi(argv[++i]); }
         else if (arg == "--timing") { timing_mode = true; }
+        else if (arg == "--verify") { verify = true; }
         else if (arg == "--nhwc") { use_nhwc = true; }
         else if (arg == "--threads" && i+1 < argc) {
             thread_counts.clear();
@@ -328,6 +440,7 @@ int main(int argc, char** argv) {
             printf("  --threads t1,t2,...      Thread counts (default 1,8,16,32,38)\n");
             printf("  --output result.csv      Write results to CSV file\n");
             printf("  --timing                 Fine-grained per-step timing\n");
+            printf("  --verify                 Verify each case vs direct conv (aborts on FAIL)\n");
             printf("  --nhwc                   Use NHWC layout (channels contiguous)\n");
             return 0;
         } else {
@@ -390,6 +503,29 @@ int main(int argc, char** argv) {
     std::vector<ShapeInfo> shapes;
     for (const auto& s : all_shapes)
         if (s.valid) shapes.push_back(s);
+
+    // ---- Verification: compare each case against direct convolution ----
+    if (verify) {
+        printf("=== Verification (F44 Winograd vs direct conv, tolerance 1e-3) ===\n");
+        printf("#  %-4s %-4s %-5s %-5s %-5s  %-12s %-10s %s\n",
+               "MB", "IC", "IH", "IW", "OC", "max_err", "ref(ms)", "result");
+        int n_fail = 0;
+        for (const auto& s : shapes) {
+            int N = s.mb, IC = s.ic, IH = s.ih, IW = s.iw;
+            int OC = s.oc, OH = IH, OW = IW;
+            VerifyResult vr = verify_case(N, IC, IH, IW, OC, OH, OW, use_nhwc);
+            printf("%-4d %-4d %-5d %-5d %-5d  %12.3e %10.1f  %s\n",
+                   N, IC, IH, IW, OC, vr.max_err, vr.ref_ms,
+                   vr.pass ? "PASS" : "FAIL");
+            if (!vr.pass) n_fail++;
+        }
+        if (n_fail > 0) {
+            fprintf(stderr, "Verification FAILED for %d/%zu cases; aborting benchmark.\n",
+                    n_fail, shapes.size());
+            return 1;
+        }
+        printf("Verification: all %zu cases PASSED\n\n", shapes.size());
+    }
 
     // ---- Timing mode: fine-grained per-step breakdown ----
     if (timing_mode) {

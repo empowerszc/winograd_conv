@@ -43,7 +43,7 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
 | `winograd_convolution.hpp` | 端到端接口 | `winograd_convolution()`, `dispatch_*()` |
 | `winograd_conv.cpp` | 端到端实现 | `winograd_gemm()`, `direct_convolution_3x3()` |
 | `test_winograd.cpp` | 正确性验证 | `run_test()`, 变换级调试, B^T 矩阵求解器 |
-| `bench_winograd.cpp` | 性能基准 | CSV 解析, GFLOPS 测量, 细粒度计时, 多线程对比 |
+| `bench_winograd.cpp` | 性能基准 | CSV 解析, GFLOPS 测量, 细粒度计时, 多线程对比, `--verify` 逐 case 正确性验证（OpenMP 并行直接卷积参考） |
 | `profile_case.cpp` | 单 case profiling | `--timing` 8 子步骤, `--verify`, `--perf` 命令生成, 9 case preset |
 
 ### ISA 调度
@@ -107,6 +107,7 @@ make -j && ./test_winograd
 # 性能基准（读 CSV，自动过滤 stride=1 group=1 3x3）
 ./bench_winograd --sve --nhwc --threads 1,8,16,32,38 shapes.csv
 ./bench_winograd --timing --threads 16 --sve --nhwc shapes.csv  # 细粒度计时
+./bench_winograd --sve --nhwc --verify shapes.csv               # 逐 case 正确性验证（FAIL 则中止）
 cat shapes.csv | ./bench_winograd --neon
 
 # 单 case profiling（perf 友好）

@@ -103,6 +103,9 @@ WINOGRAD_ISA=sme ./test_winograd
 # 输出结果到 CSV
 ./bench_winograd --sve --nhwc --threads 32 --output result.csv shapes.csv
 
+# 逐 case 正确性验证（每个 case 与直接卷积对比，任一 FAIL 则中止）
+./bench_winograd --sve --nhwc --verify shapes.csv
+
 # NUMA 优化
 numactl --interleave=all ./bench_winograd --sve --nhwc --threads 32 shapes.csv
 ```
