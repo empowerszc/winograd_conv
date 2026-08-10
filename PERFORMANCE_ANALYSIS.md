@@ -295,19 +295,64 @@ OpenBLAS 对小矩阵（100×192×192）可能不如 arm_gemm JIT。可编译 ar
 
 参考 `docs/acl_reference/acl_wino_sve_asm_annotated.md` 中 ACL 的 SVE 汇编实现。
 
-### 6.5 优先级排序
+### 6.5 优先级排序（更新）
 
-| 优化 | 预期收益(t32) | 难度 | 依赖 |
-|------|-------------|------|------|
-| 权重变换手写公式 + 并行 | -1.5ms (22%) | 中 | ACL 参考文档 |
-| 重构数据布局消除 barrier | -0.8ms (12%) | 大 | 改变 GEMM 形状 |
-| arm_gemm 替换 OpenBLAS | -0.5ms (7%) | 大 | 编译 arm_gemm |
-| 变换汇编化 | -0.3ms (4%) | 大 | ACL SVE 汇编参考 |
-| **合计** | **-3.1ms** | | t32: 6.7→3.6ms ≈ oneDNN |
+| 优化 | 针对的 case | 预期收益(t32) | 难度 | 依赖 |
+|------|-----------|-------------|------|------|
+| C. SVE 替代 NEON 做内存操作 | Case 2 (1600 tiles) | -2ms | 小 | 无 |
+| A. Tile 分块处理 | Case 2 | -1ms | 中 | 无 |
+| F. 变换函数专用化 | 所有 case | -0.5~1ms | 中 | ACL 参考 |
+| 1. arm_gemm 替换 OpenBLAS | Case 0/1/2 | -1~2ms | 大 | ACL 源码树 |
+| 3. 合并 scatter/gather | 所有 case | -0.5ms | 中 | 改 transform 接口 |
+| D. 双缓冲 batch 重叠 | Case 0 | -0.5ms | 中 | 2× 内存 |
+| E. 权重直接写 V | 所有 case | -0.2ms | 小 | 改 transform 接口 |
+| 5. 启发式展平 | Case 0 | -0.5ms | 小 | 阈值判断 |
 
 ---
 
-## 7. 测试 shape 列表
+## 7. 新增优化思路（基于 920F 硬件特性）
+
+920F 无 L3 cache、L2 仅 768KB/核，内存访问模式对性能影响极大。以下是基于此特性的新方向：
+
+### A. Tile 分块处理（cache 友好）
+
+**问题**：一次性处理所有 tile，U（2.7-11MB）远超 L2（768KB），每 tile 都直接走主存。
+
+**方案**：将 tile 分为 K=8 一组，组内数据 8×6×6×192×4=221KB 能放 L2。组内完成 input→GEMM→output，减少主存访问。对 Case 2（1600 tiles, IC=48）收益最大。
+
+```cpp
+const int CHUNK = 8;
+for (int chunk_start = 0; chunk_start < n_tiles; chunk_start += CHUNK) {
+    int chunk_end = min(chunk_start + CHUNK, n_tiles);
+    // 1. 输入变换：chunk_start..chunk_end
+    // 2. GEMM：36 个 ts × (chunk_end-chunk_start) tiles
+    // 3. 输出变换：chunk_start..chunk_end
+}
+```
+
+### B. GEMM 批量合并
+
+将 36 次小 GEMM 调用合并，减少函数调用和 OpenMP 调度开销。对 Case 0/1/2（小 IC，GEMM 矩阵小）可能有效。
+
+### C. SVE 替代 NEON 做内存操作
+
+tile 提取、scatter、gather 当前用 NEON（4 float/指令），SVE-512 可 16 float/指令。对 Case 2（1600 tiles）收益最大。已在 SVE 编译路径下，只需在 tile 提取代码中用 `svld1_f32`/`svst1_f32` 替代 `vld1q_f32`/`vst1q_f32`。
+
+### D. 双缓冲（batch 间重叠）
+
+batch N 的输出变换与 batch N+1 的输入变换并行，用 OpenMP task 实现。内存翻倍但对小 case 可接受。
+
+### E. 权重变换直接写 V
+
+消除 V_oc 中间缓冲和拷贝。
+
+### F. 变换函数专用化
+
+F(4,4) 的 B^T 有 50% 零元素，专用展开可跳过零系数行/列，减少 ~50% 变换计算量。参考 `docs/acl_reference/acl_wino_neon_intrinsics_annotated.md`。
+
+---
+
+## 8. 测试 shape 列表
 
 以下 shape 从用户提供的 CSV 中筛选（stride=1, group=1, 3×3, pad=1）：
 

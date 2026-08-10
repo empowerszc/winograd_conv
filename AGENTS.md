@@ -381,6 +381,117 @@ arm_gemm 路径示例：`ComputeLibrary-53.1.0/src/core/NEON/kernels/convolution
 
 **对已超越 oneDNN 的 case（3-8, 快 43-59%）**：当前已优，无需进一步优化
 
+### 新增优化思路（基于 920F 硬件特性 + 性能数据）
+
+以下是基于 920F 无 L3 cache、L2 仅 768KB/核的硬件特性，以及对 3 个慢 case 的分析，提出的新优化方向：
+
+#### A. Tile 分块处理（cache 友好）
+
+**问题**：920F 无 L3，L2 仅 768KB/核。当前一次性处理所有 tile，U（2.7-11MB）远超 L2，每个 tile 的输入变换和 scatter 都直接走主存。
+
+**方案**：将 tile 分为 K 个一组（如 K=8），每组数据量 8×6×6×192×4=221KB 能放 L2。在组内完成 input→GEMM→output，减少主存访问。
+
+```cpp
+const int CHUNK = 8;
+for (int chunk_start = 0; chunk_start < n_tiles; chunk_start += CHUNK) {
+    int chunk_end = min(chunk_start + CHUNK, n_tiles);
+    // 1. 输入变换：chunk_start..chunk_end
+    // 2. GEMM：36 个 ts × (chunk_end-chunk_start) tiles
+    // 3. 输出变换：chunk_start..chunk_end
+}
+```
+
+**预期**：减少主存访问次数，改善 Case 2（1600 tiles, IC=48）的 cache 局部性。
+
+#### B. GEMM 批量合并（减少调用次数）
+
+**问题**：当前 36 次 `cblas_sgemm` 调用，每次 (n_tiles × IC × OC)。36 次调用有函数调用开销和 OpenMP 调度开销。
+
+**方案**：将多个 ts_idx 的 GEMM 合并为一次大 GEMM。将 U[ts0..ts3][tile][ic] 重排为 U_batch[4*n_tiles][ic]，V[ts0..ts3][oc][ic] 重排为 V_batch[4*OC][ic]，一次 GEMM 得到 M_batch[4*n_tiles][4*OC]。但输出布局复杂，需要额外的重排。
+
+更简单的方案：将 U 和 V 沿 K 维拼接（不改变 M/N），利用 cblas_sgemm 的 beta 参数做累加：
+
+```cpp
+// 不需要改布局，用 beta=1.0 累加多次 GEMM 结果到同一 M
+for (int ts = 0; ts < 36; ts++) {
+    cblas_sgemm(..., 1.0f, U_ts, V_ts, ts == 0 ? 0.0f : 1.0f, M, ...);
+}
+// 但这样不并行，不如当前的 #pragma omp for
+```
+
+此方案对大 IC case（GEMM 已经高效）帮助不大，但对小 IC case 可能减少调度开销。
+
+#### C. SVE 替代 NEON 做 tile 提取/scatter/gather
+
+**问题**：当前 tile 提取、scatter、gather 用 NEON（128-bit, 4 float/指令）。920F 支持 SVE-512（16 float/指令）。
+
+**方案**：在 SVE 编译路径下，将 NEON `vld1q_f32`/`vst1q_f32` 替换为 SVE `svld1_f32`/`svst1_f32`。tile 提取从 4 float/指令→16 float/指令，4× 加速。
+
+```cpp
+// 当前 NEON（4 float）
+for (; ic + 4 <= IC; ic += 4)
+    vst1q_f32(dp + ic, vld1q_f32(sp + ic));
+
+// SVE 路径（16 float，谓词自动处理 tail）
+if (isa >= ISALevel::SVE) {
+    svbool_t pg = svwhilelt_b32(ic, IC);
+    do {
+        svst1_f32(pg, dp + ic, svld1_f32(pg, sp + ic));
+        ic += svcntw();
+        pg = svwhilelt_b32(ic, IC);
+    } while (svptest_first(svptrue_b32(), pg));
+}
+```
+
+**预期**：tile 提取从 1.10ms → ~0.28ms（Case 0），scatter/gather 也有类似加速。对 Case 2（1600 tiles）收益最大。
+
+#### D. 双缓冲（batch 间重叠）
+
+**问题**：当前 batch 间串行：batch N 的输出完成后才开始 batch N+1 的输入。
+
+**方案**：分配双份 U/M_buf，batch N 的输出变换与 batch N+1 的输入变换重叠：
+
+```
+batch 0: input → GEMM → output
+batch 1:              input → GEMM → output  (与 batch 0 output 并行)
+```
+
+用 OpenMP task 实现：
+
+```cpp
+#pragma omp taskgroup
+{
+    #pragma omp task
+    { process_batch(0, U_A, M_A); }
+    #pragma omp task
+    { process_batch(1, U_B, M_B); } // 与 batch 0 的 output 并行
+}
+```
+
+**代价**：内存翻倍（2×U + 2×M），但对 Case 0（U=2.7MB）可接受。
+
+#### E. 权重变换直接写 V（消除 V_oc 中间缓冲）
+
+**问题**：当前权重变换先写 V_oc（per-OC），再拷贝到 V。多一次内存拷贝。
+
+**方案**：修改 `weight_transform_neon` 支持输出 stride，直接写 V[m*OC*IC + oc*IC + ic]。但 V 的 stride 与 V_oc 不同，需要参数化 transform 函数。
+
+#### F. 变换函数专用化（F(4,4,3,3) 硬编码）
+
+**问题**：当前 `transform_1d_neon<6,6>` 是泛型模板，循环内有 `if (matrix[o][k] == 0.0f)` 分支判断。ACL 为 F(4,4,3,3) 写了专用代码，完全展开，无分支。
+
+**方案**：为 F(4,4,3,3) 的输入变换（B^T 矩阵有大量零元素）和输出变换（A^T 矩阵有零元素）写专用函数，跳过零系数的行/列：
+
+```cpp
+// F(4,4) 专用输入变换，B^T[0] = [4,0,-5,0,1,0]
+// 只需处理 k=0,2,4（跳过 k=1,3,5 的零系数）
+void input_transform_f44_specialized(...) {
+    // 列变换：6 列，每列只需 3 个非零行 × 3 个非零系数 = 9 FMA（vs 泛型 6×6=36）
+}
+```
+
+**预期**：变换计算量减少 ~50%（F(4,4) 的 B^T 有 50% 零元素）。
+
 ### 添加新配置（如 F(6,6,3,3)）
 
 1. 在 `winograd_matrices.hpp` 添加 `F66_G`、`F66_Bt`、`F66_A`
