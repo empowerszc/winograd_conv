@@ -48,6 +48,35 @@ extern "C" void openblas_set_num_threads(int);
 namespace winograd_conv {
 
 // ============================================================================
+// Per-thread grow-on-demand scratch buffers
+// ============================================================================
+// Replaces per-call std::vector allocations. Each OpenMP thread gets its own
+// thread_local buffer that grows to the max size ever needed and is reused
+// across calls, so repeated winograd_convolution() calls (benchmark / inference
+// loops) stop churning the heap. malloc'd memory is never zeroed — every
+// scratch is fully overwritten before being read by its caller. Mirrors the
+// pattern already used inside transform_2d_*.
+
+namespace {
+
+inline float* scratch_f32(size_t n) {
+    struct Scratch {
+        float* ptr = nullptr;
+        size_t cap = 0;
+        ~Scratch() { free(ptr); }
+    };
+    thread_local Scratch s;
+    if (s.cap < n) {
+        free(s.ptr);
+        s.ptr = static_cast<float*>(malloc(n * sizeof(float)));
+        s.cap = n;
+    }
+    return s.ptr;
+}
+
+} // anonymous namespace
+
+// ============================================================================
 // ISA-dispatched transform wrappers
 // ============================================================================
 // These functions select between NEON/SVE/SME based on runtime ISA level.
@@ -305,18 +334,22 @@ void winograd_convolution(
     int U_size = NM * n_tiles * IC;
     int M_size = NM * n_tiles * OC;
     int V_size = TS * TS * OC * IC;
-    std::vector<float> U(U_size, 0.0f);
-    std::vector<float> M_buf(M_size, 0.0f);
-    std::vector<float> V(V_size, 0.0f);
+    // U/M_buf/V are fully overwritten before being read (Phase 1 scatter, GEMM
+    // beta=0, weight transform), so allocate uninitialized and reuse the
+    // per-thread buffer across calls instead of value-initializing + realloc'ing.
+    float* U = scratch_f32(U_size);
+    float* M_buf = scratch_f32(M_size);
+    float* V = scratch_f32(V_size);
 
     #pragma omp parallel
     {
-        std::vector<float> d_tile(TS * TS * IC, 0.0f);
-        std::vector<float> U_tile(TS * TS * IC, 0.0f);
-        std::vector<float> M_tile(TS * TS * OC, 0.0f);
-        std::vector<float> f_tile(OT * OT * OC, 0.0f);
-        std::vector<float> g_wt(9 * IC);
-        std::vector<float> V_oc_wt(TS * TS * IC);
+        // Per-thread tile buffers, also reuse across calls (see scratch_f32).
+        float* d_tile = scratch_f32(TS * TS * IC);
+        float* U_tile = scratch_f32(TS * TS * IC);
+        float* M_tile = scratch_f32(TS * TS * OC);
+        float* f_tile = scratch_f32(OT * OT * OC);
+        float* g_wt = scratch_f32(9 * IC);
+        float* V_oc_wt = scratch_f32(TS * TS * IC);
 
         // ---- Step 1: Weight transform (parallelized over OC) ----
         #pragma omp for schedule(dynamic, 4)
@@ -326,7 +359,7 @@ void winograd_convolution(
                     for (int kw = 0; kw < 3; kw++)
                         g_wt[(kh * 3 + kw) * IC + ic] =
                             wei[((oc * IC + ic) * 3 + kh) * 3 + kw];
-            dispatch_weight_transform(g_wt.data(), V_oc_wt.data(), IC, is_f44, isa);
+            dispatch_weight_transform(g_wt, V_oc_wt, IC, is_f44, isa);
             for (int m = 0; m < TS * TS; m++)
                 for (int ic = 0; ic < IC; ic++)
                     V[m * OC * IC + oc * IC + ic] = V_oc_wt[m * IC + ic];
@@ -343,7 +376,7 @@ void winograd_convolution(
                     bool is_edge = (tr == 0 || tr == n_tile_rows - 1 ||
                                     tc == 0 || tc == n_tile_cols - 1);
                     if (is_edge) {
-                        memset(d_tile.data(), 0, TS * TS * IC * sizeof(float));
+                        memset(d_tile, 0, TS * TS * IC * sizeof(float));
                     }
 
                     int ti_start = (tr == 0) ? 1 : 0;
@@ -357,12 +390,7 @@ void winograd_convolution(
                             int iw = tc * OT - 1 + tj;
                             if (layout == Layout::NHWC) {
                                 const float* sp = src + ((n * IH + ih) * IW + iw) * IC;
-                                float* dp = d_tile.data() + (ti * TS + tj) * IC;
-                                int ic = 0;
-                                for (; ic + 4 <= IC; ic += 4)
-                                    vst1q_f32(dp + ic, vld1q_f32(sp + ic));
-                                for (; ic < IC; ic++)
-                                    dp[ic] = sp[ic];
+                                copy_f32(sp, d_tile + (ti * TS + tj) * IC, IC);
                             } else {
                                 for (int ic = 0; ic < IC; ic++)
                                     d_tile[(ti * TS + tj) * IC + ic] =
@@ -371,18 +399,13 @@ void winograd_convolution(
                         }
                     }
 
-                    dispatch_input_transform(d_tile.data(), U_tile.data(), IC, is_f44, isa);
+                    dispatch_input_transform(d_tile, U_tile, IC, is_f44, isa);
 
                     for (int ti = 0; ti < TS; ti++) {
                         for (int tj = 0; tj < TS; tj++) {
                             int ts_idx = ti * TS + tj;
-                            float* dst_ptr = U.data() + (ts_idx * n_tiles + tile_idx) * IC;
-                            const float* src_ptr = U_tile.data() + (ti * TS + tj) * IC;
-                            int ic = 0;
-                            for (; ic + 4 <= IC; ic += 4)
-                                vst1q_f32(dst_ptr + ic, vld1q_f32(src_ptr + ic));
-                            for (; ic < IC; ic++)
-                                dst_ptr[ic] = src_ptr[ic];
+                            copy_f32(U_tile + (ti * TS + tj) * IC,
+                                     U + (ts_idx * n_tiles + tile_idx) * IC, IC);
                         }
                     }
                 }
@@ -391,9 +414,9 @@ void winograd_convolution(
             // Phase 2: GEMM
             #pragma omp for schedule(dynamic)
             for (int ts_idx = 0; ts_idx < NM; ts_idx++) {
-                const float* U_slice = U.data() + ts_idx * n_tiles * IC;
-                const float* V_slice = V.data() + ts_idx * OC * IC;
-                float* M_slice = M_buf.data() + ts_idx * n_tiles * OC;
+                const float* U_slice = U + ts_idx * n_tiles * IC;
+                const float* V_slice = V + ts_idx * OC * IC;
+                float* M_slice = M_buf + ts_idx * n_tiles * OC;
                 winograd_gemm(U_slice, V_slice, M_slice, n_tiles, OC, IC);
             }
 
@@ -406,17 +429,12 @@ void winograd_convolution(
                     for (int ti = 0; ti < TS; ti++) {
                         for (int tj = 0; tj < TS; tj++) {
                             int ts_idx = ti * TS + tj;
-                            const float* src_ptr = M_buf.data() + (ts_idx * n_tiles + tile_idx) * OC;
-                            float* dst_ptr = M_tile.data() + (ti * TS + tj) * OC;
-                            int oc = 0;
-                            for (; oc + 4 <= OC; oc += 4)
-                                vst1q_f32(dst_ptr + oc, vld1q_f32(src_ptr + oc));
-                            for (; oc < OC; oc++)
-                                dst_ptr[oc] = src_ptr[oc];
+                            copy_f32(M_buf + (ts_idx * n_tiles + tile_idx) * OC,
+                                     M_tile + (ti * TS + tj) * OC, OC);
                         }
                     }
 
-                    dispatch_output_transform(M_tile.data(), f_tile.data(), OC,
+                    dispatch_output_transform(M_tile, f_tile, OC,
                                               bias, act_min, act_max, is_f44, isa);
 
                     for (int oi = 0; oi < OT; oi++) {
@@ -425,13 +443,8 @@ void winograd_convolution(
                             int ow = tc * OT + oj;
                             if (oh < OH && ow < OW) {
                                 if (layout == Layout::NHWC) {
-                                    float* dp = dst + ((n * OH + oh) * OW + ow) * OC;
-                                    const float* sp = f_tile.data() + (oi * OT + oj) * OC;
-                                    int oc = 0;
-                                    for (; oc + 4 <= OC; oc += 4)
-                                        vst1q_f32(dp + oc, vld1q_f32(sp + oc));
-                                    for (; oc < OC; oc++)
-                                        dp[oc] = sp[oc];
+                                    copy_f32(f_tile + (oi * OT + oj) * OC,
+                                             dst + ((n * OH + oh) * OW + ow) * OC, OC);
                                 } else {
                                     for (int oc = 0; oc < OC; oc++) {
                                         dst[((n * OC + oc) * OH + oh) * OW + ow] =

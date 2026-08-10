@@ -19,7 +19,38 @@
 #include "winograd_matrices.hpp"
 #include "winograd_config.hpp"
 
+#if defined(__ARM_FEATURE_SVE)
+#include <arm_sve.h>
+#endif
+
 namespace winograd_conv {
+
+// ============================================================================
+// Vectorized float copy (SVE when built for SVE, NEON otherwise)
+// ============================================================================
+// Used for tile extract / scatter / gather / output writeback — pure bandwidth
+// work with no arithmetic. SVE-512 copies 16 floats/instruction vs NEON's 4.
+// The ISA is a compile-time property of the binary (driven by -march), so a
+// plain SVE build always uses the SVE path here regardless of the runtime
+// isa_level() override — the hardware supports it.
+
+inline void copy_f32(const float* src, float* dst, int n) {
+#if defined(__ARM_FEATURE_SVE)
+    int i = 0;
+    svbool_t pg = svwhilelt_b32_s32(i, n);
+    do {
+        svst1_f32(pg, dst + i, svld1_f32(pg, src + i));
+        i += svcntw();
+        pg = svwhilelt_b32_s32(i, n);
+    } while (svptest_first(svptrue_b32(), pg));
+#else
+    int i = 0;
+    for (; i + 4 <= n; i += 4)
+        vst1q_f32(dst + i, vld1q_f32(src + i));
+    for (; i < n; i++)
+        dst[i] = src[i];
+#endif
+}
 
 // ============================================================================
 // Generic 1D matrix-vector transform using NEON

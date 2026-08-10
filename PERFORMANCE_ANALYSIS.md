@@ -192,6 +192,9 @@ oneDNN 使用 ACL 的 Winograd 实现：
 | 9 | OpenBLAS `openblas_set_num_threads(1)` | 避免 GEMM 线程与 OpenMP 冲突 | 消除 double free |
 | 10 | 权重变换并行 | `#pragma omp for schedule(dynamic,4)` over OC，per-thread 缓冲区复用 | 权重 3.18ms→~0.2ms (32线程) |
 | 11 | arm_gemm JIT GEMM 可选 | `#if defined(USE_ARM_GEMM)` 切换到 ACL JIT 内核 | 与 oneDNN 相同 GEMM 内核 |
+| 12 | SVE 化内存拷贝（2026-08-10） | `copy_f32()` 替代 NEON `vld1q/vst1q`：tile 提取/scatter/gather/写回 | 4→16 float/指令，待复测 |
+| 13 | 消除 U/M_buf/V 无用清零（2026-08-10） | `scratch_f32()` malloc 不清零替代 `std::vector(0.0f)` | 消除 ~33MB/调用 memset |
+| 14 | per-thread 缓冲跨调用复用（2026-08-10） | 6 个 tile 缓冲 + U/M/V 改 thread_local 增长式 | 消除每次调用的堆分配 churn |
 
 ---
 
@@ -297,7 +300,7 @@ OpenBLAS 对小矩阵（100×192×192）可能不如 arm_gemm JIT。可编译 ar
 
 | 优化 | 针对的 case | 预期收益(t32) | 难度 | 依赖 |
 |------|-----------|-------------|------|------|
-| C. SVE 替代 NEON 做内存操作 | Case 2 (1600 tiles) | -2ms | 小 | 无 |
+| ~~C. SVE 替代 NEON 做内存操作~~ | Case 2 (1600 tiles) | -2ms | ✅ 已实施 | 无 |
 | A. Tile 分块处理 | Case 2 | -1ms | 中 | 无 |
 | F. 变换函数专用化 | 所有 case | -0.5~1ms | 中 | ACL 参考 |
 | 1. arm_gemm 替换 OpenBLAS | Case 0/1/2 | -1~2ms | 大 | ACL 源码树 |
@@ -333,6 +336,8 @@ for (int chunk_start = 0; chunk_start < n_tiles; chunk_start += CHUNK) {
 将 36 次小 GEMM 调用合并，减少函数调用和 OpenMP 调度开销。对 Case 0/1/2（小 IC，GEMM 矩阵小）可能有效。
 
 ### C. SVE 替代 NEON 做内存操作
+
+> **✅ 已实施（2026-08-10）**：落地为 `copy_f32()`，见「已实施优化清单」#12。以下保留原思路。
 
 tile 提取、scatter、gather 当前用 NEON（4 float/指令），SVE-512 可 16 float/指令。对 Case 2（1600 tiles）收益最大。已在 SVE 编译路径下，只需在 tile 提取代码中用 `svld1_f32`/`svst1_f32` 替代 `vld1q_f32`/`vst1q_f32`。
 

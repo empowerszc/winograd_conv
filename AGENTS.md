@@ -260,6 +260,21 @@ Case 3/4/5 已大幅超越 oneDNN（大 IC 时变换计算量大，OpenMP 并行
 - ⑧ 展平 N 个 batch 减少 barrier（9→3），但 U/M_buf 内存增加 N 倍。Case 0（U=11MB）改善 -14%，Case 4（U=88MB）严重劣化 +76%（cache thrashing，920F 无 L3、L2 仅 768KB）
 - ⑨ 回退到⑦（per-batch），最终最优方案。Case 0/1/2 慢于 oneDNN 但 Case 3-8 超越 oneDNN
 
+### A1/A2/A3 落地（2026-08-10）：SVE 化内存拷贝 + 消除无用清零 + 缓冲跨调用复用
+
+| # | 优化 | 描述 |
+|---|------|------|
+| A1 | 消除 U/M_buf/V 无用清零 | `std::vector(..., 0.0f)` → `scratch_f32()`（malloc 不清零）。三个 buffer 在读取前必被完整覆写（scatter / GEMM beta=0 / 权重变换），原先每次调用对最大 ~33MB 做无谓 memset |
+| A2 | per-thread 缓冲跨调用复用 | 6 个 per-thread 缓冲（d_tile/U_tile/M_tile/f_tile/g_wt/V_oc_wt）+ U/M_buf/V 改用 `thread_local` 增长式缓冲（`scratch_f32()`），消除 benchmark/推理循环每次调用的堆分配 churn（原先每次调用 6 vector/线程 × N 线程） |
+| A3 | SVE 化 4 处内存拷贝 | tile 提取/scatter/gather/输出写回改用 `copy_f32()`：SVE-512 16 float/指令（vs NEON 4 float），谓词自动处理 tail；NEON 构建自动回退 4 float。**编译期选择**（由 -march 决定），与运行时 isa_level() 覆盖无关 |
+
+**实现位置**：
+- `copy_f32()`：`winograd_transforms.hpp`（`__ARM_FEATURE_SVE` 守卫 SVE 路径，NEON 回退）
+- `scratch_f32()`：`winograd_conv.cpp` 匿名 namespace（thread_local 增长式，容量不足才 realloc）
+- 4 处拷贝调用点：`winograd_conv.cpp` Phase 1 tile 提取/scatter、Phase 3 gather/写回；`profile_case.cpp` 与 `bench_winograd.cpp` 的 `--timing` 模式同步更新保持一致
+
+**待验证**：在 920F 上重新跑 9 case 对比，重点看 Case 2（1600 tiles，拷贝量大）和 Case 4（tile 提取串行 9.14ms）。预期 tile 提取/scatter/gather/写回 4 项各 -50~75%（NEON→SVE-512），同时消除 ~33MB/调用的 memset 和每次调用的堆分配。
+
 ### 最终性能对比（完整 9 case, NHWC, SVE, 16 线程）
 
 | Case | Shape (N,IC,IH,IW) | (OC,IC) | Tiles | t16(ms) | oneDNN t16(ms) | 结果 |
@@ -442,6 +457,8 @@ for (int ts = 0; ts < 36; ts++) {
 
 #### C. SVE 替代 NEON 做 tile 提取/scatter/gather
 
+> **✅ 已实施（2026-08-10）**：落地为 `copy_f32()`（见「性能优化记录」A3）。以下保留设计说明作为参考。
+
 **问题**：当前 tile 提取、scatter、gather 用 NEON（128-bit, 4 float/指令）。920F 支持 SVE-512（16 float/指令）。
 
 **方案**：在 SVE 编译路径下，将 NEON `vld1q_f32`/`vst1q_f32` 替换为 SVE `svld1_f32`/`svst1_f32`。tile 提取从 4 float/指令→16 float/指令，4× 加速。
@@ -462,7 +479,7 @@ if (isa >= ISALevel::SVE) {
 }
 ```
 
-**预期**：tile 提取从 1.10ms → ~0.28ms（Case 0），scatter/gather 也有类似加速。对 Case 2（1600 tiles）收益最大。
+**预期**：tile 提取从 1.10ms → ~0.28ms（Case 0），scatter/gather 也有类似加速。对 Case 2（1600 tiles）收益最大。（已实施，待 920F 复测确认实际收益）
 
 #### D. 双缓冲（batch 间重叠）
 

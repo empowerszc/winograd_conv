@@ -187,11 +187,7 @@ StepTimings run_with_timing(
                         if (ih >= 0 && ih < IH && iw >= 0 && iw < IW) {
                             if (use_nhwc) {
                                 const float* sp = src + ((n * IH + ih) * IW + iw) * IC;
-                                float* dp = d_tile.data() + (ti * TS + tj) * IC;
-                                int ic = 0;
-                                for (; ic + 4 <= IC; ic += 4)
-                                    vst1q_f32(dp + ic, vld1q_f32(sp + ic));
-                                for (; ic < IC; ic++) dp[ic] = sp[ic];
+                                copy_f32(sp, d_tile.data() + (ti * TS + tj) * IC, IC);
                             } else {
                                 for (int ic = 0; ic < IC; ic++)
                                     d_tile[(ti * TS + tj) * IC + ic] =
@@ -212,13 +208,8 @@ StepTimings run_with_timing(
                 for (int ti = 0; ti < TS; ti++) {
                     for (int tj = 0; tj < TS; tj++) {
                         int ts_idx = ti * TS + tj;
-                        float* dst_ptr = U.data() + (ts_idx * n_tiles + tile_idx) * IC;
-                        const float* src_ptr = U_tile.data() + (ti * TS + tj) * IC;
-                        int ic = 0;
-                        for (; ic + 4 <= IC; ic += 4)
-                            vst1q_f32(dst_ptr + ic, vld1q_f32(src_ptr + ic));
-                        for (; ic < IC; ic++)
-                            dst_ptr[ic] = src_ptr[ic];
+                        copy_f32(U_tile.data() + (ti * TS + tj) * IC,
+                                 U.data() + (ts_idx * n_tiles + tile_idx) * IC, IC);
                     }
                 }
                 auto sd = std::chrono::high_resolution_clock::now();
@@ -248,13 +239,8 @@ StepTimings run_with_timing(
                 for (int ti = 0; ti < TS; ti++) {
                     for (int tj = 0; tj < TS; tj++) {
                         int ts_idx = ti * TS + tj;
-                        const float* src_ptr = M_buf.data() + (ts_idx * n_tiles + tile_idx) * OC;
-                        float* dst_ptr = M_tile.data() + (ti * TS + tj) * OC;
-                        int oc = 0;
-                        for (; oc + 4 <= OC; oc += 4)
-                            vst1q_f32(dst_ptr + oc, vld1q_f32(src_ptr + oc));
-                        for (; oc < OC; oc++)
-                            dst_ptr[oc] = src_ptr[oc];
+                        copy_f32(M_buf.data() + (ts_idx * n_tiles + tile_idx) * OC,
+                                 M_tile.data() + (ti * TS + tj) * OC, OC);
                     }
                 }
                 auto sb = std::chrono::high_resolution_clock::now();
@@ -273,12 +259,8 @@ StepTimings run_with_timing(
                         int ow = tc * OT + oj;
                         if (oh < OH && ow < OW) {
                             if (use_nhwc) {
-                                float* dp = dst + ((n * OH + oh) * OW + ow) * OC;
-                                const float* sp = f_tile.data() + (oi * OT + oj) * OC;
-                                int oc = 0;
-                                for (; oc + 4 <= OC; oc += 4)
-                                    vst1q_f32(dp + oc, vld1q_f32(sp + oc));
-                                for (; oc < OC; oc++) dp[oc] = sp[oc];
+                                copy_f32(f_tile.data() + (oi * OT + oj) * OC,
+                                         dst + ((n * OH + oh) * OW + ow) * OC, OC);
                             } else {
                                 for (int oc = 0; oc < OC; oc++)
                                     dst[((n * OC + oc) * OH + oh) * OW + ow] =

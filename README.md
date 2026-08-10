@@ -323,6 +323,8 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 8. OpenBLAS `openblas_set_num_threads(1)` 避免 GEMM 线程冲突
 9. 权重变换并行（`#pragma omp for` over OC，合并进主 region）
 10. arm_gemm JIT GEMM 内核可选（与 oneDNN 相同，`-DUSE_ARM_GEMM=ON`）
+11. SVE 化内存拷贝（`copy_f32()`：tile 提取/scatter/gather/写回，SVE-512 16 float/指令，NEON 构建回退 4 float）
+12. 消除 U/M_buf/V 无用清零 + per-thread 缓冲跨调用复用（`scratch_f32()` thread_local 增长式）
 
 **优化历程**（Case 0, t32）：
 ```
@@ -352,10 +354,9 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 详见 `AGENTS.md` 的"下一步优化方向"和 `PERFORMANCE_ANALYSIS.md` 的"新增优化思路"。
 
 主要方向（针对慢 case 0/1/2）：
-1. **SVE 替代 NEON 做内存操作**：tile 提取/scatter/gather 从 4→16 float/指令
-2. **Tile 分块处理**：8 tile/组，数据放 L2（768KB）
-3. **变换函数专用化**：F(4,4) B^T 有 50% 零元素可跳过
-4. **arm_gemm 替换 OpenBLAS**：JIT 针对小矩阵优化
+1. **Tile 分块处理**：8 tile/组，数据放 L2（768KB）（注意：分块会放大 V 的重复读取，只在 V 小时有效，详见 AGENTS.md）
+2. **变换函数专用化**：F(4,4) B^T 有 50% 零元素可跳过
+3. **arm_gemm 替换 OpenBLAS**：JIT 针对小矩阵优化
 
 ### 添加新配置（如 F(6,6,3,3)）
 
