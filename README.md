@@ -250,7 +250,7 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 | 数据布局 | NCHW + NHWC（`--nhwc` 切换） | NHWC + Winograd 专用布局 |
 | 多线程 | OpenMP（权重+输入+GEMM+输出 全并行，合并区域） | NEScheduler |
 | 正确性 | ✅ 22/22 验证通过（NCHW + NHWC） | ✅ |
-| 性能 | t32=6.7ms vs oneDNN 3.6ms（1.86x，权重并行后预期 ~1.1x） | 高度优化 |
+| 性能 | **6/9 case 超越 oneDNN**（快 43-59%），3/9 case 慢（多 tile + 小 IC） | 高度优化 |
 
 ### 性能分析
 
