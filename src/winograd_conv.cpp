@@ -50,22 +50,27 @@ namespace winograd_conv {
 // ============================================================================
 // Per-thread grow-on-demand scratch buffers
 // ============================================================================
-// Replaces per-call std::vector allocations. Each OpenMP thread gets its own
-// thread_local buffer that grows to the max size ever needed and is reused
+// Replaces per-call std::vector allocations. Each logical buffer owns a
+// thread_local allocation that grows to the max size ever needed and is reused
 // across calls, so repeated winograd_convolution() calls (benchmark / inference
 // loops) stop churning the heap. malloc'd memory is never zeroed — every
 // scratch is fully overwritten before being read by its caller. Mirrors the
 // pattern already used inside transform_2d_*.
+//
+// IMPORTANT: each logical buffer needs its OWN Scratch. scratch_f32() grows a
+// Scratch in place and returns its pointer, so handing one Scratch to two
+// "different" buffers makes them alias the same memory (a real bug we hit when
+// U/M_buf/V were all served from one thread_local Scratch).
 
 namespace {
 
-inline float* scratch_f32(size_t n) {
-    struct Scratch {
-        float* ptr = nullptr;
-        size_t cap = 0;
-        ~Scratch() { free(ptr); }
-    };
-    thread_local Scratch s;
+struct Scratch {
+    float* ptr = nullptr;
+    size_t cap = 0;
+    ~Scratch() { free(ptr); }
+};
+
+inline float* scratch_f32(size_t n, Scratch& s) {
     if (s.cap < n) {
         free(s.ptr);
         s.ptr = static_cast<float*>(malloc(n * sizeof(float)));
@@ -73,6 +78,15 @@ inline float* scratch_f32(size_t n) {
     }
     return s.ptr;
 }
+
+// Shared work buffers: the whole parallel region reads/writes them. Allocated
+// by the master thread before the region starts; thread_local so they survive
+// across calls (reuse without realloc).
+thread_local Scratch sU, sM, sV;
+
+// Per-thread tile buffers — each thread gets its own set, each with its own
+// allocation.
+thread_local Scratch sd_tile, sU_tile, sM_tile, sf_tile, sg_wt, sV_oc_wt;
 
 } // anonymous namespace
 
@@ -337,19 +351,20 @@ void winograd_convolution(
     // U/M_buf/V are fully overwritten before being read (Phase 1 scatter, GEMM
     // beta=0, weight transform), so allocate uninitialized and reuse the
     // per-thread buffer across calls instead of value-initializing + realloc'ing.
-    float* U = scratch_f32(U_size);
-    float* M_buf = scratch_f32(M_size);
-    float* V = scratch_f32(V_size);
+    float* U = scratch_f32(U_size, sU);
+    float* M_buf = scratch_f32(M_size, sM);
+    float* V = scratch_f32(V_size, sV);
 
     #pragma omp parallel
     {
         // Per-thread tile buffers, also reuse across calls (see scratch_f32).
-        float* d_tile = scratch_f32(TS * TS * IC);
-        float* U_tile = scratch_f32(TS * TS * IC);
-        float* M_tile = scratch_f32(TS * TS * OC);
-        float* f_tile = scratch_f32(OT * OT * OC);
-        float* g_wt = scratch_f32(9 * IC);
-        float* V_oc_wt = scratch_f32(TS * TS * IC);
+        // Each has its own Scratch so buffers never alias each other.
+        float* d_tile = scratch_f32(TS * TS * IC, sd_tile);
+        float* U_tile = scratch_f32(TS * TS * IC, sU_tile);
+        float* M_tile = scratch_f32(TS * TS * OC, sM_tile);
+        float* f_tile = scratch_f32(OT * OT * OC, sf_tile);
+        float* g_wt = scratch_f32(9 * IC, sg_wt);
+        float* V_oc_wt = scratch_f32(TS * TS * IC, sV_oc_wt);
 
         // ---- Step 1: Weight transform (parallelized over OC) ----
         #pragma omp for schedule(dynamic, 4)

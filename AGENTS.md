@@ -270,8 +270,10 @@ Case 3/4/5 已大幅超越 oneDNN（大 IC 时变换计算量大，OpenMP 并行
 
 **实现位置**：
 - `copy_f32()`：`winograd_transforms.hpp`（`__ARM_FEATURE_SVE` 守卫 SVE 路径，NEON 回退）
-- `scratch_f32()`：`winograd_conv.cpp` 匿名 namespace（thread_local 增长式，容量不足才 realloc）
+- `scratch_f32(n, Scratch&)`：`winograd_conv.cpp` 匿名 namespace（thread_local 增长式，容量不足才 realloc）
 - 4 处拷贝调用点：`winograd_conv.cpp` Phase 1 tile 提取/scatter、Phase 3 gather/写回；`profile_case.cpp` 与 `bench_winograd.cpp` 的 `--timing` 模式同步更新保持一致
+
+**⚠️ 坑（2026-08-10 修复）**：`scratch_f32` 每个逻辑缓冲必须持有**独立的** `thread_local Scratch`（U/M/V 各一、6 个 tile 缓冲各一）。最初用一个 `Scratch` 服务所有缓冲，导致 9 个缓冲全部别名同一内存，正确性测试全挂（天文数字错误）。此坑已在代码注释中标注。
 
 **待验证**：在 920F 上重新跑 9 case 对比，重点看 Case 2（1600 tiles，拷贝量大）和 Case 4（tile 提取串行 9.14ms）。预期 tile 提取/scatter/gather/写回 4 项各 -50~75%（NEON→SVE-512），同时消除 ~33MB/调用的 memset 和每次调用的堆分配。
 
