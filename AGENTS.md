@@ -9,6 +9,7 @@ Winograd 卷积复刻项目：基于 ACL（Arm Compute Library）的算法思路
 **目标**：教学与研究用途，帮助理解 ACL Winograd 实现的算法原理和 ISA 优化策略。
 
 **目标平台**：AArch64（华为鲲鹏 920F / Armv9 + SVE-512 + SME）。
+L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
 
 ## 架构
 

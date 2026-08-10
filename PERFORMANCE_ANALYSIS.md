@@ -11,10 +11,16 @@
 | CPU | 华为鲲鹏 920F（920 Pro） |
 | 架构 | Armv9 |
 | ISA | NEON + SVE-512 + SME（无 SME2） |
+| L1 Cache | 32KB（每核） |
+| L2 Cache | 768KB（每核） |
+| L3 Cache | **无** |
 | 核心 | 16 NUMA × 38 cores = 608 cores |
-| 编译器 | Clang（AArch64 交叉编译/原生） |
+| 编译器 | Clang（AArch64 原生） |
 | NUMA 工具 | `numactl -N .. -m ..` |
 | 运行方式 | 测试时已使用 `numactl` 绑定 NUMA 节点 |
+
+**重要**：920F 无 L3 cache，L2 仅 768KB/核。这意味着任何超过 L2 容量的数据访问都直接走主存，
+cache thrashing 在内存占用 > 768KB 时就开始显现（而非通常假设的 > 几十 MB）。
 
 ---
 
@@ -101,7 +107,7 @@ oneDNN 使用 ACL 的 Winograd 实现：
 - Case 4（U=88MB）：**劣化** t32 5.0→8.8ms（+76%！）内存压力 > barrier 节省
 - Case 1/2（U=22-44MB）：也劣化
 
-**结论**：展平对小内存 case 有效，大内存 case 因 cache thrashing 反而变慢。
+**结论**：展平对小内存 case 有效，大内存 case 因 cache thrashing 反而变慢。920F 无 L3、L2 仅 768KB/核，任何超过 L2 容量的数据（d_tile=6×6×192×4=27KB 能放 L2，但 U=88MB 远超所有 L2 之和）都会导致主存访问延迟。
 推荐回退到⑦，后续可加启发式判断（内存 < 32MB 时展平）。
 
 ### 阶段⑦ vs ④ vs oneDNN（16 线程）
