@@ -80,6 +80,9 @@ make -j
 # 强制使用 SME（需要 -DENABLE_SME=ON 编译）
 ./test_winograd --sme
 
+# 测试 NHWC 布局（12 NCHW + 10 NHWC = 22 tests）
+./test_winograd --nhwc
+
 # 或通过环境变量
 WINOGRAD_ISA=sme ./test_winograd
 ```
@@ -104,12 +107,48 @@ WINOGRAD_ISA=sme ./test_winograd
 numactl --interleave=all ./bench_winograd --sve --nhwc --threads 32 shapes.csv
 ```
 
+### 单 case profiling（perf 友好）
+
+```bash
+# 查看帮助（含 9 个 case preset）
+./profile_case --help
+
+# 标准模式：测某个 case 的性能
+./profile_case --ic 192 --ih 40 --iw 40 --oc 192 --isa sve --threads 16
+
+# 细粒度计时：8 个子步骤 + 占比
+./profile_case --ic 192 --ih 40 --iw 40 --oc 192 --isa sve --threads 16 --timing
+
+# 正确性验证
+./profile_case --ic 96 --ih 80 --iw 80 --oc 96 --verify
+
+# 获取 perf 命令建议（cache/topdown/SPE/NUMA/flamegraph 5 种）
+./profile_case --ic 384 --ih 80 --iw 80 --oc 96 --perf
+
+# 实际 perf profiling
+perf stat -e cycles,instructions,cache-misses,cache-references \
+  ./profile_case --ic 192 --ih 40 --iw 40 --oc 192 --isa sve --threads 16 --repeats 1
+
+# Flame graph
+perf record -g -- ./profile_case --ic 192 --ih 40 --iw 40 --oc 192 --isa sve --threads 16 --repeats 10
+perf script | flamegraph.pl > flame.svg
+```
+
 输出示例：
 ```
-ISA: SVE (detected: SVE)
+=== Winograd Convolution Profiling ===
+Shape: N=4 IC=192 IH=40 IW=40 OC=192 OH=40 OW=40
+ISA: SVE | Layout: NHWC | Threads: 16 | GEMM: OpenBLAS (single-thread)
+Tiles: 100 (10x10) | Winograd: F(4,4,3,3) | GEMMs: 36
 
-#  MB   IC    IH    IW    OC    KH  KW  ...  SVE_t1(ms) SVE_t1_GFLOPS SVE_t8(ms) ...
-0  4    192   40    40    192   3   3   ...     20.57       206.46      8.09  ...
+--- Standard Mode ---
+  Best of 20: 7.201 ms | 583.86 GFLOPS
+
+--- Fine-Grained Timing (serial, 1 thread) ---
+  Weight transform      1.96 ms  (12.4%)
+  Tile extract          1.08 ms  ( 6.8%)
+  Input transform       2.78 ms  (17.6%)
+  ...
 ```
 
 ## 算法概述

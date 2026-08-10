@@ -42,8 +42,9 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
 | `winograd_transforms_sme.hpp` | SME 变换 | `input_transform_sme<>`, `sme_output_transform_f44()` |
 | `winograd_convolution.hpp` | 端到端接口 | `winograd_convolution()`, `dispatch_*()` |
 | `winograd_conv.cpp` | 端到端实现 | `winograd_gemm()`, `direct_convolution_3x3()` |
-| `test_winograd.cpp` | 正确性验证 | `run_test()`, 变换级调试 |
-| `bench_winograd.cpp` | 性能基准 | CSV 解析, GFLOPS 测量 |
+| `test_winograd.cpp` | 正确性验证 | `run_test()`, 变换级调试, B^T 矩阵求解器 |
+| `bench_winograd.cpp` | 性能基准 | CSV 解析, GFLOPS 测量, 细粒度计时, 多线程对比 |
+| `profile_case.cpp` | 单 case profiling | `--timing` 8 子步骤, `--verify`, `--perf` 命令生成, 9 case preset |
 
 ### ISA 调度
 
@@ -99,13 +100,31 @@ make -j && ./test_winograd
 # 正确性验证
 ./test_winograd              # 全部测试
 ./test_winograd --sme        # 强制 SME（需要 -DENABLE_SME=ON 编译）
+./test_winograd --nhwc       # 测试 NHWC 布局（12 NCHW + 10 NHWC = 22 tests）
 ./test_winograd --f44        # 只测 F(4,4,3,3)
 ./test_winograd --relu       # 测 ReLU
 
 # 性能基准（读 CSV，自动过滤 stride=1 group=1 3x3）
-./bench_winograd --sme shapes.csv
-./bench_winograd --sve --warmup 5 --repeats 20 shapes.csv
+./bench_winograd --sve --nhwc --threads 1,8,16,32,38 shapes.csv
+./bench_winograd --timing --threads 16 --sve --nhwc shapes.csv  # 细粒度计时
 cat shapes.csv | ./bench_winograd --neon
+
+# 单 case profiling（perf 友好）
+./profile_case --ic 192 --ih 40 --iw 40 --oc 192 --isa sve --threads 16         # 标准模式
+./profile_case --ic 192 --ih 40 --iw 40 --oc 192 --isa sve --threads 16 --timing  # 8 子步骤计时
+./profile_case --ic 96 --ih 80 --iw 80 --oc 96 --verify                          # 正确性验证
+./profile_case --ic 384 --ih 80 --iw 80 --oc 96 --perf                           # 生成 perf 命令
+./profile_case --help                                                           # 9 case preset 一览
+
+# perf profiling
+perf stat -e cycles,instructions,cache-misses,cache-references \
+  ./profile_case --ic 192 --ih 40 --iw 40 --oc 192 --isa sve --threads 16 --repeats 1
+perf record -g -- ./profile_case --ic 192 --ih 40 --iw 40 --oc 192 --isa sve --threads 16 --repeats 10
+perf script | flamegraph.pl > flame.svg
+
+# NUMA 优化
+numactl --interleave=all env OMP_PROC_BIND=spread OMP_PLACES=cores \
+  ./bench_winograd --sve --nhwc --threads 32 shapes.csv
 ```
 
 测试包含：
