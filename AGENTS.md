@@ -492,6 +492,19 @@ void input_transform_f44_specialized(...) {
 
 **预期**：变换计算量减少 ~50%（F(4,4) 的 B^T 有 50% 零元素）。
 
+### 运行方式
+
+```bash
+# NUMA 交织（让内存均匀分布在所有 NUMA 节点）
+numactl --interleave=all ./bench_winograd --sve --nhwc --threads 32 shapes.csv
+
+# 单 NUMA 绑定（38 核，减少跨 NUMA 访问）
+numactl --cpunodebind=0 --membind=0 ./bench_winograd --sve --nhwc --threads 38 shapes.csv
+
+# 线程绑定（防止线程迁移跨 NUMA）
+OMP_PROC_BIND=spread OMP_PLACES=cores ./bench_winograd --sve --nhwc --threads 32 shapes.csv
+```
+
 ### 添加新配置（如 F(6,6,3,3)）
 
 1. 在 `winograd_matrices.hpp` 添加 `F66_G`、`F66_Bt`、`F66_A`
@@ -502,5 +515,4 @@ void input_transform_f44_specialized(...) {
 ## 相关文档
 
 - **ACL 参考文档**：`docs/acl_reference/` — 从 oneDNN 源码树复制的 ACL Winograd 实现分析文档（8 个文件）。用于指导后续优化（SVE/SME 汇编变换、arm_gemm GEMM 内核、权重变换手写公式等）
-- **性能分析**：`PERFORMANCE_ANALYSIS.md` — 完整优化历程（9 阶段）、9 case 对比数据、细粒度计时、差距分析
-- **优化方案**：`OPTIMIZATION_ANALYSIS.md` — 5 个优化提案的详细展开
+- **性能分析**：`PERFORMANCE_ANALYSIS.md` — 完整优化历程（9 阶段）、9 case 对比数据、细粒度计时、差距分析、新优化思路（A-F）

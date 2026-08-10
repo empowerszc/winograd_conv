@@ -11,8 +11,7 @@ winograd_conv/
 ├── CMakeLists.txt                         ← 构建配置
 ├── AGENTS.md                              ← AI 代理指南
 ├── README.md                              ← 本文件
-├── PERFORMANCE_ANALYSIS.md                ← 性能分析与优化历程
-├── OPTIMIZATION_ANALYSIS.md               ← 优化方案详细展开
+├── PERFORMANCE_ANALYSIS.md                ← 性能分析与优化历程（含新思路 A-F）
 ├── include/
 │   ├── winograd_config.hpp                ← 配置 + ISA 检测/选择 + Layout 枚举
 │   ├── winograd_matrices.hpp              ← G/B^T/A^T 变换矩阵
