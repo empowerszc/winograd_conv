@@ -238,8 +238,8 @@ Case 3/4/5 已大幅超越 oneDNN（大 IC 时变换计算量大，OpenMP 并行
 **关键教训**：
 - ⑥ 权重变换放独立 `#pragma omp parallel`，Case 0 变慢（t32: 6.7→7.2），Case 4/5 改善（-19~-30%）。原因：额外 fork/join ~1-2ms 抵消小 OC 的权重并行收益
 - ⑦ 合并进主 region 修复，Case 0/1 恢复，Case 3/4/5 保持改善
-- ⑧ 展平 N 个 batch 减少 barrier（9→3），但 U/M_buf 内存增加 N 倍。Case 0（U=11MB）改善 -14%，Case 4（U=88MB）严重劣化 +76%（cache thrashing）。回退到⑦
-- **最终结论**：⑦（合并权重+per-batch）是最优方案，Case 0/1/2 慢于 oneDNN 但 Case 3-8 超越 oneDNN
+- ⑧ 展平 N 个 batch 减少 barrier（9→3），但 U/M_buf 内存增加 N 倍。Case 0（U=11MB）改善 -14%，Case 4（U=88MB）严重劣化 +76%（cache thrashing，920F 无 L3、L2 仅 768KB）
+- ⑨ 回退到⑦（per-batch），最终最优方案。Case 0/1/2 慢于 oneDNN 但 Case 3-8 超越 oneDNN
 
 ### 最终性能对比（完整 9 case, NHWC, SVE, 16 线程）
 

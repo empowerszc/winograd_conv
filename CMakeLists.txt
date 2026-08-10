@@ -88,8 +88,12 @@ target_link_libraries(test_winograd winograd_conv)
 add_executable(bench_winograd tests/bench_winograd.cpp)
 target_link_libraries(bench_winograd winograd_conv)
 
+# Profiling (single case, perf-friendly)
+add_executable(profile_case tests/profile_case.cpp)
+target_link_libraries(profile_case winograd_conv)
+
 # Install
-install(TARGETS winograd_conv test_winograd bench_winograd
+install(TARGETS winograd_conv test_winograd bench_winograd profile_case
         RUNTIME DESTINATION bin
         ARCHIVE DESTINATION lib
         LIBRARY DESTINATION lib)

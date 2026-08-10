@@ -2,7 +2,9 @@
 
 > 基于 ACL（Arm Compute Library）的 Winograd 卷积实现思路，用 C++ + NEON/SVE intrinsics + SME 内联汇编复刻的独立可运行项目。
 >
-> 支持 F(2,2,3,3) 和 F(4,4,3,3) 两种 Winograd 配置，包含权重/输入/输出三步变换、简化 GEMM、端到端卷积、以及与直接卷积的正确性验证。
+> 支持 F(2,2,3,3) 和 F(4,4,3,3) 两种 Winograd 配置，包含权重/输入/输出三步变换、GEMM（OpenBLAS/arm_gemm/naive 三选一）、端到端卷积、NHWC/NCHW 双布局、OpenMP 多线程、以及与直接卷积的正确性验证。
+> 
+> 在鲲鹏 920F（Armv9 + SVE-512 + SME, 16 NUMA × 38 核）上，**6/9 测试 case 的 16 线程性能超越 oneDNN**（快 43-59%）。
 
 ## 目录结构
 
@@ -23,7 +25,8 @@ winograd_conv/
 │   └── winograd_conv.cpp                  ← 端到端实现 + GEMM + 直接卷积 + dispatch
 ├── tests/
 │   ├── test_winograd.cpp                  ← 正确性验证 + 变换调试
-│   └── bench_winograd.cpp                 ← 性能基准（读 CSV，测 GFLOPS）
+│   ├── bench_winograd.cpp                 ← 性能基准（读 CSV，测 GFLOPS）
+│   └── profile_case.cpp                   ← 单 case profiling（perf 友好，含 --timing）
 └── docs/
     └── acl_reference/                     ← ACL 参考文档（从 oneDNN 源码树复制）
         ├── README.md                      ← 文档索引与使用场景
@@ -84,35 +87,29 @@ WINOGRAD_ISA=sme ./test_winograd
 ### 运行性能测试
 
 ```bash
-# 准备 shapes 文件（tab 分隔，第一行是表头）
-# 格式：Input Shape  Weight Shape  Stride  Pad  Dil  Grp  Count
-# 自动过滤 stride=1, group=1, 3x3 kernel 的行
+# 准备 CSV 文件（逗号分隔，第一行表头）
+# mb,ic,ih,iw,oc,kh,kw,stride_h,stride_w,pad_h,pad_w,dil_h,dil_w,grp,count
+# 自动过滤 stride=1, group=1, 3x3 kernel, pad=1 的行
 
-# 用 SME 测试
-./bench_winograd --sme shapes.csv
+# 标准模式（多线程对比）
+./bench_winograd --sve --nhwc --threads 1,8,16,32,38 shapes.csv
 
-# 用 SVE 测试
-./bench_winograd --sve shapes.csv
+# 细粒度计时模式（各阶段时间占比）
+./bench_winograd --timing --threads 16 --sve --nhwc shapes.csv
 
-# 用 NEON 测试
-./bench_winograd --neon shapes.csv
+# 输出结果到 CSV
+./bench_winograd --sve --nhwc --threads 32 --output result.csv shapes.csv
 
-# 从 stdin 读取
-cat shapes.csv | ./bench_winograd --sme
-
-# 调整 warmup/repeats
-./bench_winograd --sme --warmup 5 --repeats 20 shapes.csv
+# NUMA 优化
+numactl --interleave=all ./bench_winograd --sve --nhwc --threads 32 shapes.csv
 ```
 
 输出示例：
 ```
-ISA: SME (detected: SME)
+ISA: SVE (detected: SVE)
 
-Shape (N,IC,IH,IW)              (OC,IC,3,3)          Count   Time(ms)      GFLOPS        ISA
-----------------------------------------------------------------------------------------------------
-(4, 192, 40, 40)                (192, 192, 3, 3)        24     XX.XX       XX.XX        SME
-(4, 96, 80, 80)                 (96, 96, 3, 3)          17     XX.XX       XX.XX        SME
-...
+#  MB   IC    IH    IW    OC    KH  KW  ...  SVE_t1(ms) SVE_t1_GFLOPS SVE_t8(ms) ...
+0  4    192   40    40    192   3   3   ...     20.57       206.46      8.09  ...
 ```
 
 ## 算法概述
@@ -188,18 +185,15 @@ A^T = [1,1,1,1,1,0; 0,1,-1,2,-2,0; 0,1,1,4,4,0; 0,1,-1,8,-8,1]  (4×6)
 
 ### `winograd_conv.cpp`
 - `dispatch_weight/input/output_transform()`：根据 ISA 选择 NEON/SVE/SME 实现
-- `winograd_gemm()`：naive 三重循环 GEMM（可替换为 OpenBLAS `cblas_sgemm`）
+- `winograd_gemm()`：3 种 GEMM 内核（编译期选择：arm_gemm > OpenBLAS > naive）
 - `direct_convolution_3x3()`：参考直接卷积（用于验证正确性）
 - `winograd_convolution()`：端到端 Winograd 卷积
-  - 步骤 1：权重变换（通过 dispatch，一次性）
-  - 步骤 2a：输入 tile 提取 + 输入变换（通过 dispatch）
-  - 步骤 2b：NM 个 batched GEMM
-  - 步骤 2c：输出变换（通过 dispatch，含 bias + ReLU）+ 写回
+  - 权重变换 + 输入变换 + GEMM + 输出变换全部在单个 `#pragma omp parallel` 区域内
+  - 支持 `Layout::NCHW` 和 `Layout::NHWC`（后者 tile 提取 3.8x 快）
 
 ### `test_winograd.cpp`
-- F(4,4,3,3) 变换级调试（权重/输入/输出/全流水线）
-- 12 个测试用例（小图到大图，F22 和 F44 各 6 个）
-- 对比 Winograd 与直接卷积，容差 1e-3
+- F(4,4,3,3) 变换级调试（权重/输入/输出/全流水线 + B^T 矩阵求解器）
+- 12 个 NCHW 测试 + 10 个 NHWC 测试（`--nhwc`），对比直接卷积，容差 1e-3
 
 ## ISA 调度机制
 
@@ -265,72 +259,71 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 输出侧: OutGath(NEON拷贝) → OutXform(变换+ReLU) → OutWrite(NCHW/NHWC写回)
 ```
 
-实测数据（4×192×40×40, NHWC, SVE, 1 线程）：
+实测数据（4×192×40×40, NHWC, SVE, 1 线程, timing 模式）：
 
 | 阶段 | 时间(ms) | 占比 | 瓶颈 |
 |------|---------|------|------|
-| 权重变换 | 3.18 | 19% | 串行，模板 intrinsics |
-| 输入变换 | 2.79 | 17% | NEON/SVE 计算 |
-| 输出变换 | 1.94 | 12% | NEON/SVE 计算 |
-| GEMM | 1.99 | 12% | OpenBLAS |
-| NEON gather/scatter | 2.25 | 14% | 向量化拷贝 |
-| NHWC tile 提取 | 1.10 | 7% | NEON 连续读 |
-| NHWC 写回 | 0.40 | 2% | NEON 连续写 |
+| 权重变换 | 1.96 | 12% | 已并行（#pragma omp for over OC） |
+| 输入变换 | 2.78 | 18% | NEON/SVE 计算 |
+| 输出变换 | 2.02 | 13% | NEON/SVE 计算 |
+| GEMM | 1.22 | 8% | OpenBLAS |
+| NEON gather/scatter | 2.59 | 17% | 向量化拷贝 |
+| NHWC tile 提取 | 1.08 | 7% | NEON 连续读 |
+| NHWC 写回 | 0.38 | 2% | NEON 连续写 |
 
-**主要瓶颈**：权重变换（串行，占 t32 的 47%）、GEMM 内核质量（OpenBLAS vs arm_gemm JIT）、OpenMP barrier 开销。
+**主要瓶颈**（针对慢 case 0/1/2）：OpenMP barrier 开销（多 tile + 小 IC 时占比大）、GEMM 内核质量（OpenBLAS 对小 K 矩阵不如 arm_gemm JIT）、变换实现（泛型模板 vs ACL 手写展开）。
 
 **已实施的优化**：
-1. NHWC 布局（tile 提取 3.8x 加速）
-2. 权重变换并行（`#pragma omp for` over OC，占 t32 的 47%→~3%）
-3. GEMM 并行（36 个 GEMM 分布到所有线程）
-4. 合并 OpenMP 区域（3→1 个 parallel region，fork/join 减 3x）
-5. `schedule(dynamic, 2)` 减少 tile 调度开销
-6. `thread_local static float*` + `malloc` 替代 `std::vector::resize`
-7. 内部 tile 跳过 `memset` 清零 + 预计算有效行列范围
-8. 输出变换 `nowait` 消除多余 barrier
-9. OpenBLAS 单线程避免 GEMM 线程冲突
-10. arm_gemm JIT GEMM 内核可选（与 oneDNN 相同）
+1. NHWC 布局（tile 提取 3.8x 加速，写回 7.4x）
+2. GEMM 并行（`#pragma omp for` over 36 Winograd domain elements）
+3. 合并 OpenMP 区域（权重+输入+GEMM+输出 全在 1 个 `#pragma omp parallel`）
+4. `schedule(dynamic, 2)` 减少 tile 调度开销
+5. `thread_local static float*` + `malloc` 替代 `std::vector::resize`
+6. 内部 tile 跳过 `memset` 清零 + 预计算有效行列范围
+7. 输出变换 `nowait` 消除多余 barrier
+8. OpenBLAS `openblas_set_num_threads(1)` 避免 GEMM 线程冲突
+9. 权重变换并行（`#pragma omp for` over OC，合并进主 region）
+10. arm_gemm JIT GEMM 内核可选（与 oneDNN 相同，`-DUSE_ARM_GEMM=ON`）
 
 **优化历程**（Case 0, t32）：
 ```
-NCHW 基线:  14.0ms → +NHWC: → +GEMM并行: 9.1ms → +合并OMP+优化B/C: 6.7ms
-3.89x → 2.53x → 1.86x
-
-+权重独立并行(⑥): 7.2ms ↑(回退！额外fork/join)
-+合并权重到主region(⑦): 待测
+① NCHW 基线:        14.0ms (3.89x vs oneDNN)
+③ +GEMM并行:         9.1ms (2.53x)
+④ +合并OMP区域:      6.7ms (1.86x)
+⑦ +权重并行(合并):    7.0ms (1.94x, Case 3-8 改善明显)
 ```
 
-**教训**：权重变换放独立 `#pragma omp parallel` 导致 Case 0/1 变慢。合并进主 region 修复。
-Case 3/4/5 在⑥阶段改善明显（t32: -19%~-57%），⑦应保留此改善。
+**最终结果**（16 线程, 9 case）：
+- 6/9 case 超越 oneDNN（快 43-59%）
+- 3/9 case 仍慢（多 tile + 小 IC，barrier 开销占比大）
+
+详见 `PERFORMANCE_ANALYSIS.md`
 
 ## 扩展指南
 
-### 替换 GEMM
+### GEMM 内核切换
 
-将 `winograd_gemm()` 替换为 OpenBLAS：
+3 种 GEMM 内核编译期选择（互斥）：
+- `USE_ARM_GEMM`：ACL JIT SVE 内核（与 oneDNN 相同），`-DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=...`
+- `USE_OPENBLAS`：`cblas_sgemm`，`-DUSE_OPENBLAS=ON`（当前使用）
+- 默认：naive 三重循环
 
-```cpp
-#include <cblas.h>
-void winograd_gemm(const float* U, const float* V, float* M,
-                   int n_tiles, int OC, int IC) {
-    // M[n_tiles][OC] = U[n_tiles][IC] × V[OC][IC]^T
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                n_tiles, OC, IC, 1.0f, U, IC, V, IC, 0.0f, M, OC);
-}
-```
+### 下一步优化方向
 
-### 添加 prepare/execute 分离
+详见 `AGENTS.md` 的"下一步优化方向"和 `PERFORMANCE_ANALYSIS.md` 的"新增优化思路"。
 
-```cpp
-struct WinogradContext {
-    std::vector<float> V;  // 预变换的权重
-    WinogradConfig config;
-    ISALevel isa;
-    std::vector<float> U_workspace, M_workspace;  // 预分配
-};
-WinogradContext prepare(const float* weights, ...);
-void execute(WinogradContext& ctx, const float* input, float* output, ...);
-```
+主要方向（针对慢 case 0/1/2）：
+1. **SVE 替代 NEON 做内存操作**：tile 提取/scatter/gather 从 4→16 float/指令
+2. **Tile 分块处理**：8 tile/组，数据放 L2（768KB）
+3. **变换函数专用化**：F(4,4) B^T 有 50% 零元素可跳过
+4. **arm_gemm 替换 OpenBLAS**：JIT 针对小矩阵优化
+
+### 添加新配置（如 F(6,6,3,3)）
+
+1. 在 `winograd_matrices.hpp` 添加矩阵并用 Winograd 多项式条件验证
+2. 在 `winograd_config.hpp` 添加 `WinogradConfig::F66_33()`
+3. 在各变换文件添加便捷包装
+4. 在 `winograd_conv.cpp` dispatch 中添加分支
 
 ## 许可证
 
