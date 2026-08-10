@@ -192,9 +192,9 @@ oneDNN 使用 ACL 的 Winograd 实现：
 | 9 | OpenBLAS `openblas_set_num_threads(1)` | 避免 GEMM 线程与 OpenMP 冲突 | 消除 double free |
 | 10 | 权重变换并行 | `#pragma omp for schedule(dynamic,4)` over OC，per-thread 缓冲区复用 | 权重 3.18ms→~0.2ms (32线程) |
 | 11 | arm_gemm JIT GEMM 可选 | `#if defined(USE_ARM_GEMM)` 切换到 ACL JIT 内核 | 与 oneDNN 相同 GEMM 内核 |
-| 12 | SVE 化内存拷贝（2026-08-10） | `copy_f32()` 替代 NEON `vld1q/vst1q`：tile 提取/scatter/gather/写回 | 4→16 float/指令，待复测 |
-| 13 | 消除 U/M_buf/V 无用清零（2026-08-10） | `scratch_f32()` malloc 不清零替代 `std::vector(0.0f)` | 消除 ~33MB/调用 memset |
-| 14 | per-thread 缓冲跨调用复用（2026-08-10） | 6 个 tile 缓冲 + U/M/V 改 thread_local 增长式 | 消除每次调用的堆分配 churn |
+| 12 | SVE 化内存拷贝（2026-08-10） | `copy_f32()` 替代 NEON `vld1q/vst1q`：tile 提取/scatter/gather/写回 | 4→16 float/指令 ✅ 已复测：Case 0/1/2 总时间 -3.0~3.7x |
+| 13 | 消除 U/M_buf/V 无用清零（2026-08-10） | `scratch_f32()` malloc 不清零替代 `std::vector(0.0f)` | 消除 ~33MB/调用 memset ✅ 已复测：9 case t16 几何平均 ~1.67x |
+| 14 | per-thread 缓冲跨调用复用（2026-08-10） | 6 个 tile 缓冲 + U/M/V 改 thread_local 增长式 | 消除每次调用的堆分配 churn ✅ 已复测：8/9 case 超越 oneDNN |
 
 ---
 

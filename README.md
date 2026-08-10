@@ -334,9 +334,11 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 ⑦ +权重并行(合并):    7.0ms (1.94x, Case 3-8 改善明显)
 ```
 
-**最终结果**（16 线程, 9 case）：
-- 6/9 case 超越 oneDNN（快 43-59%）
-- 3/9 case 仍慢（多 tile + 小 IC，barrier 开销占比大）
+**最终结果**（2026-08-10 A1/A2/A3 后复测, 16 线程, 9 case）：
+- **8/9 case 超越 oneDNN**（快 1.68x~3.54x）；仅 Case 2 慢 1.13x（从慢 2.56x 追到 11.5%）
+- t16 几何平均较旧版最优加速 ~1.67x；Case 0/1/2（拷贝/缓冲受限）加速 2.3~3.7x
+- Case 4/5（大 IC，GEMM 受限）仅 ~1.1x —— 下一目标：`-DUSE_ARM_GEMM` JIT 内核
+- 高线程扩展 6.2~26.6x（t1→t38），小 tile 数 case 16 线程后内存带宽受限平台化
 
 详见 `PERFORMANCE_ANALYSIS.md`
 
