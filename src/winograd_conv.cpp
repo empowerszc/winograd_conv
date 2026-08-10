@@ -297,8 +297,10 @@ void winograd_convolution(
     // All in one parallel region to avoid extra fork/join
     int U_size = NM * n_tiles * IC;
     int M_size = NM * n_tiles * OC;
+    int V_size = TS * TS * OC * IC;
     std::vector<float> U(U_size, 0.0f);
     std::vector<float> M_buf(M_size, 0.0f);
+    std::vector<float> V(V_size, 0.0f);
 
     #pragma omp parallel
     {
