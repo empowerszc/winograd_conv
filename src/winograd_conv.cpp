@@ -299,12 +299,11 @@ void winograd_convolution(
     int n_tiles = n_tile_rows * n_tile_cols;
 
     // ---- Step 1+2: Single OpenMP region ----
-    // Weight transform → flatten all N batches into single phases
-    // Reduces barriers from 1+2*N to 1+2 = 3 (was 9 for N=4)
-    int total_tiles = N * n_tiles;
-    int total_gemms = N * NM;
-    int U_size = NM * total_tiles * IC;
-    int M_size = NM * total_tiles * OC;
+    // Weight transform → per-batch loop (input → GEMM → output)
+    // Per-batch: 1 weight barrier + 2*N phase barriers = 1+2N total
+    // (Flattening all batches saves barriers but increases memory N× → cache thrashing for large IC)
+    int U_size = NM * n_tiles * IC;
+    int M_size = NM * n_tiles * OC;
     int V_size = TS * TS * OC * IC;
     std::vector<float> U(U_size, 0.0f);
     std::vector<float> M_buf(M_size, 0.0f);
@@ -332,126 +331,120 @@ void winograd_convolution(
                 for (int ic = 0; ic < IC; ic++)
                     V[m * OC * IC + oc * IC + ic] = V_oc_wt[m * IC + ic];
         }
-        // barrier 1/3: V must be complete
 
-        // ---- Phase 1: Input transform — ALL batches flattened ----
-        // flat_idx = n * n_tiles + tile_idx
-        #pragma omp for schedule(dynamic, 2)
-        for (int flat = 0; flat < total_tiles; flat++) {
-            int n = flat / n_tiles;
-            int tile_idx = flat % n_tiles;
-            int tr = tile_idx / n_tile_cols;
-            int tc = tile_idx % n_tile_cols;
+        // ---- Step 2: Per-batch loop ----
+        for (int n = 0; n < N; n++) {
+            // Phase 1: Input transform
+            #pragma omp for collapse(2) schedule(dynamic, 2)
+            for (int tr = 0; tr < n_tile_rows; tr++) {
+                for (int tc = 0; tc < n_tile_cols; tc++) {
+                    int tile_idx = tr * n_tile_cols + tc;
 
-            bool is_edge = (tr == 0 || tr == n_tile_rows - 1 ||
-                            tc == 0 || tc == n_tile_cols - 1);
-            if (is_edge) {
-                memset(d_tile.data(), 0, TS * TS * IC * sizeof(float));
-            }
+                    bool is_edge = (tr == 0 || tr == n_tile_rows - 1 ||
+                                    tc == 0 || tc == n_tile_cols - 1);
+                    if (is_edge) {
+                        memset(d_tile.data(), 0, TS * TS * IC * sizeof(float));
+                    }
 
-            int ti_start = (tr == 0) ? 1 : 0;
-            int ti_end   = (tr == n_tile_rows - 1) ? TS - 1 : TS;
-            int tj_start = (tc == 0) ? 1 : 0;
-            int tj_end   = (tc == n_tile_cols - 1) ? TS - 1 : TS;
+                    int ti_start = (tr == 0) ? 1 : 0;
+                    int ti_end   = (tr == n_tile_rows - 1) ? TS - 1 : TS;
+                    int tj_start = (tc == 0) ? 1 : 0;
+                    int tj_end   = (tc == n_tile_cols - 1) ? TS - 1 : TS;
 
-            for (int ti = ti_start; ti < ti_end; ti++) {
-                int ih = tr * OT - 1 + ti;
-                for (int tj = tj_start; tj < tj_end; tj++) {
-                    int iw = tc * OT - 1 + tj;
-                    if (layout == Layout::NHWC) {
-                        const float* sp = src + ((n * IH + ih) * IW + iw) * IC;
-                        float* dp = d_tile.data() + (ti * TS + tj) * IC;
-                        int ic = 0;
-                        for (; ic + 4 <= IC; ic += 4)
-                            vst1q_f32(dp + ic, vld1q_f32(sp + ic));
-                        for (; ic < IC; ic++)
-                            dp[ic] = sp[ic];
-                    } else {
-                        for (int ic = 0; ic < IC; ic++)
-                            d_tile[(ti * TS + tj) * IC + ic] =
-                                src[((n * IC + ic) * IH + ih) * IW + iw];
+                    for (int ti = ti_start; ti < ti_end; ti++) {
+                        int ih = tr * OT - 1 + ti;
+                        for (int tj = tj_start; tj < tj_end; tj++) {
+                            int iw = tc * OT - 1 + tj;
+                            if (layout == Layout::NHWC) {
+                                const float* sp = src + ((n * IH + ih) * IW + iw) * IC;
+                                float* dp = d_tile.data() + (ti * TS + tj) * IC;
+                                int ic = 0;
+                                for (; ic + 4 <= IC; ic += 4)
+                                    vst1q_f32(dp + ic, vld1q_f32(sp + ic));
+                                for (; ic < IC; ic++)
+                                    dp[ic] = sp[ic];
+                            } else {
+                                for (int ic = 0; ic < IC; ic++)
+                                    d_tile[(ti * TS + tj) * IC + ic] =
+                                        src[((n * IC + ic) * IH + ih) * IW + iw];
+                            }
+                        }
+                    }
+
+                    dispatch_input_transform(d_tile.data(), U_tile.data(), IC, is_f44, isa);
+
+                    for (int ti = 0; ti < TS; ti++) {
+                        for (int tj = 0; tj < TS; tj++) {
+                            int ts_idx = ti * TS + tj;
+                            float* dst_ptr = U.data() + (ts_idx * n_tiles + tile_idx) * IC;
+                            const float* src_ptr = U_tile.data() + (ti * TS + tj) * IC;
+                            int ic = 0;
+                            for (; ic + 4 <= IC; ic += 4)
+                                vst1q_f32(dst_ptr + ic, vld1q_f32(src_ptr + ic));
+                            for (; ic < IC; ic++)
+                                dst_ptr[ic] = src_ptr[ic];
+                        }
                     }
                 }
             }
 
-            dispatch_input_transform(d_tile.data(), U_tile.data(), IC, is_f44, isa);
-
-            // Scatter into U[ts][flat][ic] (flat = n*n_tiles + tile_idx)
-            for (int ti = 0; ti < TS; ti++) {
-                for (int tj = 0; tj < TS; tj++) {
-                    int ts_idx = ti * TS + tj;
-                    float* dst_ptr = U.data() + (ts_idx * total_tiles + flat) * IC;
-                    const float* src_ptr = U_tile.data() + (ti * TS + tj) * IC;
-                    int ic = 0;
-                    for (; ic + 4 <= IC; ic += 4)
-                        vst1q_f32(dst_ptr + ic, vld1q_f32(src_ptr + ic));
-                    for (; ic < IC; ic++)
-                        dst_ptr[ic] = src_ptr[ic];
-                }
-            }
-        }
-        // barrier 2/3: all U must be complete before GEMM
-
-        // ---- Phase 2: GEMM — ALL batches flattened ----
-        // flat = n * NM + ts_idx
-        #pragma omp for schedule(dynamic)
-        for (int flat = 0; flat < total_gemms; flat++) {
-            int n = flat / NM;
-            int ts_idx = flat % NM;
-            const float* U_slice = U.data() + (ts_idx * total_tiles + n * n_tiles) * IC;
-            const float* V_slice = V.data() + ts_idx * OC * IC;
-            float* M_slice = M_buf.data() + (ts_idx * total_tiles + n * n_tiles) * OC;
-            winograd_gemm(U_slice, V_slice, M_slice, n_tiles, OC, IC);
-        }
-        // barrier 3/3: all M must be complete before output
-
-        // ---- Phase 3: Output transform — ALL batches flattened ----
-        #pragma omp for schedule(dynamic, 2) nowait
-        for (int flat = 0; flat < total_tiles; flat++) {
-            int n = flat / n_tiles;
-            int tile_idx = flat % n_tiles;
-            int tr = tile_idx / n_tile_cols;
-            int tc = tile_idx % n_tile_cols;
-
-            for (int ti = 0; ti < TS; ti++) {
-                for (int tj = 0; tj < TS; tj++) {
-                    int ts_idx = ti * TS + tj;
-                    const float* src_ptr = M_buf.data() + (ts_idx * total_tiles + flat) * OC;
-                    float* dst_ptr = M_tile.data() + (ti * TS + tj) * OC;
-                    int oc = 0;
-                    for (; oc + 4 <= OC; oc += 4)
-                        vst1q_f32(dst_ptr + oc, vld1q_f32(src_ptr + oc));
-                    for (; oc < OC; oc++)
-                        dst_ptr[oc] = src_ptr[oc];
-                }
+            // Phase 2: GEMM
+            #pragma omp for schedule(dynamic)
+            for (int ts_idx = 0; ts_idx < NM; ts_idx++) {
+                const float* U_slice = U.data() + ts_idx * n_tiles * IC;
+                const float* V_slice = V.data() + ts_idx * OC * IC;
+                float* M_slice = M_buf.data() + ts_idx * n_tiles * OC;
+                winograd_gemm(U_slice, V_slice, M_slice, n_tiles, OC, IC);
             }
 
-            dispatch_output_transform(M_tile.data(), f_tile.data(), OC,
-                                      bias, act_min, act_max, is_f44, isa);
+            // Phase 3: Output transform
+            #pragma omp for collapse(2) schedule(dynamic, 2) nowait
+            for (int tr = 0; tr < n_tile_rows; tr++) {
+                for (int tc = 0; tc < n_tile_cols; tc++) {
+                    int tile_idx = tr * n_tile_cols + tc;
 
-            for (int oi = 0; oi < OT; oi++) {
-                for (int oj = 0; oj < OT; oj++) {
-                    int oh = tr * OT + oi;
-                    int ow = tc * OT + oj;
-                    if (oh < OH && ow < OW) {
-                        if (layout == Layout::NHWC) {
-                            float* dp = dst + ((n * OH + oh) * OW + ow) * OC;
-                            const float* sp = f_tile.data() + (oi * OT + oj) * OC;
+                    for (int ti = 0; ti < TS; ti++) {
+                        for (int tj = 0; tj < TS; tj++) {
+                            int ts_idx = ti * TS + tj;
+                            const float* src_ptr = M_buf.data() + (ts_idx * n_tiles + tile_idx) * OC;
+                            float* dst_ptr = M_tile.data() + (ti * TS + tj) * OC;
                             int oc = 0;
                             for (; oc + 4 <= OC; oc += 4)
-                                vst1q_f32(dp + oc, vld1q_f32(sp + oc));
+                                vst1q_f32(dst_ptr + oc, vld1q_f32(src_ptr + oc));
                             for (; oc < OC; oc++)
-                                dp[oc] = sp[oc];
-                        } else {
-                            for (int oc = 0; oc < OC; oc++) {
-                                dst[((n * OC + oc) * OH + oh) * OW + ow] =
-                                    f_tile[(oi * OT + oj) * OC + oc];
+                                dst_ptr[oc] = src_ptr[oc];
+                        }
+                    }
+
+                    dispatch_output_transform(M_tile.data(), f_tile.data(), OC,
+                                              bias, act_min, act_max, is_f44, isa);
+
+                    for (int oi = 0; oi < OT; oi++) {
+                        for (int oj = 0; oj < OT; oj++) {
+                            int oh = tr * OT + oi;
+                            int ow = tc * OT + oj;
+                            if (oh < OH && ow < OW) {
+                                if (layout == Layout::NHWC) {
+                                    float* dp = dst + ((n * OH + oh) * OW + ow) * OC;
+                                    const float* sp = f_tile.data() + (oi * OT + oj) * OC;
+                                    int oc = 0;
+                                    for (; oc + 4 <= OC; oc += 4)
+                                        vst1q_f32(dp + oc, vld1q_f32(sp + oc));
+                                    for (; oc < OC; oc++)
+                                        dp[oc] = sp[oc];
+                                } else {
+                                    for (int oc = 0; oc < OC; oc++) {
+                                        dst[((n * OC + oc) * OH + oh) * OW + ow] =
+                                            f_tile[(oi * OT + oj) * OC + oc];
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
-        }
+            // implicit barrier at end of Phase 3 for (syncs before next batch)
+        } // end for each batch
     } // end single parallel region
 }
 
