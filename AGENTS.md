@@ -112,6 +112,8 @@ cat shapes.csv | ./bench_winograd --neon
 
 # NCHW 包装 vs 存档原生 NCHW 参考（必须 bit-exact，8 shape × F44+F22）
 ./test_ref_vs_nchw
+# 加 --bench 同测两条路径耗时，判定转换包装是否净赚（ratio<1=包装快，geomean 汇总）
+./test_ref_vs_nchw --bench --threads 16 --warmup 3 --repeats 10
 
 # 单 case profiling（perf 友好）
 ./profile_case --ic 192 --ih 40 --iw 40 --oc 192 --isa sve --threads 16         # 标准模式

@@ -93,6 +93,8 @@ make -j
 
 # NCHW 包装 vs 存档原生 NCHW 参考（必须 bit-exact，8 shape × F44+F22）
 ./test_ref_vs_nchw
+# 加 --bench 同测两条路径耗时，判定转换包装 vs 原生 NCHW 是否净赚（ratio<1=包装快）
+./test_ref_vs_nchw --bench --threads 16 --warmup 3 --repeats 10
 
 # 或通过环境变量
 WINOGRAD_ISA=sme ./test_winograd
