@@ -16,6 +16,7 @@
 - [5. 诚实的一面：对手的内核仍然更强](#5-诚实的一面对手的内核仍然更强)
 - [6. 建议与验证清单](#6-建议与验证清单)
 - [7. ACL 23.11 SVE 实现细节文档索引](#7-acl-2311-sve-实现细节文档索引)
+- [8. 验证与分析方式工具箱](#8-验证与分析方式工具箱如何证明证伪快于-acl-2311)
 
 ---
 
@@ -232,3 +233,116 @@ oneDNN 侧实现细节的逐行分析在 `docs/acl_reference/`，按需查阅：
 | `acl_23.11_vs_53.1.0_wino_analysis.md` | **23.11 vs 53.1.0 版本对比**：为什么选 23.11 的 SVE 而非 53.1.0 的 SME（GEMM 内核选择列表差异）+ SVE 内核差异详解 + 汇编入门 |
 
 **阅读建议**：先看 `acl_23.11_vs_53.1.0_wino_analysis.md` 的第 1~4 节（版本选择根因），再看 `acl_wino_sve_asm_annotated.md`（SVE 变换写法），需要 GEMM 细节时看 `acl_wino_implementation_details.md` 的 arm_gemm 内核选择章节。
+
+---
+
+## 8. 验证与分析方式工具箱（如何证明/证伪「快于 ACL 23.11」）
+
+> 本文 §4 列了六个原因，多数标着「需验证」。这一节给的是**验证工具与方法**，按「先证真、再归因」的顺序组织。每个方法给可执行命令（920F 专用）和它能回答的问题。核心原则：**每次只改一个变量，先排除假赢，再逐层归因**。
+
+### 8.1 第一道门：先排除「假赢」（测量公平性）
+
+在归因之前，必须确认对比本身没有系统性偏置。若 oneDNN 数字含 per-iteration primitive 重建/格式转换，或两边线程绑定/warmup 不一致，赢幅就是假的。
+
+| 方法 | 命令 / 操作 | 回答的问题 |
+|------|------------|-----------|
+| oneDNN 实际路径 | `ONEDNN_VERBOSE=1 <bench>` | 它真走了 Winograd？F2/F4？SVE/NEON/SME？哪个 kernel 族？（验证 §4.4/4.5） |
+| 拓扑确认 | `lscpu` / `numactl --hardware` | 16 NUMA 绑定是否一致；我们 numactl 绑了而对方没绑就是不公平 |
+| 统一环境 | 两边同 numactl / `OMP_PROC_BIND=spread` / 同 warmup/repeats | 排除线程亲缘差异 |
+| primitive 复用 | oneDNN 基准循环内**复用**同一 primitive 再测 | 若 oneDNN 每次迭代重建 primitive，固定开销被重复计入 → 系统性放大我们优势 |
+| 冷启动量化 | 给 bench 加 `--cold`，只测两边第一次调用（含 setup） | 稳态数字是否适用；小 case 大概率仍赢但赢幅缩小 |
+| 构建 flag | 记录两边 `-march`、`-O`、ISA 选项 | 排除「我们 -O3 + SVE，对方 -O2 + NEON」这类不对称 |
+
+### 8.2 第二道门：拆时间——把「1.94ms vs 3.55ms」拆成可归因的片段
+
+关键问题是：对方的 3.55ms 里，多少是**内核计算**、多少是**跑起来之前的固定开销**？
+
+| 方法 | 操作 | 回答的问题 |
+|------|------|-----------|
+| 我们侧逐段计时 | `./profile_case --ic 192 --ih 40 --iw 40 --oc 192 --isa sve --threads 16 --timing`（8 步） | 我们自己的时间花在哪 |
+| oneDNN 侧单 op 计时 | `ONEDNN_VERBOSE=1` 打印每 primitive 时间；或用最小程序只跑一个 conv primitive | 对方单 conv 的时间 |
+| 固定开销分离 | oneDNN 连续调用**复用** primitive vs **每次重建**，差值 = per-iter setup | §4.1 的直接证据：setup 占多大 |
+| 缩放扫描 | 同 shape 把 N/空间放大 4×、16× | 固定开销摊薄后胜负是否反转（§6-4 的核心实验） |
+
+### 8.3 perf 硬件计数器（920F 专用事件）
+
+> 注意：920F **无 L3**，`LLC-*` 事件不存在；用 L1/L2 事件。鲲鹏 920 有 SPE（见 8.4）。`perf list` 可查当前内核暴露的事件名。
+
+```bash
+# 基础：周期/指令/IPC/分支
+perf stat -e task-clock,cycles,instructions,branches,branch-misses \
+  ./profile_case --ic 192 --ih 40 --iw 40 --oc 192 --isa sve --threads 16 --warmup 5 --repeats 1
+
+# cache（无 L3 → L1/L2）
+perf stat -e L1-dcache-loads,L1-dcache-load-misses,L1-dcache-stores,\
+  L2-dcache-loads,L2-dcache-load-misses \
+  ./profile_case ...
+
+# topdown（区分 frontend/backend/memory bound）
+perf stat --topdown ./profile_case ...
+# 或显式：-e topdown-fetch-bubbles,topdown-recovery-bubbles,\
+#   topdown-retiring,topdown-bad-spec
+
+# NUMA（16 node 特色）
+perf stat --per-node ./profile_case ... && numastat
+```
+
+| 计数器 | 回答的问题 |
+|--------|-----------|
+| cycles / IPC | 谁更接近峰值；指令级效率 |
+| instructions | 我们的**总指令数**是否显著少于对方（粗粒度、少 barrier、少 setup → 指令少） |
+| L2 miss 率 | 谁的访存局部性差（无 L3，L2 miss 直接进 DRAM） |
+| topdown 各桶 | 对方手写汇编应是 backend/retiring 高；若我们 frontend/memory-bound 说明瓶颈在访存而非计算 |
+| NUMA 分布 | 16 NUMA 上线程分布是否均匀；跨 node 访问量 |
+
+### 8.4 SPE：Arm 统计采样（920F 访存局部性的终极证据）
+
+SPE 直接采样**内存访问地址**，能量化「NHWC 连续 vs 跨步」和缓存局部性——这是论证 §4.3「内存策略契合 920F」的最强工具。
+
+```bash
+# 确认 920F 支持 SPE
+ls /sys/bus/event_source/devices/ | grep -i spe
+
+# 采样内存事件（period 控制采样率，越小越密）
+perf record -e arm_spe_0/ts_enable=1,pa_enable=0,min_latency=0,period=10000/ \
+  -- ./profile_case --ic 192 --ih 40 --iw 40 --oc 192 --isa sve --threads 16 --warmup 5 --repeats 1
+
+# 分析：按函数/地址的负载直方图
+perf report --stdio
+# 导出采样 → 画访存地址分布（连续块 vs 稀疏跨步一目了然）
+perf script > spe.dump
+```
+
+回答：`nchw_to_nhwc`/NHWC 提取是否呈现长连续段（局部性好的证据）；跨步访问占比多少；每条指令的平均访存延迟（`perf report --itrace` 相关，或看 sample 里的 latency 字段）。
+
+### 8.5 假设驱动的对照实验（方法学核心）
+
+每个「原因」配一个**可证伪**的实验，预期→结果→修正结论三段式：
+
+| 假设（§4） | 可证伪实验 | 预期结果与解读 |
+|-----------|-----------|---------------|
+| 4.1 固定开销占优 | batch/空间放大 4×、16× 复测 | 赢幅缩小甚至反转 → 证实优势在固定开销；大负载仍赢 → 另有系统性优势 |
+| 4.2 并行结构占优 | 我们 threads 1→8→16→38 vs oneDNN 同 threads，画扩展曲线 | 我们斜率陡且平台化早（t16 后平）；对方线性到 38 → 调度粒度差异 |
+| 4.4/4.5 对方路径非最优 | `ONEDNN_VERBOSE=1` 确认真实路径 | 若它没走 SVE/F4 → 「内核不如它」前提需修正 |
+| 5 内核对齐后胜负 | 我们 `-DUSE_ARM_GEMM=ON`（借 arm_gemm JIT 内核对齐） | 仍赢 → 赢在工程层；赢幅更大 → GEMM 本就是短板 |
+| 4.3 内存策略占优 | 我们 NHWC vs 我们 NCHW 包装（`test_ref_vs_nchw --bench`） | NHWC 明显快 → 布局贡献量化；SPE 佐证局部性 |
+| 调度粒度 | 我们 `schedule(dynamic,2)` vs `static` vs 其他 | 粒度差异对胜负的贡献 |
+
+### 8.6 理论算术层
+
+| 方法 | 操作 | 回答的问题 |
+|------|------|-----------|
+| 有效 GFLOPS | 双方各自：直接卷积等效 FLOP / 耗时（§2.2 已有） | 对方固定开销占比（负载越小 GFLOPS 越低越印证 §4.1） |
+| 峰值利用率 | 实测 cycles ÷（主频 × 核数 × 2 FMA） | 双方离硬件峰值多远；我们若已 >50% 就是访存/调度受限而非内核 |
+| 带宽上限 | STREAM 实测机器带宽，对比我们 U/M/V 流量估算（字节/耗时） | Case 4/5（U 22~44MB）是否已贴带宽墙 |
+| 指令预算 | `perf stat instructions`，除以有效元素数 | 每输出元素我们比对方少多少条指令 |
+
+### 8.7 负载-胜负热力图（最强诊断图）
+
+扫 **tiles 数**（25→1600）和 **IC**（48→768）网格，每个格点跑双方，把胜负比画成热力图：
+
+- 分界线在哪个区域翻转，直接指出「我们的工程优势在哪种负载下失效」；
+- 若翻转区与「tiles 碎 + IC 小」重合 → 印证 §3.2 Case 2 的调度成本解释；
+- 若在整个网格都赢 → 我们的内存/调度策略在 920F 上有系统性优势，值得深挖成论文级结论。
+
+**综合顺序建议**：先 8.1（排除假赢）→ 8.2（拆时间定位大头）→ 8.5 的缩放实验（固定开销假说）→ 8.4 SPE（内存局部性定论）→ 8.7 热力图（边界画清）。perf 计数器（8.3）在每一步穿插，为每个结论补硬件证据。
