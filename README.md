@@ -31,6 +31,7 @@ winograd_conv/
 │   └── profile_case.cpp                   ← 单 case profiling（perf 友好，含 --timing）
 └── docs/
     ├── algorithm.md                       ← 算法详解（数学、布局、缓冲、并行、ISA 内核、精度）
+    ├── why_faster_than_acl_23.11.md       ← 为什么比 ACL 23.11 快（独立分析，含例子）
     └── acl_reference/                     ← ACL 参考文档（从 oneDNN 源码树复制）
         ├── README.md                      ← 文档索引与使用场景
         ├── acl_wino_neon_intrinsics_annotated.md

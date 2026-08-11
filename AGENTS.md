@@ -565,5 +565,6 @@ OMP_PROC_BIND=spread OMP_PLACES=cores ./bench_winograd --sve --nhwc --threads 32
 ## 相关文档
 
 - **算法详解**：`docs/algorithm.md` — 当前实现的分步讲解（Winograd 数学、三步变换、数据/缓冲布局、OpenMP 并行结构、NEON/SVE/SME 内核、GEMM 选择、tile 边界、数值精度）
+- **快于 ACL 23.11 的分析**：`docs/why_faster_than_acl_23.11.md` — 独立分析：双方都是 Winograd+SVE，8/9 赢是固定开销主导的小负载微基准结果（含有效 GFLOPS 证据、3 个具体例子、6 个原因、验证清单）
 - **ACL 参考文档**：`docs/acl_reference/` — 从 oneDNN 源码树复制的 ACL Winograd 实现分析文档（8 个文件）。用于指导后续优化（SVE/SME 汇编变换、arm_gemm GEMM 内核、权重变换手写公式等）
 - **性能分析**：`PERFORMANCE_ANALYSIS.md` — 完整优化历程（9 阶段）、9 case 对比数据、细粒度计时、差距分析、新优化思路（A-F）、数值精度分析（第 9 节）

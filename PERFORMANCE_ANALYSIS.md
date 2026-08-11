@@ -415,6 +415,8 @@ F(4,4) 的 B^T 有 50% 零元素，专用展开可跳过零系数行/列，减�
 
 ## 10. 为什么当前实现快于 ACL 23.11（2026-08-11 分析）
 
+> 本节为摘要。**独立展开版（含有效 GFLOPS 证据、具体例子、ACL 23.11 SVE 文档索引）见 `docs/why_faster_than_acl_23.11.md`。**
+
 ### 10.1 先框定结论
 
 「8/9 case 快于 oneDNN」是在 **t16、单次小形状卷积调用**的微基准上得到的。它**不是**「我们的算法/内核整体优于 ACL」的证据，而是「在固定开销主导的微小负载下，我们的工程实现更契合」的证据。ACL 的手写汇编变换、arm_gemm JIT、细粒度调度都是**更好的内核**——负载越大，ACL 越能赢。
@@ -452,9 +454,9 @@ F(4,4) 的 B^T 有 50% 零元素，专用展开可跳过零系数行/列，减�
 - ⚠️ 需用 ACL/oneDNN 日志确认 920F 上实际选中的 kernel 族。
 
 **5. 算法选择差异（中置信，需验证）**
-- oneDNN 对 fp32 3x3 可能选 F(2,2)/im2col+GEMM 而非 F(4,4)，视 shape 启发式而定；我们固定 F(4,4)。
-- 不同算法乘法/变换比例不同，在特定形状下差异被放大。
-- ⚠️ 需用 `ONEDNN_VERBOSE` 确认每个 shape 实际跑的算法与 tile size。
+- 已确认双方都走 **Winograd 路径**（oneDNN 用 ACL 23.11 的 SVE，`acl:wino`；我们固定 F(4,4,3,3)）——**排除 im2col 猜测**。
+- 剩余差别在 **tile size**：oneDNN 按 CPUID+shape 启发式可能选 F(2,2,3,3)（TS=4, OT=2）或 F(4,4,3,3)。F(2,2) 乘法更少但 tile 更碎、变换更频繁；特定形状下差异被放大。
+- ⚠️ 需用 `ONEDNN_VERBOSE` 确认每个 shape 实际跑的算法（winograd?）、tile size 与 kernel 族（SVE/NEON/SME?）。
 
 **6. 测量公平性（需验证）**
 - 两个实现的线程绑定（numactl / OMP_PROC_BIND）、warmup/repeats、oneDNN primitive 是否跨迭代复用、构建 flag 是否一致，均未记录。若 oneDNN 数字含 per-iteration primitive 重建或格式转换，会系统性放大我们的优势。
