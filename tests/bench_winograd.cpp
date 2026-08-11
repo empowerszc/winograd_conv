@@ -13,7 +13,7 @@
 //   --threads t1,t2,...      Thread counts to test (default: 1,8,16,32,38)
 //   --output result.csv      Write results to CSV file
 //   --timing                 Fine-grained per-step timing mode
-//   --verify                 Verify each case against direct convolution before benching
+//   --verify                 Verify each case vs fp64 direct convolution (relative tol)
 //   --help                   Show help
 //
 // Input CSV format (comma-separated, first line is header):
@@ -118,16 +118,6 @@ bool read_shapes(const std::string& filename, std::vector<ShapeInfo>& shapes) {
     return true;
 }
 
-// Compute max absolute difference between two arrays
-float max_error(const float* a, const float* b, int size) {
-    float max_err = 0.0f;
-    for (int i = 0; i < size; i++) {
-        float err = std::fabs(a[i] - b[i]);
-        if (err > max_err) max_err = err;
-    }
-    return max_err;
-}
-
 // Convert NCHW [N][C][H][W] to NHWC [N][H][W][C]
 void nchw_to_nhwc(const float* nchw, float* nhwc, int N, int C, int H, int W) {
     for (int n = 0; n < N; n++)
@@ -138,15 +128,16 @@ void nchw_to_nhwc(const float* nchw, float* nhwc, int N, int C, int H, int W) {
                         nchw[((n * C + c) * H + h) * W + w];
 }
 
-// Parallel direct 3x3 convolution (stride=1, pad=1) used as verification
-// reference. Mirrors direct_convolution_3x3 but parallelizes the batch
-// dimension with OpenMP; without -fopenmp the pragma is a no-op and it
-// simply runs serially (slower, still correct).
-void direct_convolution_3x3_parallel(
+// fp64 direct 3x3 convolution (stride=1, pad=1) used as verification
+// reference. Accumulating in double approximates exact arithmetic, so the
+// measured error is the Winograd implementation's real error (not the
+// difference of two fp32 rounding paths). OpenMP-parallel over the batch
+// dimension; without -fopenmp the pragma is a no-op and it runs serially.
+void direct_convolution_3x3_f64(
     const float* src,   // [N][IC][IH][IW]
     const float* wei,   // [OC][IC][3][3]
     const float* bias,  // [OC] or nullptr
-    float* dst,         // [N][OC][OH][OW]
+    double* dst,        // [N][OC][OH][OW]
     int N, int IC, int IH, int IW,
     int OC, int OH, int OW
 ) {
@@ -155,15 +146,15 @@ void direct_convolution_3x3_parallel(
         for (int oc = 0; oc < OC; oc++) {
             for (int oh = 0; oh < OH; oh++) {
                 for (int ow = 0; ow < OW; ow++) {
-                    float sum = bias ? bias[oc] : 0.0f;
+                    double sum = bias ? static_cast<double>(bias[oc]) : 0.0;
                     for (int ic = 0; ic < IC; ic++) {
                         for (int kh = 0; kh < 3; kh++) {
                             for (int kw = 0; kw < 3; kw++) {
                                 int ih = oh - 1 + kh;   // pad=1
                                 int iw = ow - 1 + kw;
                                 if (ih >= 0 && ih < IH && iw >= 0 && iw < IW) {
-                                    sum += src[((n * IC + ic) * IH + ih) * IW + iw] *
-                                           wei[((oc * IC + ic) * 3 + kh) * 3 + kw];
+                                    sum += static_cast<double>(src[((n * IC + ic) * IH + ih) * IW + iw]) *
+                                           static_cast<double>(wei[((oc * IC + ic) * 3 + kh) * 3 + kw]);
                                 }
                             }
                         }
@@ -176,13 +167,17 @@ void direct_convolution_3x3_parallel(
 }
 
 struct VerifyResult {
-    float max_err;
+    float max_abs_err;  // max |wino - ref|
+    float rel_err;      // max_abs_err / max|ref|
+    float max_ref;      // max |ref| magnitude (tolerance basis)
     bool pass;
     double ref_ms;
 };
 
-// Verify one shape: F44 Winograd (in the bench's layout) vs direct
-// convolution reference (NCHW). Tolerance matches test_winograd.cpp.
+// Verify one shape: F44 Winograd (in the bench's layout) vs an fp64 direct
+// convolution reference (NCHW). Pass criterion is relative: the Winograd
+// fp32 rounding error is ~1e-5 relative regardless of channel count, so a
+// fixed absolute tolerance would spuriously fail large-IC cases.
 VerifyResult verify_case(int N, int IC, int IH, int IW, int OC,
                          int OH, int OW, bool use_nhwc) {
     int src_size = N * IC * IH * IW;
@@ -194,37 +189,49 @@ VerifyResult verify_case(int N, int IC, int IH, int IW, int OC,
     for (auto& v : wei) v = static_cast<float>(rand()) / RAND_MAX;
     for (auto& b : bias) b = static_cast<float>(rand()) / RAND_MAX;
 
-    // Reference: parallel direct convolution (NCHW)
-    std::vector<float> ref_dst(dst_size, 0.0f);
+    // Reference: fp64 direct convolution (NCHW), near-exact math
+    std::vector<double> ref_dst(dst_size, 0.0);
     auto t0 = std::chrono::high_resolution_clock::now();
-    direct_convolution_3x3_parallel(src_nchw.data(), wei.data(), bias.data(),
-                                    ref_dst.data(), N, IC, IH, IW, OC, OH, OW);
+    direct_convolution_3x3_f64(src_nchw.data(), wei.data(), bias.data(),
+                               ref_dst.data(), N, IC, IH, IW, OC, OH, OW);
     auto t1 = std::chrono::high_resolution_clock::now();
     double ref_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-    // Winograd in the bench's layout
+    // Winograd in the bench's layout; normalize the output to NCHW for compare
     std::vector<float> wino_dst(dst_size, 0.0f);
-    float err;
+    std::vector<float> wino_nchw;
+    const float* wino_compare = wino_dst.data();
     if (use_nhwc) {
         std::vector<float> src_nhwc(src_size);
         nchw_to_nhwc(src_nchw.data(), src_nhwc.data(), N, IC, IH, IW);
         winograd_convolution_f44(src_nhwc.data(), wei.data(), bias.data(), wino_dst.data(),
                                  N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f, Layout::NHWC);
-        // Convert output back to NCHW for comparison
-        std::vector<float> wino_nchw(dst_size);
+        wino_nchw.resize(dst_size);
         for (int n = 0; n < N; n++)
             for (int oh = 0; oh < OH; oh++)
                 for (int ow = 0; ow < OW; ow++)
                     for (int oc = 0; oc < OC; oc++)
                         wino_nchw[((n * OC + oc) * OH + oh) * OW + ow] =
                             wino_dst[((n * OH + oh) * OW + ow) * OC + oc];
-        err = max_error(ref_dst.data(), wino_nchw.data(), dst_size);
+        wino_compare = wino_nchw.data();
     } else {
         winograd_convolution_f44(src_nchw.data(), wei.data(), bias.data(), wino_dst.data(),
                                  N, IC, IH, IW, OC, OH, OW, -1e30f, 1e30f, Layout::NCHW);
-        err = max_error(ref_dst.data(), wino_dst.data(), dst_size);
     }
-    return {err, err < 1e-3f, ref_ms};
+
+    // Compare against fp64 reference
+    float max_abs_err = 0.0f, max_ref = 0.0f;
+    for (int i = 0; i < dst_size; i++) {
+        float ae = static_cast<float>(fabs(static_cast<double>(wino_compare[i]) - ref_dst[i]));
+        if (ae > max_abs_err) max_abs_err = ae;
+        float rm = static_cast<float>(fabs(ref_dst[i]));
+        if (rm > max_ref) max_ref = rm;
+    }
+    float rel_err = (max_ref > 0.0f) ? max_abs_err / max_ref : 0.0f;
+    // Relative tolerance with a small absolute floor for near-zero outputs.
+    // Measured Winograd fp32 relative error is ~2-6e-6; 1e-4 leaves ~15-50x margin.
+    bool pass = max_abs_err < 1e-4f * max_ref + 1e-5f;
+    return {max_abs_err, rel_err, max_ref, pass, ref_ms};
 }
 
 // Fine-grained timing: manually run each step
@@ -440,7 +447,7 @@ int main(int argc, char** argv) {
             printf("  --threads t1,t2,...      Thread counts (default 1,8,16,32,38)\n");
             printf("  --output result.csv      Write results to CSV file\n");
             printf("  --timing                 Fine-grained per-step timing\n");
-            printf("  --verify                 Verify each case vs direct conv (aborts on FAIL)\n");
+            printf("  --verify                 Verify each case vs fp64 direct conv (rel tol, aborts on FAIL)\n");
             printf("  --nhwc                   Use NHWC layout (channels contiguous)\n");
             return 0;
         } else {
@@ -504,18 +511,18 @@ int main(int argc, char** argv) {
     for (const auto& s : all_shapes)
         if (s.valid) shapes.push_back(s);
 
-    // ---- Verification: compare each case against direct convolution ----
+    // ---- Verification: compare each case against fp64 direct convolution ----
     if (verify) {
-        printf("=== Verification (F44 Winograd vs direct conv, tolerance 1e-3) ===\n");
-        printf("#  %-4s %-4s %-5s %-5s %-5s  %-12s %-10s %s\n",
-               "MB", "IC", "IH", "IW", "OC", "max_err", "ref(ms)", "result");
+        printf("=== Verification (F44 Winograd vs fp64 direct conv, rel tol 1e-4) ===\n");
+        printf("#  %-4s %-4s %-5s %-5s %-5s  %-12s %-10s %-10s %s\n",
+               "MB", "IC", "IH", "IW", "OC", "max_abs_err", "rel_err", "max_ref", "result");
         int n_fail = 0;
         for (const auto& s : shapes) {
             int N = s.mb, IC = s.ic, IH = s.ih, IW = s.iw;
             int OC = s.oc, OH = IH, OW = IW;
             VerifyResult vr = verify_case(N, IC, IH, IW, OC, OH, OW, use_nhwc);
-            printf("%-4d %-4d %-5d %-5d %-5d  %12.3e %10.1f  %s\n",
-                   N, IC, IH, IW, OC, vr.max_err, vr.ref_ms,
+            printf("%-4d %-4d %-5d %-5d %-5d  %12.3e %10.2e %10.1f  %s\n",
+                   N, IC, IH, IW, OC, vr.max_abs_err, vr.rel_err, vr.max_ref,
                    vr.pass ? "PASS" : "FAIL");
             if (!vr.pass) n_fail++;
         }
