@@ -232,6 +232,7 @@ StepTiming run_with_timing(
     std::vector<float> f_tile(OT * OT * OC, 0.0f);
 
     double t_ext = 0, t_in = 0, t_scat = 0;
+    double t_gemm = 0;
     double t_gath = 0, t_out = 0, t_write = 0;
 
     for (int n = 0; n < N; n++) {
@@ -275,18 +276,17 @@ StepTiming run_with_timing(
                 t_scat += std::chrono::duration<double, std::milli>(sd - sc).count();
             }
         }
-    }
+        // ---- GEMM: Nx36 winograd_gemm calls, one batch's U at a time (real-path order) ----
+        auto tg = std::chrono::high_resolution_clock::now();
+        for (int ts_idx = 0; ts_idx < NM; ts_idx++) {
+            winograd_gemm(U.data() + ts_idx * n_tiles * IC,
+                          V.data() + ts_idx * OC * IC,
+                          M_buf.data() + ts_idx * n_tiles * OC,
+                          n_tiles, OC, IC);
+        }
+        auto th = std::chrono::high_resolution_clock::now();
+        t_gemm += std::chrono::duration<double, std::milli>(th - tg).count();
 
-    auto t_gemm_s = std::chrono::high_resolution_clock::now();
-    for (int ts_idx = 0; ts_idx < NM; ts_idx++) {
-        winograd_gemm(U.data() + ts_idx * n_tiles * IC,
-                      V.data() + ts_idx * OC * IC,
-                      M_buf.data() + ts_idx * n_tiles * OC,
-                      n_tiles, OC, IC);
-    }
-    auto t_gemm_e = std::chrono::high_resolution_clock::now();
-
-    for (int n = 0; n < N; n++) {
         for (int tr = 0; tr < n_tile_rows; tr++) {
             for (int tc = 0; tc < n_tile_cols; tc++) {
                 int tile_idx = tr * n_tile_cols + tc;
@@ -335,7 +335,7 @@ StepTiming run_with_timing(
     st.tile_ext_ms = t_ext;
     st.in_xform_ms = t_in;
     st.in_scat_ms = t_scat;
-    st.gemm_ms = std::chrono::duration<double, std::milli>(t_gemm_e - t_gemm_s).count();
+    st.gemm_ms = t_gemm;
     st.out_gath_ms = t_gath;
     st.out_xform_ms = t_out;
     st.out_write_ms = t_write;

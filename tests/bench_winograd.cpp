@@ -304,6 +304,7 @@ StepTimings run_with_timing(
     std::vector<float> f_tile(OT * OT * OC, 0.0f);
 
     double time_extract = 0, time_in_xform = 0, time_in_scatter = 0;
+    double time_gemm = 0;
     double time_out_gather = 0, time_out_xform = 0, time_out_writeback = 0;
 
     for (int n = 0; n < N; n++) {
@@ -351,19 +352,18 @@ StepTimings run_with_timing(
                 time_in_scatter += std::chrono::duration<double, std::milli>(sd - sc).count();
             }
         }
-    }
 
-    // Step 3: GEMM
-    auto t_gemm_start = std::chrono::high_resolution_clock::now();
-    for (int ts_idx = 0; ts_idx < NM; ts_idx++) {
-        const float* U_slice = U.data() + ts_idx * n_tiles * IC;
-        const float* V_slice = V.data() + ts_idx * OC * IC;
-        float* M_slice = M_buf.data() + ts_idx * n_tiles * OC;
-        winograd_gemm(U_slice, V_slice, M_slice, n_tiles, OC, IC);
-    }
-    auto t_gemm_end = std::chrono::high_resolution_clock::now();
+        // ---- GEMM: Nx36 winograd_gemm calls, one batch's U at a time (real-path order) ----
+        auto tg = std::chrono::high_resolution_clock::now();
+        for (int ts_idx = 0; ts_idx < NM; ts_idx++) {
+            const float* U_slice = U.data() + ts_idx * n_tiles * IC;
+            const float* V_slice = V.data() + ts_idx * OC * IC;
+            float* M_slice = M_buf.data() + ts_idx * n_tiles * OC;
+            winograd_gemm(U_slice, V_slice, M_slice, n_tiles, OC, IC);
+        }
+        auto th = std::chrono::high_resolution_clock::now();
+        time_gemm += std::chrono::duration<double, std::milli>(th - tg).count();
 
-    for (int n = 0; n < N; n++) {
         // ---- Output side: split into 3 sub-steps ----
         for (int tr = 0; tr < n_tile_rows; tr++) {
             for (int tc = 0; tc < n_tile_cols; tc++) {
@@ -416,7 +416,7 @@ StepTimings run_with_timing(
     st.tile_extract_ms = time_extract;
     st.input_transform_ms = time_in_xform;
     st.input_scatter_ms = time_in_scatter;
-    st.gemm_ms = std::chrono::duration<double, std::milli>(t_gemm_end - t_gemm_start).count();
+    st.gemm_ms = time_gemm;
     st.output_gather_ms = time_out_gather;
     st.output_transform_ms = time_out_xform;
     st.output_writeback_ms = time_out_writeback;
