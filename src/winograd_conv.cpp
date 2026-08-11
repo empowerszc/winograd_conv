@@ -502,12 +502,18 @@ namespace {
 void nchw_to_nhwc(const float* src, float* dst, int N, int IC, int IH, int IW) {
     const int HW = IH * IW;
     constexpr int CH = 16;  // channel/pixel block width
-    #pragma omp parallel for collapse(2) schedule(static)
+    // collapse(3) over (n, cb, h): collapse(2) parallelizes only over
+    // N * ceil(IC/16) chunks — for N=1 small-IC inputs that's 1-3 chunks, so
+    // 13+ of 16 threads sit idle (measured: wrapper lost 1.13x-1.38x there).
+    // Adding h exposes N * ceil(IC/16) * IH chunks, matching the native
+    // kernel's tile-level parallelism. ch is recomputed per (n,cb,h); it must
+    // live after the h loop header or the collapse loops are not perfectly
+    // nested (OpenMP requires perfect nesting for collapse).
+    #pragma omp parallel for collapse(3) schedule(static)
     for (int n = 0; n < N; n++) {
         for (int cb = 0; cb < IC; cb += CH) {
-            int ce = std::min(cb + CH, IC);
-            int ch = ce - cb;
             for (int h = 0; h < IH; h++) {
+                int ch = std::min(cb + CH, IC) - cb;
                 for (int wb = 0; wb < IW; wb += CH) {
                     int wn = std::min(CH, IW - wb);
                     // Read channel-major block [ch][wn], write pixel-major [wn][ch]
@@ -528,12 +534,12 @@ void nchw_to_nhwc(const float* src, float* dst, int N, int IC, int IH, int IW) {
 void nhwc_to_nchw(const float* src, float* dst, int N, int IC, int IH, int IW) {
     const int HW = IH * IW;
     constexpr int CH = 16;
-    #pragma omp parallel for collapse(2) schedule(static)
+    // Same collapse(3) reasoning as nchw_to_nhwc.
+    #pragma omp parallel for collapse(3) schedule(static)
     for (int n = 0; n < N; n++) {
         for (int cb = 0; cb < IC; cb += CH) {
-            int ce = std::min(cb + CH, IC);
-            int ch = ce - cb;
             for (int h = 0; h < IH; h++) {
+                int ch = std::min(cb + CH, IC) - cb;
                 for (int wb = 0; wb < IW; wb += CH) {
                     int wn = std::min(CH, IW - wb);
                     float tmp[CH][CH];
