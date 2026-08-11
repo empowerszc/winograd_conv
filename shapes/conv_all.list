@@ -1,0 +1,75 @@
+# mb,ic,ih,iw,oc,kh,kw,stride_h,stride_w,pad_h,pad_w,dil_h,dil_w,grp,count
+# conv_all.csv - benchmark case set for bench_winograd (F(4,4,3,3)).
+# All rows: 3x3 kernel, stride=1, pad=1, dilation=0, group=1 (bench_winograd
+# filters for exactly these). 'count' is informational only (benchdnn n-iter);
+# timing is controlled by --repeats. See shapes/README.md for section purpose.
+# Case 0-8 (continuity with earlier F44/F22 measurements)
+mb4_ic192_ih40iw40_oc192_oh40ow40_kh3kw3_sh1sw1_ph1pw1_n"r0"
+mb4_ic96_ih80iw80_oc96_oh80ow80_kh3kw3_sh1sw1_ph1pw1_n"r1"
+mb4_ic48_ih160iw160_oc48_oh160ow160_kh3kw3_sh1sw1_ph1pw1_n"r2"
+mb4_ic192_ih20iw20_oc192_oh20ow20_kh3kw3_sh1sw1_ph1pw1_n"r3"
+mb4_ic384_ih80iw80_oc96_oh80ow80_kh3kw3_sh1sw1_ph1pw1_n"r4"
+mb4_ic768_ih40iw40_oc96_oh40ow40_kh3kw3_sh1sw1_ph1pw1_n"r5"
+mb4_ic768_ih20iw20_oc96_oh20ow20_kh3kw3_sh1sw1_ph1pw1_n"r6"
+mb4_ic96_ih40iw40_oc96_oh40ow40_kh3kw3_sh1sw1_ph1pw1_n"r7"
+mb4_ic96_ih20iw20_oc96_oh20ow20_kh3kw3_sh1sw1_ph1pw1_n"r8"
+# ResNet50 3x3 s1 (real CNN, mb=1/4)
+mb1_ic64_ih56iw56_oc64_oh56ow56_kh3kw3_sh1sw1_ph1pw1_n"r9"
+mb4_ic64_ih56iw56_oc64_oh56ow56_kh3kw3_sh1sw1_ph1pw1_n"r10"
+mb1_ic128_ih28iw28_oc128_oh28ow28_kh3kw3_sh1sw1_ph1pw1_n"r11"
+mb4_ic128_ih28iw28_oc128_oh28ow28_kh3kw3_sh1sw1_ph1pw1_n"r12"
+mb1_ic256_ih14iw14_oc256_oh14ow14_kh3kw3_sh1sw1_ph1pw1_n"r13"
+mb4_ic256_ih14iw14_oc256_oh14ow14_kh3kw3_sh1sw1_ph1pw1_n"r14"
+mb1_ic512_ih7iw7_oc512_oh7ow7_kh3kw3_sh1sw1_ph1pw1_n"r15"
+mb4_ic512_ih7iw7_oc512_oh7ow7_kh3kw3_sh1sw1_ph1pw1_n"r16"
+mb1_ic256_ih56iw56_oc64_oh56ow56_kh3kw3_sh1sw1_ph1pw1_n"r17"
+mb1_ic512_ih28iw28_oc128_oh28ow28_kh3kw3_sh1sw1_ph1pw1_n"r18"
+mb1_ic1024_ih14iw14_oc256_oh14ow14_kh3kw3_sh1sw1_ph1pw1_n"r19"
+mb1_ic2048_ih7iw7_oc512_oh7ow7_kh3kw3_sh1sw1_ph1pw1_n"r20"
+# VGG16 3x3 s1 (mb=1, mb=4)
+mb1_ic64_ih224iw224_oc64_oh224ow224_kh3kw3_sh1sw1_ph1pw1_n"r21"
+mb4_ic64_ih224iw224_oc64_oh224ow224_kh3kw3_sh1sw1_ph1pw1_n"r22"
+mb1_ic128_ih112iw112_oc128_oh112ow112_kh3kw3_sh1sw1_ph1pw1_n"r23"
+mb4_ic128_ih112iw112_oc128_oh112ow112_kh3kw3_sh1sw1_ph1pw1_n"r24"
+mb1_ic256_ih56iw56_oc256_oh56ow56_kh3kw3_sh1sw1_ph1pw1_n"r25"
+mb4_ic256_ih56iw56_oc256_oh56ow56_kh3kw3_sh1sw1_ph1pw1_n"r26"
+mb1_ic512_ih28iw28_oc512_oh28ow28_kh3kw3_sh1sw1_ph1pw1_n"r27"
+mb4_ic512_ih28iw28_oc512_oh28ow28_kh3kw3_sh1sw1_ph1pw1_n"r28"
+mb1_ic512_ih14iw14_oc512_oh14ow14_kh3kw3_sh1sw1_ph1pw1_n"r29"
+mb1_ic512_ih7iw7_oc512_oh7ow7_kh3kw3_sh1sw1_ph1pw1_n"r30"
+# Lightweight / small-image CNN
+mb1_ic32_ih112iw112_oc32_oh112ow112_kh3kw3_sh1sw1_ph1pw1_n"r31"
+mb1_ic64_ih56iw56_oc32_oh56ow56_kh3kw3_sh1sw1_ph1pw1_n"r32"
+mb1_ic16_ih224iw224_oc16_oh224ow224_kh3kw3_sh1sw1_ph1pw1_n"r33"
+mb1_ic32_ih64iw64_oc32_oh64ow64_kh3kw3_sh1sw1_ph1pw1_n"r34"
+# Large batch (amortize fixed overhead)
+mb32_ic64_ih56iw56_oc64_oh56ow56_kh3kw3_sh1sw1_ph1pw1_n"r35"
+mb16_ic128_ih28iw28_oc128_oh28ow28_kh3kw3_sh1sw1_ph1pw1_n"r36"
+mb8_ic192_ih40iw40_oc192_oh40ow40_kh3kw3_sh1sw1_ph1pw1_n"r37"
+mb32_ic48_ih40iw40_oc48_oh40ow40_kh3kw3_sh1sw1_ph1pw1_n"r38"
+# Fixed-overhead isolation (tiny loads)
+mb1_ic8_ih16iw16_oc8_oh16ow16_kh3kw3_sh1sw1_ph1pw1_n"r39"
+mb1_ic16_ih32iw32_oc16_oh32ow32_kh3kw3_sh1sw1_ph1pw1_n"r40"
+mb1_ic32_ih32iw32_oc32_oh32ow32_kh3kw3_sh1sw1_ph1pw1_n"r41"
+mb1_ic48_ih20iw20_oc48_oh20ow20_kh3kw3_sh1sw1_ph1pw1_n"r42"
+# tiles x IC sweep grid (heatmap, mb=4, OC=IC)
+# tiles=25 (IH=IW=20)
+mb4_ic48_ih20iw20_oc48_oh20ow20_kh3kw3_sh1sw1_ph1pw1_n"r43"
+mb4_ic96_ih20iw20_oc96_oh20ow20_kh3kw3_sh1sw1_ph1pw1_n"r44"
+mb4_ic192_ih20iw20_oc192_oh20ow20_kh3kw3_sh1sw1_ph1pw1_n"r45"
+mb4_ic384_ih20iw20_oc384_oh20ow20_kh3kw3_sh1sw1_ph1pw1_n"r46"
+# tiles=100 (IH=IW=40)
+mb4_ic48_ih40iw40_oc48_oh40ow40_kh3kw3_sh1sw1_ph1pw1_n"r47"
+mb4_ic96_ih40iw40_oc96_oh40ow40_kh3kw3_sh1sw1_ph1pw1_n"r48"
+mb4_ic192_ih40iw40_oc192_oh40ow40_kh3kw3_sh1sw1_ph1pw1_n"r49"
+mb4_ic384_ih40iw40_oc384_oh40ow40_kh3kw3_sh1sw1_ph1pw1_n"r50"
+# tiles=400 (IH=IW=80)
+mb4_ic48_ih80iw80_oc48_oh80ow80_kh3kw3_sh1sw1_ph1pw1_n"r51"
+mb4_ic96_ih80iw80_oc96_oh80ow80_kh3kw3_sh1sw1_ph1pw1_n"r52"
+mb4_ic192_ih80iw80_oc192_oh80ow80_kh3kw3_sh1sw1_ph1pw1_n"r53"
+mb4_ic384_ih80iw80_oc384_oh80ow80_kh3kw3_sh1sw1_ph1pw1_n"r54"
+# tiles=1600 (IH=IW=160)
+mb4_ic48_ih160iw160_oc48_oh160ow160_kh3kw3_sh1sw1_ph1pw1_n"r55"
+mb4_ic96_ih160iw160_oc96_oh160ow160_kh3kw3_sh1sw1_ph1pw1_n"r56"
+mb4_ic192_ih160iw160_oc192_oh160ow160_kh3kw3_sh1sw1_ph1pw1_n"r57"
+mb4_ic384_ih160iw160_oc384_oh160ow160_kh3kw3_sh1sw1_ph1pw1_n"r58"
