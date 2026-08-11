@@ -546,9 +546,9 @@ int main(int argc, char** argv) {
             omp_set_num_threads(nt);
 #endif
             printf("=== Timing mode: %d threads, ISA: %s ===\n", nt, isa_name(isa));
-            printf("#  %-4s %-5s %-5s %-5s %-5s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-4s "
+            printf("#  %-4s %-4s %-5s %-5s %-5s %-5s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-4s "
                    "%-10s %-10s %-10s %-10s %-10s %-10s %-10s %-10s %-10s %-10s\n",
-                   "MB", "IC", "IH", "IW", "OC", "KH", "KW", "SH", "SW", "PH", "PW", "DH", "DW", "GRP",
+                   "row", "MB", "IC", "IH", "IW", "OC", "KH", "KW", "SH", "SW", "PH", "PW", "DH", "DW", "GRP",
                    "Weight(ms)", "TileExt(ms)", "InXform(ms)", "InScat(ms)",
                    "GEMM(ms)", "OutGath(ms)", "OutXform(ms)", "OutWrite(ms)", "Total(ms)", "GFLOPS");
 
@@ -578,10 +578,10 @@ int main(int argc, char** argv) {
                 double flops = 2.0 * N * OC * OH * OW * IC * 9.0;
                 double gflops = flops / (best.total_ms * 1e-3) / 1e9;
 
-                printf("%-3d %-4d %-5d %-5d %-5d %-5d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-4d "
+                printf("%-4d %-4d %-5d %-5d %-5d %-5d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-4d "
                        "%8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f\n",
                        row, N, IC, IH, IW, OC, s.kh, s.kw, s.stride_h, s.stride_w,
-                       s.pad_h, s.pad_w, s.dil_h, s.dil_w, s.grp, s.count,
+                       s.pad_h, s.pad_w, s.dil_h, s.dil_w, s.grp,
                        best.weight_transform_ms,
                        best.tile_extract_ms, best.input_transform_ms, best.input_scatter_ms,
                        best.gemm_ms,
@@ -595,8 +595,8 @@ int main(int argc, char** argv) {
 
     // ---- Standard mode: multi-thread benchmark ----
     if (!timing_mode) {
-        printf("#  %-4s %-5s %-5s %-5s %-5s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-4s",
-               "MB", "IC", "IH", "IW", "OC", "KH", "KW", "SH", "SW", "PH", "PW", "DH", "DW", "GRP");
+        printf("#  %-4s %-4s %-5s %-5s %-5s %-5s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-4s",
+               "row", "MB", "IC", "IH", "IW", "OC", "KH", "KW", "SH", "SW", "PH", "PW", "DH", "DW", "GRP");
         for (int t : thread_counts)
             printf(" %s_t%d(ms) %s_t%d_GFLOPS", isa_name(isa), t, isa_name(isa), t);
         printf("\n");
@@ -619,9 +619,9 @@ int main(int argc, char** argv) {
         double flops = 2.0 * N * OC * OH * OW * IC * 9.0;
 
         if (!timing_mode) {
-            printf("%-3d %-4d %-5d %-5d %-5d %-5d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-4d",
+            printf("%-4d %-4d %-5d %-5d %-5d %-5d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-4d",
                    row, N, IC, IH, IW, OC, s.kh, s.kw, s.stride_h, s.stride_w,
-                   s.pad_h, s.pad_w, s.dil_h, s.dil_w, s.grp, s.count);
+                   s.pad_h, s.pad_w, s.dil_h, s.dil_w, s.grp);
         }
 
         std::string csv_row;
