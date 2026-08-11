@@ -135,6 +135,12 @@ int main(int argc, char** argv) {
     omp_set_num_threads(threads);
 #endif
 
+    // Version banner: the pre--bench build has NO arg parsing and ignores
+    // unknown flags, so it would silently run the same correctness test with
+    // --bench passed. This line makes the two builds distinguishable on sight.
+    printf("test_ref_vs_nchw --bench %s (threads=%d warmup=%d repeats=%d)\n\n",
+           bench ? "ON" : "OFF", threads, warmup, repeats);
+
     srand(12345);
 
     // --- Correctness gate (always): bit-exact vs the archived native kernel ---
