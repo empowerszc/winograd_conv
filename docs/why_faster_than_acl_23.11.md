@@ -160,7 +160,29 @@ oneDNN 在 920F 上对 fp32 3x3 卷积选择了 **Winograd 路径**（`acl:wino`
 
 ### 4.6 测量公平性（需验证）
 
-两个实现的线程绑定（numactl / OMP_PROC_BIND）、warmup/repeats、oneDNN primitive 是否跨迭代复用、构建 flag 是否一致，均未记录。若 oneDNN 数字里含 per-iteration primitive 重建或格式转换，会系统性放大我们的优势。**这是排除「假赢」的最后一道门。**
+两个实现的线程绑定（numactl / OMP_PROC_BIND）、warmup/repeats、oneDNN primitive 是否跨迭代复用、构建 flag 是否一致，均未记录。若 oneDNN 数字里含 per-iteration primitive 重建或格式转换，会系统性放大我们的优势。**这是排除「假赢」的最后一道门。** 下面展开两条容易误读、但方向相反的关键点。
+
+#### 4.6.1 缓冲复用是不是「背靠背重复测量才有效」的假优势？——不是
+
+A1/A2 的复用收益来自 `thread_local` 缓冲**驻留在堆里**（进程/线程生命周期内持有），而不是来自「两次调用在时间上相邻」。中间隔任意多的 conv/ReLU/transformer 算子，缓冲的所有权不变、`malloc` 不会被再次调用。这是**位置持久性，不是时间相邻性**——交错只改变调用次序，不改变堆里的驻留。
+
+生产框架正是这么做的，与算子执行次序解耦：TensorRT 整个 engine 一个 workspace tensor 分配一次、各算子用其中一段；cuDNN 用 per-handle workspace；oneDNN 的 workspace 和变换权重挂在 primitive 上。它们都跨其它算子存活。所以「同一个 conv op 被执行几百万次」的「次」跨的是 inference pass，两次 pass 之间跑完整张网络，缓冲依然在。
+
+**唯一会被交错破坏的是缓存热度层**：连续测同一个 case 时缓冲在 L2/L1 是热的，交错执行会被其它算子冲出去。但这层收益对 oneDNN **完全对称**（它的 workspace 一样被冲掉），不是我们对它的优势，顶多让两边的稳态数字都比真实略乐观，不改变胜负方向。
+
+**因此，真正的风险仍是「不对称」而非「复用」**：如果 oneDNN 那组数字是每次迭代重建 primitive / 重分 workspace 测出来的，而我们是复用，赢幅就被系统性放大——这才是该查的地方。
+
+#### 4.6.2 反证：权重变换 V 我们每次调用都重算，反而比 oneDNN 吃亏
+
+oneDNN 会把**变换后的权重（TransformedWeights）缓存到 primitive 上**（23.11 vs 53.1.0 分析中专门讨论过的「生命周期」差异），第 2 次起的迭代跳过权重变换；而我们的 `dispatch_weight_transform` 在卷积函数内**每次调用都执行**（`src/winograd_conv.cpp:377`），V 没有跨调用缓存。
+
+含义：在真正公平的重复测量里，oneDNN 比我们多摊薄了一部分工作。这说明 **A1/A2 不是我们赢 oneDNN 的来源**（我们甚至在此吃亏），反过来加强了「我们赢在固定开销/调度/内存策略」的结论；如果给 V 也加跨调用缓存，我们还会更快。
+
+#### 4.6.3 复用的两笔真实成本（不是作弊，是取舍）
+
+- **内存驻留**：`thread_local` 缓冲只涨不缩，多 shape 后累计到「所有见过的最大值」；oneDNN 的 workspace 按 primitive 精确缩放。内存受限部署里这是我们吃亏的地方。
+- **冷启动**：进程内**第一次**调该 conv 的那个线程要付一次分配。框架若是固定线程池，每线程第一次碰到该 op 后即持有，几轮 pass 后稳态；若每请求新建线程（serverless 式），则每请求付一次——但那也会同样惩罚任何 thread_local 设计。
+- **若要量化**：加一个「冷启动（`--cold`）」计时模式，两边的第一次调用含 setup 一起计时。小 case 大概率我们仍赢（我们的 setup 极小），但赢幅会缩小，大 case 可能反转。
 
 ---
 
@@ -186,10 +208,11 @@ oneDNN 在 920F 上对 fp32 3x3 卷积选择了 **Winograd 路径**（`acl:wino`
 
 1. **`ONEDNN_VERBOSE=1` 确认 oneDNN 实际跑的算法/内核**（winograd? F2/F4? SVE/NEON/SME? 哪个 kernel 族）。这一步直接验证 4.4 和 4.5，几十秒。
 2. **统一测量环境**：同 numactl 绑定、同 warmup/repeats、确认 primitive 跨迭代复用、记录构建 flag。排除 4.6 的假赢。
-3. **在更大负载上复测**（batch 增大、空间增大、或整网络）：
+3. **量化冷启动（可选）**：给 bench 加 `--cold` 模式，测两边第一次调用（含 setup）的耗时——若目标是「单次冷启动」场景，稳态数字不适用，需用它替代。
+4. **在更大负载上复测**（batch 增大、空间增大、或整网络）：
    - 若大负载下被 ACL 反超 → 证实优势来自固定开销而非内核质量，结论是「微基准赢、生产负载未必」；
    - 若大负载仍赢 → 说明我们的内存/调度策略在 920F 上有系统性优势，值得深挖。
-4. **把 ACL 的优化项当作下一步目标**：手写展开变换（F）、arm_gemm JIT GEMM（1）、合并 scatter/gather（3）。这些是真正拉近距离、并让大负载也赢的路径。
+5. **把 ACL 的优化项当作下一步目标**：手写展开变换（F）、arm_gemm JIT GEMM（1）、合并 scatter/gather（3）。这些是真正拉近距离、并让大负载也赢的路径。
 
 ---
 

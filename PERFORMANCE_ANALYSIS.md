@@ -460,6 +460,7 @@ F(4,4) 的 B^T 有 50% 零元素，专用展开可跳过零系数行/列，减�
 
 **6. 测量公平性（需验证）**
 - 两个实现的线程绑定（numactl / OMP_PROC_BIND）、warmup/repeats、oneDNN primitive 是否跨迭代复用、构建 flag 是否一致，均未记录。若 oneDNN 数字含 per-iteration primitive 重建或格式转换，会系统性放大我们的优势。
+- **缓冲复用不是「背靠背重复测量才有效」的假优势**：A1/A2 的收益来自 `thread_local` 缓冲驻留堆里（位置持久性），交错执行其它算子不失效；会被交错破坏的只有缓存热度层，而对 oneDNN 对称。**但权重变换 V 我们每次调用都重算，oneDNN 把 TransformedWeights 缓存到 primitive 上——重复测量里我们反而更吃亏**。展开论证见 `docs/why_faster_than_acl_23.11.md` 4.6.1~4.6.3。
 
 ### 10.4 建议
 
