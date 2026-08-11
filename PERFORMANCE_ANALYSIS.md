@@ -526,3 +526,35 @@ F(4,4) 的 B^T 有 50% 零元素，专用展开可跳过零系数行/列，减�
 - **理由**：优势在工程层，剩余机会也主要在工程层；手写汇编是把内核对齐对手（慢），arm_gemm 一步到位借对手内核（快）。
 - **动手前**：先跑 `ONEDNN_VERBOSE` 确认 oneDNN 实际内核——若它根本没走 SVE，「内核不如它」的前提就得修正，优先级整体重排。
 - **1 是最快验证性实验**：`-DUSE_ARM_GEMM` 重跑 9 case，对比 OpenBLAS 版，同时检验性能与数值。
+
+## 12. NCHW 布局重构：转换包装方案（2026-08-11）
+
+> 问题：NCHW 也是常见布局，若基于 NCHW 的 kernel 性能上不去，能否「NCHW → NHWC 转换 → 算完转回」？本文档评估该方案，并记录最终实施。
+
+### 12.1 结论
+
+**有希望，但不是稳赢，必须实测。** 理由如下。
+
+### 12.2 为什么「有希望」
+
+- **计算 100% 与布局无关**：Winograd 的输入/输出/权重变换 + GEMM 只操作 `[tile][channel]` 域，NCHW 与 NHWC 的差异**仅**在 tile 提取（输入）和写回（输出）。既然计算共享，NCHW 路径就退化成「提取/写回 vs 转换」的二选一。
+- **NCHW 原生的代价是真实的**：NCHW 提取 `d_tile[..][ic] = src[((n*IC+ic)*IH+ih)*IW+iw]`，通道以 `H*W` 为步长，SVE-512 每次只取 4~16 个 float 就要换一条缓存行——**无 L3 的 920F** 上这是 ~16x 缓存行放大，且写回同样跨步。旧计时（§3.3）里 NCHW TileExt 9.14ms vs NHWC 1.10ms，OutWrite 3.4ms vs 0.40ms——这正是重构的动机。
+- **转换本身可以做得不差**：`nchw_to_nhwc` 用 cache-blocked 转置（16 通道块 × 16 像素块，`copy_f32` 写连续行），对每个输入元素**恰好读一次、写一次**，是顺序访问，不是随机。
+
+### 12.3 为什么「不是稳赢」
+
+- **转换是整图两遍全量数据搬运**：NCHW 输入要先整图搬到 NHWC（一遍），算完再整图搬回（一遍）。旧 NCHW 内核只在 tile 层面跨步读/写，虽然缓存行利用率差，但**读写的字节数是 tile 面积而非整图**（输入 tile 4×4×IC，输出 4×4×OC）。
+- 换算：Case 2（4×48×160×160, OC=48）——NCHW 输入 4×48×25600×4B ≈ 19.7MB，转换要额外 19.7MB 读 + 19.7MB 写；输出同样。在无 L3 的机器上这 3~4 遍全量流式访问很可能 ~几十 ms 级别，能否被「提取从 9ms 降到 ~1ms」抵消，取决于转换带宽（920F 主存带宽足够高时净赚）。
+- **结论**：净赚方向对（把跨步随机访问换成顺序流式 + 共享高频 NHWC 内核），但**量级必须实测**——这就是为什么代码同时保留 `ref/` 原生内核作对照。
+
+### 12.4 实施
+
+- **计算核心**：`winograd_convolution_nhwc_core()`（唯一一份，NHWC）。
+- **NCHW 包装**：`winograd_convolution(..., Layout::NCHW)` = `nchw_to_nhwc` → core → `nhwc_to_nchw`；两个转换 buffer 用独立 `thread_local Scratch`（sSrcNhwc/sDstNhwc，别名规则同 §AGENTS）。
+- **原生 NCHW 存档**：`ref/winograd_conv_nchw_ref.cpp`（`winograd_convolution_nchw_ref`，冻结快照，可单独 build 成库对照）。
+- **正确性**：转换是纯数据搬运，与旧内核往相同 `d_tile/M_tile` 放相同值 → 输出 **bit-exact**。`test_ref_vs_nchw` 断言 8 shape × F44/F22 全 bit-exact。
+- **性能对照**：在 920F 上跑 `test_ref_vs_nchw`（或直接 `winograd_convolution_nchw_ref` vs 包装）即可判定净赚/净亏，无需重写基准。
+
+### 12.5 若转换净亏的回退路径
+
+`Layout::NCHW` 入口改成直接调 `winograd_convolution_nchw_ref`（链接 `winograd_nchw_ref` 库）即可，核心与 ref 共用，改动一行。重构已保证「要么净赚、要么一行回退」，不丢失任何能力。

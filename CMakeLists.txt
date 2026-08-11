@@ -92,6 +92,22 @@ target_link_libraries(bench_winograd winograd_conv)
 add_executable(profile_case tests/profile_case.cpp)
 target_link_libraries(profile_case winograd_conv)
 
+# Archived native-NCHW reference kernel (pre-2026-08-11 layout refactor).
+# Kept as a separate library so it can be linked as a correctness/performance
+# baseline against the current NHWC-based NCHW wrapper. Not part of the main
+# library on purpose.
+add_library(winograd_nchw_ref STATIC ref/winograd_conv_nchw_ref.cpp)
+target_include_directories(winograd_nchw_ref PUBLIC include ref)
+if(ENABLE_OPENMP)
+    target_compile_options(winograd_nchw_ref PUBLIC ${OpenMP_CXX_FLAGS})
+    target_link_libraries(winograd_nchw_ref PUBLIC ${OpenMP_CXX_LIBRARIES})
+    target_compile_definitions(winograd_nchw_ref PUBLIC ENABLE_OPENMP)
+endif()
+
+# Compare the NCHW wrapper vs the archived native-NCHW kernel (must be bit-exact)
+add_executable(test_ref_vs_nchw tests/test_ref_vs_nchw.cpp)
+target_link_libraries(test_ref_vs_nchw winograd_nchw_ref winograd_conv)
+
 # Install
 install(TARGETS winograd_conv test_winograd bench_winograd profile_case
         RUNTIME DESTINATION bin

@@ -88,6 +88,10 @@ thread_local Scratch sU, sM, sV;
 // allocation.
 thread_local Scratch sd_tile, sU_tile, sM_tile, sf_tile, sg_wt, sV_oc_wt;
 
+// Layout-conversion temp buffers for the NCHW path (NCHW -> NHWC -> compute ->
+// NHWC -> NCHW). Allocated by the master thread before the conversion regions.
+thread_local Scratch sSrcNhwc, sDstNhwc;
+
 } // anonymous namespace
 
 // ============================================================================
@@ -308,16 +312,19 @@ void direct_convolution_3x3(
 // Winograd convolution
 // ============================================================================
 
-void winograd_convolution(
-    const float* src,   // NCHW: [N][IC][IH][IW]  or  NHWC: [N][IH][IW][IC]
+// Internal NHWC-only core of the Winograd convolution. The public
+// winograd_convolution() either calls this directly (NHWC input) or converts
+// NCHW -> NHWC first and converts the result back. Keeping the compute kernel
+// layout-free means there is exactly one hot path to maintain and tune.
+static void winograd_convolution_nhwc_core(
+    const float* src,   // NHWC: [N][IH][IW][IC]
     const float* wei,   // [OC][IC][3][3]
     const float* bias,  // [OC] or nullptr
-    float* dst,         // NCHW: [N][OC][OH][OW]  or  NHWC: [N][OH][OW][OC]
+    float* dst,         // NHWC: [N][OH][OW][OC]
     int N, int IC, int IH, int IW,
     int OC, int OH, int OW,
     const WinogradConfig& config,
-    float act_min, float act_max,
-    Layout layout
+    float act_min, float act_max
 ) {
 #ifdef USE_OPENBLAS
     // OpenBLAS must use 1 thread — our OpenMP parallelism is on tiles, not GEMM
@@ -413,14 +420,8 @@ void winograd_convolution(
                         int ih = tr * OT - 1 + ti;
                         for (int tj = tj_start; tj < tj_end; tj++) {
                             int iw = tc * OT - 1 + tj;
-                            if (layout == Layout::NHWC) {
-                                const float* sp = src + ((n * IH + ih) * IW + iw) * IC;
-                                copy_f32(sp, d_tile + (ti * TS + tj) * IC, IC);
-                            } else {
-                                for (int ic = 0; ic < IC; ic++)
-                                    d_tile[(ti * TS + tj) * IC + ic] =
-                                        src[((n * IC + ic) * IH + ih) * IW + iw];
-                            }
+                            const float* sp = src + ((n * IH + ih) * IW + iw) * IC;
+                            copy_f32(sp, d_tile + (ti * TS + tj) * IC, IC);
                         }
                     }
 
@@ -467,15 +468,8 @@ void winograd_convolution(
                             int oh = tr * OT + oi;
                             int ow = tc * OT + oj;
                             if (oh < OH && ow < OW) {
-                                if (layout == Layout::NHWC) {
-                                    copy_f32(f_tile + (oi * OT + oj) * OC,
-                                             dst + ((n * OH + oh) * OW + ow) * OC, OC);
-                                } else {
-                                    for (int oc = 0; oc < OC; oc++) {
-                                        dst[((n * OC + oc) * OH + oh) * OW + ow] =
-                                            f_tile[(oi * OT + oj) * OC + oc];
-                                    }
-                                }
+                                copy_f32(f_tile + (oi * OT + oj) * OC,
+                                         dst + ((n * OH + oh) * OW + ow) * OC, OC);
                             }
                         }
                     }
@@ -484,6 +478,115 @@ void winograd_convolution(
             // implicit barrier at end of Phase 3 for (syncs before next batch)
         } // end for each batch
     } // end single parallel region
+}
+
+// ============================================================================
+// NCHW <-> NHWC layout conversion
+// ============================================================================
+// The NCHW path of winograd_convolution() converts the input to NHWC, runs the
+// (single, shared) NHWC compute core, then converts the output back. These two
+// helpers are cache-blocked transposes: they read channel-major and write
+// pixel-major (or vice versa) in 16-wide blocks, so both sides are contiguous
+// runs and each element is read and written exactly once. 16 matches the
+// SVE-512 lane count; copy_f32() handles the rest.
+//
+// NOTE (2026-08-11): whether this wrapper beats the archived native-NCHW path
+// is a measured question, not a theoretical one — see PERFORMANCE_ANALYSIS.md
+// §12. These are a correct first cut; if target measurements show the
+// conversion dominates, the block transpose can be upgraded to an SVE
+// register transpose (fewer L1 round-trips through the stack buffer).
+
+namespace {
+
+// NCHW [N][IC][IH][IW] -> NHWC [N][IH][IW][IC]
+void nchw_to_nhwc(const float* src, float* dst, int N, int IC, int IH, int IW) {
+    const int HW = IH * IW;
+    constexpr int CH = 16;  // channel/pixel block width
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int n = 0; n < N; n++) {
+        for (int cb = 0; cb < IC; cb += CH) {
+            int ce = std::min(cb + CH, IC);
+            int ch = ce - cb;
+            for (int h = 0; h < IH; h++) {
+                for (int wb = 0; wb < IW; wb += CH) {
+                    int wn = std::min(CH, IW - wb);
+                    // Read channel-major block [ch][wn], write pixel-major [wn][ch]
+                    float tmp[CH][CH];
+                    for (int k = 0; k < ch; k++) {
+                        const float* sp = src + n * IC * HW + (cb + k) * HW + h * IW + wb;
+                        for (int j = 0; j < wn; j++) tmp[j][k] = sp[j];
+                    }
+                    for (int j = 0; j < wn; j++)
+                        copy_f32(tmp[j], dst + (n * HW + h * IW + wb + j) * IC + cb, ch);
+                }
+            }
+        }
+    }
+}
+
+// NHWC [N][IH][IW][IC] -> NCHW [N][IC][IH][IW]
+void nhwc_to_nchw(const float* src, float* dst, int N, int IC, int IH, int IW) {
+    const int HW = IH * IW;
+    constexpr int CH = 16;
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int n = 0; n < N; n++) {
+        for (int cb = 0; cb < IC; cb += CH) {
+            int ce = std::min(cb + CH, IC);
+            int ch = ce - cb;
+            for (int h = 0; h < IH; h++) {
+                for (int wb = 0; wb < IW; wb += CH) {
+                    int wn = std::min(CH, IW - wb);
+                    float tmp[CH][CH];
+                    for (int j = 0; j < wn; j++)
+                        copy_f32(src + (n * HW + h * IW + wb + j) * IC + cb, tmp[j], ch);
+                    for (int k = 0; k < ch; k++) {
+                        float* dp = dst + n * IC * HW + (cb + k) * HW + h * IW + wb;
+                        for (int j = 0; j < wn; j++) dp[j] = tmp[j][k];
+                    }
+                }
+            }
+        }
+    }
+}
+
+} // anonymous namespace
+
+// ============================================================================
+// Public Winograd convolution
+// ============================================================================
+// Layout::NHWC  -> the NHWC core runs directly (the fast path).
+// Layout::NCHW  -> convert to NHWC, run the NHWC core, convert the output
+//                  back to NCHW. The native NCHW kernel this replaced is
+//                  archived (buildable reference) in
+//                  ref/winograd_conv_nchw_ref.cpp.
+
+void winograd_convolution(
+    const float* src,   // NCHW: [N][IC][IH][IW]  or  NHWC: [N][IH][IW][IC]
+    const float* wei,   // [OC][IC][3][3]
+    const float* bias,  // [OC] or nullptr
+    float* dst,         // NCHW: [N][OC][OH][OW]  or  NHWC: [N][OH][OW][OC]
+    int N, int IC, int IH, int IW,
+    int OC, int OH, int OW,
+    const WinogradConfig& config,
+    float act_min, float act_max,
+    Layout layout
+) {
+    if (layout != Layout::NHWC) {
+        // NCHW: one in/out transpose around the shared NHWC core.
+        const int HW = IH * IW;
+        const int OHW = OH * OW;
+        float* src_nhwc = scratch_f32(static_cast<size_t>(N) * IC * HW, sSrcNhwc);
+        float* dst_nhwc = scratch_f32(static_cast<size_t>(N) * OC * OHW, sDstNhwc);
+        nchw_to_nhwc(src, src_nhwc, N, IC, IH, IW);
+        winograd_convolution_nhwc_core(src_nhwc, wei, bias, dst_nhwc,
+                                       N, IC, IH, IW, OC, OH, OW,
+                                       config, act_min, act_max);
+        nhwc_to_nchw(dst_nhwc, dst, N, OC, OH, OW);
+        return;
+    }
+    winograd_convolution_nhwc_core(src, wei, bias, dst,
+                                   N, IC, IH, IW, OC, OH, OW,
+                                   config, act_min, act_max);
 }
 
 } // namespace winograd_conv

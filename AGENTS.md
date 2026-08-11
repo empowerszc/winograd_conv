@@ -110,6 +110,9 @@ make -j && ./test_winograd
 ./bench_winograd --sve --nhwc --verify shapes.csv               # 逐 case 正确性验证（fp64 参考 + 相对容差 1e-4，FAIL 中止）
 cat shapes.csv | ./bench_winograd --neon
 
+# NCHW 包装 vs 存档原生 NCHW 参考（必须 bit-exact，8 shape × F44+F22）
+./test_ref_vs_nchw
+
 # 单 case profiling（perf 友好）
 ./profile_case --ic 192 --ih 40 --iw 40 --oc 192 --isa sve --threads 16         # 标准模式
 ./profile_case --ic 192 --ih 40 --iw 40 --oc 192 --isa sve --threads 16 --timing  # 8 子步骤计时
@@ -137,7 +140,7 @@ numactl --interleave=all env OMP_PROC_BIND=spread OMP_PLACES=cores \
 - **语言**：C++17
 - **命名空间**：`winograd_conv`
 - **模板参数**：`TILE_SIZE`（4 或 6）、`OUTPUT_TILE`（2 或 4）、`OUT_SIZE`/`IN_SIZE`
-- **数据布局**：NCHW（输入/输出），`[tile][channels]`（Winograd 域）
+- **数据布局**：**计算核心只认 NHWC**（`[tile][channels]` 通道连续）；NCHW 是包装层——入口 `nchw_to_nhwc` 转换、算完 `nhwc_to_nchw` 转回（见设计决策 #13）。原生 NCHW 内核已存档在 `ref/winograd_conv_nchw_ref.cpp`
 - **ISA 守卫**：`#if defined(__ARM_FEATURE_SVE)` / `#if defined(__ARM_FEATURE_SME)`
 - **SME 汇编**：使用 `.inst` 编码（与 ACL 一致），不依赖编译器 SME 助记符支持
 - **无注释**：代码中不加注释（除非用户明确要求）
@@ -181,10 +184,12 @@ numactl --interleave=all env OMP_PROC_BIND=spread OMP_PLACES=cores \
 
 12. **tile 提取优化**：内部 tile 跳过 `memset` 清零，预计算有效行列范围消除 `if` 分支
 
+13. **NCHW 包装层（2026-08-11 布局重构）**：Winograd 计算与布局无关，NCHW/NHWC 只差 tile 提取与写回。NCHW 的提取/写回按 `H*W` 通道步长访问，在无 L3 机器上 ~16x 缓存行放大。因此：把计算核心固定为 NHWC（`winograd_convolution_nhwc_core`），NCHW 入口做 `nchw_to_nhwc` → 计算 → `nhwc_to_nchw`（cache-blocked 转置，16 通道块 + `copy_f32`）。转换是纯数据搬运，输出与旧内核 **bit-exact**。原生 NCHW 内核存档在 `ref/`，`test_ref_vs_nchw` 断言 bit-exact。转换方案是否净赚需在目标机实测（见 PERFORMANCE_ANALYSIS.md §12）。
+
 ## 已知限制
 
 1. **GEMM 内核**：3 种可选（arm_gemm JIT > OpenBLAS > naive）。默认 naive，生产环境推荐 arm_gemm
-2. **NCHW/NHWC 双布局**：默认 NCHW，`--nhwc` 切换 NHWC。NHWC tile 提取 3.8x 快于 NCHW
+2. **NCHW 包装 vs 原生**：NCHW 现在是「转换 + NHWC 计算」包装。计算是共享的，NCHW 输入的实际开销 = 转换（整图两遍全量数据搬运）vs 旧内核的跨步提取/写回。**转换方案是否净赚未在目标机验证**——若转换反而更慢，可回退用 `ref/winograd_conv_nchw_ref.cpp` 里的原生内核（`Layout::NCHW` 换成 `winograd_convolution_nchw_ref`）
 3. **OpenMP 并行**：权重变换 + 输入/输出变换 + GEMM 均已并行。Phase 1-3 合并 1 区域，2 barrier（输入→GEMM, GEMM→输出），输出 `nowait`。权重变换独立并行区域
 4. **多线程扩展性受限**：8 线程后加速停滞，剩余瓶颈：OpenMP barrier 开销、GEMM 内核质量（OpenBLAS vs arm_gemm JIT）、NUMA 远程访问（920F 16 NUMA）
 5. **SME 仅 F(4,4,3,3) 输出变换**：F(2,2,3,3) 输出变换回退到 SVE

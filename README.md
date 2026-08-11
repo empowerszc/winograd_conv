@@ -2,7 +2,7 @@
 
 > 基于 ACL（Arm Compute Library）的 Winograd 卷积实现思路，用 C++ + NEON/SVE intrinsics + SME 内联汇编复刻的独立可运行项目。
 >
-> 支持 F(2,2,3,3) 和 F(4,4,3,3) 两种 Winograd 配置，包含权重/输入/输出三步变换、GEMM（OpenBLAS/arm_gemm/naive 三选一）、端到端卷积、NHWC/NCHW 双布局、OpenMP 多线程、以及与直接卷积的正确性验证。
+> 支持 F(2,2,3,3) 和 F(4,4,3,3) 两种 Winograd 配置，包含权重/输入/输出三步变换、GEMM（OpenBLAS/arm_gemm/naive 三选一）、端到端卷积、NHWC 计算核心 + NCHW 转换包装、OpenMP 多线程、以及与直接卷积的正确性验证。
 > 
 > 在鲲鹏 920F（Armv9 + SVE-512 + SME, 16 NUMA × 38 核）上，**8/9 测试 case 的 16 线程性能超越 oneDNN**（快 1.68~3.54x，A1/A2/A3 落地后复测）。
 >
@@ -24,9 +24,13 @@ winograd_conv/
 │   ├── winograd_transforms_sme.hpp        ← SME FMOPA 内联汇编变换
 │   └── winograd_convolution.hpp           ← 端到端接口 + dispatch 声明
 ├── src/
-│   └── winograd_conv.cpp                  ← 端到端实现 + GEMM + 直接卷积 + dispatch
+│   └── winograd_conv.cpp                  ← 端到端实现 + GEMM + 直接卷积 + dispatch（NHWC 计算核心）
+├── ref/
+│   ├── winograd_conv_nchw_ref.hpp         ← 存档原生 NCHW 内核声明（2026-08-11 布局重构前）
+│   └── winograd_conv_nchw_ref.cpp         ← 冻结快照，可 build 成库做对照基准
 ├── tests/
 │   ├── test_winograd.cpp                  ← 正确性验证 + 变换调试
+│   ├── test_ref_vs_nchw.cpp               ← NCHW 包装 vs 原生 ref 必须 bit-exact
 │   ├── bench_winograd.cpp                 ← 性能基准（读 CSV，测 GFLOPS）
 │   └── profile_case.cpp                   ← 单 case profiling（perf 友好，含 --timing）
 └── docs/
@@ -86,6 +90,9 @@ make -j
 
 # 测试 NHWC 布局（12 NCHW + 10 NHWC = 22 tests）
 ./test_winograd --nhwc
+
+# NCHW 包装 vs 存档原生 NCHW 参考（必须 bit-exact，8 shape × F44+F22）
+./test_ref_vs_nchw
 
 # 或通过环境变量
 WINOGRAD_ISA=sme ./test_winograd
@@ -235,7 +242,8 @@ A^T = [1,1,1,1,1,0; 0,1,-1,2,-2,0; 0,1,1,4,4,0; 0,1,-1,8,-8,1]  (4×6)
 - `direct_convolution_3x3()`：参考直接卷积（用于验证正确性）
 - `winograd_convolution()`：端到端 Winograd 卷积
   - 权重变换 + 输入变换 + GEMM + 输出变换全部在单个 `#pragma omp parallel` 区域内
-  - 支持 `Layout::NCHW` 和 `Layout::NHWC`（后者 tile 提取 3.8x 快）
+  - **计算核心只认 NHWC**（`winograd_convolution_nhwc_core`）；`Layout::NCHW` 是包装：`nchw_to_nhwc` 转换 → 计算 → `nhwc_to_nchw` 转回（转换方案未在目标机实测，见 §12）
+  - 原生 NCHW 内核存档在 `ref/`（`winograd_convolution_nchw_ref`），`test_ref_vs_nchw` 断言包装与它 bit-exact
 
 ### `test_winograd.cpp`
 - F(4,4,3,3) 变换级调试（权重/输入/输出/全流水线 + B^T 矩阵求解器）
@@ -286,7 +294,7 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 |------|--------|-----|
 | 变换实现 | NEON/SVE intrinsics + SME .inst | NEON/SVE 汇编 + SME 汇编 |
 | GEMM | 3 种可选：arm_gemm JIT > OpenBLAS > naive | arm_gemm 库（自动选 SVE/SME 内核） |
-| 数据布局 | NCHW + NHWC（`--nhwc` 切换） | NHWC + Winograd 专用布局 |
+| 数据布局 | NHWC 计算核心；NCHW 经转换包装（原生 NCHW 存档于 `ref/`） | NHWC + Winograd 专用布局 |
 | 多线程 | OpenMP（权重+输入+GEMM+输出 全并行，合并区域） | NEScheduler |
 | 正确性 | ✅ 22/22 验证通过（NCHW + NHWC）；bench `--verify` 用 fp64 参考 + 相对容差 | ✅ |
 | 性能 | **8/9 case 超越 oneDNN**（A1/A2/A3 后快 1.68~3.54x），仅 Case 2 慢 1.13x | 高度优化 |
