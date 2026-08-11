@@ -43,7 +43,7 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
 | `winograd_convolution.hpp` | 端到端接口 | `winograd_convolution()`, `dispatch_*()` |
 | `winograd_conv.cpp` | 端到端实现 | `winograd_gemm()`, `direct_convolution_3x3()` |
 | `test_winograd.cpp` | 正确性验证 | `run_test()`, 变换级调试, B^T 矩阵求解器 |
-| `bench_winograd.cpp` | 性能基准 | CSV 解析, GFLOPS 测量, 细粒度计时, 多线程对比, `--verify` 逐 case 正确性验证（OpenMP 并行直接卷积参考） |
+| `bench_winograd.cpp` | 性能基准 | CSV 解析, GFLOPS 测量, 细粒度计时, 多线程对比, `--verify` 逐 case 正确性验证（OpenMP 并行 **fp64** 直接卷积参考，相对容差） |
 | `profile_case.cpp` | 单 case profiling | `--timing` 8 子步骤, `--verify`, `--perf` 命令生成, 9 case preset |
 
 ### ISA 调度
@@ -107,7 +107,7 @@ make -j && ./test_winograd
 # 性能基准（读 CSV，自动过滤 stride=1 group=1 3x3）
 ./bench_winograd --sve --nhwc --threads 1,8,16,32,38 shapes.csv
 ./bench_winograd --timing --threads 16 --sve --nhwc shapes.csv  # 细粒度计时
-./bench_winograd --sve --nhwc --verify shapes.csv               # 逐 case 正确性验证（FAIL 则中止）
+./bench_winograd --sve --nhwc --verify shapes.csv               # 逐 case 正确性验证（fp64 参考 + 相对容差 1e-4，FAIL 中止）
 cat shapes.csv | ./bench_winograd --neon
 
 # 单 case profiling（perf 友好）
@@ -279,6 +279,12 @@ Case 3/4/5 已大幅超越 oneDNN（大 IC 时变换计算量大，OpenMP 并行
 **⚠️ 坑（2026-08-10 修复，预存 bug）**：tile 提取的边界裁剪原为「最后一个 tile 行/列用 `TS-1`」，只对**偶数** IH/IW 成立。奇数维度（如 IH=7，最后一行 tile 读 ih=7）会越界读到**下一通道的第 0 行**（batch 最后通道甚至读到缓冲外），正确性测试 F(2,2) N=2 IC=16 IH=7 挂。已改为按实际边界裁剪：`ti_end = (ih_begin+TS > IH) ? (IH - ih_begin) : TS`（`ih_begin = tr*OT-1`），偶数维行为不变。同时修正了 test_winograd.cpp End-to-End Debug 的错误期望（tap (0,0) 的 delta 输出在 (1,1) 即 flat index 5，不是 1）。
 
 **验证结果（2026-08-10 A1/A2/A3 后，920F 复测）**：正确性 12/12 通过。性能见下方「最终性能对比」。原预期「拷贝项各 -50~75%」已兑现且超出——Case 0/1/2 总时间 -3.0~3.7×。
+
+**数值精度与 `--verify` 方法（2026-08-11）**：
+- **误差来源**：F(4,4) fp32 误差主要来自 GEMM 按 IC 串行累加（`src/winograd_conv.cpp` naive 三重循环），再被输出变换 A 矩阵（系数最高 ±8）放大。误差随 IC 线性增长，但输出幅值也随 IC 线性增长 → **相对误差恒定 ~2-6e-6**，属 fp32 正常水平（非 bug）。
+- **早期 1e-3 绝对容差误报大 IC case FAIL**：IC=384/768 时输出幅值 ~1000，1e-2 绝对误差相对只有 ~6e-6。固定绝对容差不随规模缩放是错误指标。
+- **正确做法**：`--verify` 参考改用 **fp64 直接卷积**（`direct_convolution_3x3_f64`，OpenMP 按 batch 并行），判据改**相对容差** `err < 1e-4 × max|ref| + 1e-5`。fp64 参考测的是 Winograd 相对精确数学的真实误差。
+- **若要进一步降误差**：GEMM fp64/Kahan 累加（打在性能关键路径）> 变换 fp64（破坏 SIMD，代价大）> 换 F(2,2)（矩阵全 ±1 无放大，但改变被测算法）。换 arm_gemm 后 blocked 累加也会比 naive 串行更准。
 
 ### 最终性能对比（完整 9 case, NHWC, SVE, 16 线程）— A1/A2/A3 后复测
 
@@ -558,5 +564,6 @@ OMP_PROC_BIND=spread OMP_PLACES=cores ./bench_winograd --sve --nhwc --threads 32
 
 ## 相关文档
 
+- **算法详解**：`docs/algorithm.md` — 当前实现的分步讲解（Winograd 数学、三步变换、数据/缓冲布局、OpenMP 并行结构、NEON/SVE/SME 内核、GEMM 选择、tile 边界、数值精度）
 - **ACL 参考文档**：`docs/acl_reference/` — 从 oneDNN 源码树复制的 ACL Winograd 实现分析文档（8 个文件）。用于指导后续优化（SVE/SME 汇编变换、arm_gemm GEMM 内核、权重变换手写公式等）
-- **性能分析**：`PERFORMANCE_ANALYSIS.md` — 完整优化历程（9 阶段）、9 case 对比数据、细粒度计时、差距分析、新优化思路（A-F）
+- **性能分析**：`PERFORMANCE_ANALYSIS.md` — 完整优化历程（9 阶段）、9 case 对比数据、细粒度计时、差距分析、新优化思路（A-F）、数值精度分析（第 9 节）

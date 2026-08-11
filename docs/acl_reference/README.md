@@ -5,8 +5,8 @@
 > 这些文档是 `winograd_conv` 项目的**参考实现指南**，用于理解 ACL 的算法原理、汇编优化策略，
 > 指导后续进一步优化（特别是 SVE/SME 汇编变换、arm_gemm GEMM 内核等）。
 >
-> 当前 `winograd_conv` 的性能与 ACL/oneDNN 的 SVE 版本仍有 1.86x 差距（t32），
-> 主要瓶颈：权重变换串行（47%）、GEMM 内核质量（OpenBLAS vs arm_gemm JIT）、变换实现（模板 vs 手写汇编）。
+> A1/A2/A3 落地后（2026-08-10 复测），`winograd_conv` 在 t16 微基准上已 **8/9 case 快于 oneDNN**（快 1.68~3.54x，仅 Case 2 慢 1.13x）。
+> 但注意：该优势主要来自微基准下更低的固定开销（详见 `../PERFORMANCE_ANALYSIS.md` 第 10 节），ACL 的手写汇编变换 + arm_gemm JIT 内核在**大负载**下仍更强，仍是本项目的参考优化目标。
 >
 > 详见 `../PERFORMANCE_ANALYSIS.md` 的差距分析和下一步优化建议。
 

@@ -4,7 +4,9 @@
 >
 > 支持 F(2,2,3,3) 和 F(4,4,3,3) 两种 Winograd 配置，包含权重/输入/输出三步变换、GEMM（OpenBLAS/arm_gemm/naive 三选一）、端到端卷积、NHWC/NCHW 双布局、OpenMP 多线程、以及与直接卷积的正确性验证。
 > 
-> 在鲲鹏 920F（Armv9 + SVE-512 + SME, 16 NUMA × 38 核）上，**6/9 测试 case 的 16 线程性能超越 oneDNN**（快 43-59%）。
+> 在鲲鹏 920F（Armv9 + SVE-512 + SME, 16 NUMA × 38 核）上，**8/9 测试 case 的 16 线程性能超越 oneDNN**（快 1.68~3.54x，A1/A2/A3 落地后复测）。
+>
+> 逐 case 正确性经 **fp64 直接卷积参考**验证：fp32 舍入误差相对 ~2-6e-6（随 IC 增长的是绝对误差，相对误差恒定），符合 fp32 精度预期。
 
 ## 目录结构
 
@@ -28,6 +30,7 @@ winograd_conv/
 │   ├── bench_winograd.cpp                 ← 性能基准（读 CSV，测 GFLOPS）
 │   └── profile_case.cpp                   ← 单 case profiling（perf 友好，含 --timing）
 └── docs/
+    ├── algorithm.md                       ← 算法详解（数学、布局、缓冲、并行、ISA 内核、精度）
     └── acl_reference/                     ← ACL 参考文档（从 oneDNN 源码树复制）
         ├── README.md                      ← 文档索引与使用场景
         ├── acl_wino_neon_intrinsics_annotated.md
@@ -103,7 +106,7 @@ WINOGRAD_ISA=sme ./test_winograd
 # 输出结果到 CSV
 ./bench_winograd --sve --nhwc --threads 32 --output result.csv shapes.csv
 
-# 逐 case 正确性验证（每个 case 与直接卷积对比，任一 FAIL 则中止）
+# 逐 case 正确性验证（与 fp64 直接卷积对比，相对容差 1e-4，任一 FAIL 则中止）
 ./bench_winograd --sve --nhwc --verify shapes.csv
 
 # NUMA 优化
@@ -284,8 +287,8 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 | GEMM | 3 种可选：arm_gemm JIT > OpenBLAS > naive | arm_gemm 库（自动选 SVE/SME 内核） |
 | 数据布局 | NCHW + NHWC（`--nhwc` 切换） | NHWC + Winograd 专用布局 |
 | 多线程 | OpenMP（权重+输入+GEMM+输出 全并行，合并区域） | NEScheduler |
-| 正确性 | ✅ 22/22 验证通过（NCHW + NHWC） | ✅ |
-| 性能 | **6/9 case 超越 oneDNN**（快 43-59%），3/9 case 慢（多 tile + 小 IC） | 高度优化 |
+| 正确性 | ✅ 22/22 验证通过（NCHW + NHWC）；bench `--verify` 用 fp64 参考 + 相对容差 | ✅ |
+| 性能 | **8/9 case 超越 oneDNN**（A1/A2/A3 后快 1.68~3.54x），仅 Case 2 慢 1.13x | 高度优化 |
 
 ### 性能分析
 
@@ -343,7 +346,15 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 - Case 4/5（大 IC，GEMM 受限）仅 ~1.1x —— 下一目标：`-DUSE_ARM_GEMM` JIT 内核
 - 高线程扩展 6.2~26.6x（t1→t38），小 tile 数 case 16 线程后内存带宽受限平台化
 
-详见 `PERFORMANCE_ANALYSIS.md`
+### 数值精度说明（2026-08-11）
+
+`--verify` 对比 **fp64 直接卷积参考**（非 fp32 参考），判据为**相对容差** `err < 1e-4 × max|ref| + 1e-5`。原因：
+
+- F(4,4) Winograd 的 fp32 舍入误差**随 IC 线性增长**（GEMM 按 IC 串行累加，被输出变换 A 矩阵最高 ±8 的系数放大），但输出幅值同样随 IC 线性增长，所以**相对误差恒定在 ~2-6e-6**（fp32 正常水平）。
+- 早期用固定绝对容差 1e-3 导致大 IC case（IC=384/768）误报 FAIL——那是容差指标问题，不是实现 bug。
+- fp64 参考让 `--verify` 测的是 Winograd 相对精确数学的**真实误差**，而非两个 fp32 实现的差值。
+
+详见 `PERFORMANCE_ANALYSIS.md` 第 9 节。
 
 ## 扩展指南
 
