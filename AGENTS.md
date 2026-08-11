@@ -402,6 +402,8 @@ arm_gemm 路径示例：`ComputeLibrary-53.1.0/src/core/NEON/kernels/convolution
 
 详见 `PERFORMANCE_ANALYSIS.md` 和 `docs/acl_reference/`。
 
+> ⚠️ **最新重排**（2026-08-11）：在「内核不如 ACL」前提下，机会清单 Tier 0~3 见 `PERFORMANCE_ANALYSIS.md` 第 11 节。推荐路径：**arm_gemm JIT GEMM（现成）→ V 跨调用缓存（补亏空）→ tile 分块落 L2（920F 特性）→ Bᵀ 零系数跳过**。下方旧清单按原顺序保留。
+
 **针对慢 case（0/1/2, 慢 1.79-2.56x）的优化**：
 
 1. **arm_gemm 替换 OpenBLAS**（预期 Case 0/1/2 各 -1~2ms）
