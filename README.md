@@ -33,6 +33,11 @@ winograd_conv/
 │   ├── test_ref_vs_nchw.cpp               ← NCHW 包装 vs 原生 ref 必须 bit-exact
 │   ├── bench_winograd.cpp                 ← 性能基准（读 CSV，测 GFLOPS）
 │   └── profile_case.cpp                   ← 单 case profiling（perf 友好，含 --timing）
+├── shapes/
+│   ├── conv_all.csv                       ← 与 benchdnn 可对照的基准用例集（59 行，`#` 分节）
+│   └── README.md                          ← 各节测哪个假设 + 运行/对比/profiling 指南
+├── tools/
+│   └── compare.sh                         ← 极简对比脚本（输出 mb,ic,ih,iw,oc,ours_ms）
 └── docs/
     ├── algorithm.md                       ← 算法详解（数学、布局、缓冲、并行、ISA 内核、精度）
     ├── why_faster_than_acl_23.11.md       ← 为什么比 ACL 23.11 快（独立分析，含例子）
@@ -122,6 +127,11 @@ WINOGRAD_ISA=sme ./test_winograd
 # NUMA 优化
 numactl --interleave=all ./bench_winograd --sve --nhwc --threads 32 shapes.csv
 ```
+
+> 与 oneDNN benchdnn **同 shape 对照**的用例集与极简对比脚本见 **`shapes/README.md`**：
+> `shapes/conv_all.csv`（59 行，`#` 分节：Case 0-8 / ResNet50 / VGG16 / 轻量 / 大 batch / 固定开销隔离 / tiles×IC 扫描网格）；
+> `./tools/compare.sh --threads 16 --isa sve shapes/conv_all.csv` 直接输出 `mb,ic,ih,iw,oc,ours_ms` 表。
+> 该 README 同时给出 CSV 行 → benchdnn 描述符的规则（`mb4_ic192_ih40iw40_oc192_oh40ow40_kh3kw3_sh1sw1_ph1pw1`）与 profiling 对照计数器。
 
 ### 单 case profiling（perf 友好）
 

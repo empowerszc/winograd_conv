@@ -75,6 +75,11 @@ bool read_shapes(const std::string& filename, std::vector<ShapeInfo>& shapes) {
             line.pop_back();
         if (line.empty()) continue;
 
+        // Comment lines (section headers in shapes/*.csv): skip. A line whose
+        // first non-space char is '#' is ignored rather than parsed as data.
+        size_t p0 = line.find_first_not_of(' ');
+        if (p0 != std::string::npos && line[p0] == '#') continue;
+
         auto f = split_csv(line);
         if (f.size() < 15) {
             fprintf(stderr, "  Line %d: only %zu fields (need 15), skipped\n", line_no, f.size());
