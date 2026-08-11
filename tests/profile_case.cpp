@@ -49,6 +49,14 @@
 #include <omp.h>
 #endif
 
+#ifdef USE_OPENBLAS
+// Prevent OpenBLAS from spawning its own threads — conflicts with OpenMP.
+// Same pin as the real path (src/winograd_conv.cpp); without it the --timing
+// GEMM step would run under OpenBLAS's default thread count, not the 1 thread
+// the production path uses.
+extern "C" void openblas_set_num_threads(int);
+#endif
+
 using namespace winograd_conv;
 
 struct Args {
@@ -187,6 +195,11 @@ StepTiming run_with_timing(
     int N, int IC, int IH, int IW, int OC, int OH, int OW,
     ISALevel isa, Layout layout
 ) {
+#ifdef USE_OPENBLAS
+    // Same condition as winograd_convolution_nhwc_core: pin OpenBLAS to 1
+    // thread so the timing GEMM is measured under production threading.
+    openblas_set_num_threads(1);
+#endif
     const int TS = 6, OT = 4, NM = 36;
     const bool is_f44 = true;
 
