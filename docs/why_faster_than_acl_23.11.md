@@ -17,6 +17,7 @@
 - [6. 建议与验证清单](#6-建议与验证清单)
 - [7. ACL 23.11 SVE 实现细节文档索引](#7-acl-2311-sve-实现细节文档索引)
 - [8. 验证与分析方式工具箱](#8-验证与分析方式工具箱如何证明证伪快于-acl-2311)
+- [9. 胜负转折点：历史时间线](#9-胜负转折点历史时间线)
 
 ---
 
@@ -350,3 +351,51 @@ perf script > spe.dump
 - 若在整个网格都赢 → 我们的内存/调度策略在 920F 上有系统性优势，值得深挖成论文级结论。
 
 **综合顺序建议**：先 8.1（排除假赢）→ 8.2（拆时间定位大头）→ 8.5 的缩放实验（固定开销假说）→ 8.4 SPE（内存局部性定论）→ 8.7 热力图（边界画清）。perf 计数器（8.3）在每一步穿插，为每个结论补硬件证据。
+
+---
+
+## 9. 胜负转折点：历史时间线
+
+> 回答一个问题：**到底是哪一步让本实现超过 oneDNN+ACL 23.11？** 答案是**分两段**——**并行化引擎**（2026-08-07~08-08）让 6/9 先反超，**A1/A2/A3**（08-10）补上剩余 3 个拷贝/缓冲受限 case，凑成 8/9。§4 的六个原因不是同时生效的，而是按下面这个顺序逐个落地的。
+
+### 9.1 总览（以 Case 0: 4×192×40×40 为标尺）
+
+| 阶段 | commit | 日期 | 代码/算法改动 | Case0 t16(ms) | 相对 oneDNN t16 |
+|---|---|---|---|---|---|
+| ① NCHW 基线 | `0ad2620` | 08-03 | 初版：NCHW、标量/NEON 变换、naive GEMM、每 tile 循环内 `std::vector` 分配 | 14.2 | 慢 3.9x |
+| ② +NHWC 布局 | — | 08-04~06 | tile 提取改连续 load（NHWC 通道连续，`vld1q_f32`，比 NCHW 标量快 3.8x） | ~14 | 慢 ~3.9x |
+| ③ +GEMM 并行 + schedule(dynamic,2) + raw malloc | `76fa4bf` | 08-07 | GEMM 36 ts_idx 并行；碎 tile 动态调度；`vector`→raw `malloc` 消堆锁 | 9.5 | 慢 2.5x |
+| ④ +3 个 OpenMP 区域合并为 1 | `cefe526` | 08-07 | 每次调用只 1 次 fork/join（粗粒度调度的核心） | 7.0 | 慢 1.9x |
+| ⑥ +权重变换并行（独立 region） | — | 08-08 | 小 OC 时多出的 fork/join 1-2ms 抵消收益，Case 0 反而变慢 | 7.4 | 慢 2.0x ↑ |
+| ⑦ +权重并入主 region | `893a015` | 08-08 | 权重变换与 batch 循环共享 1 region；V 变换完成后 barrier 同步 | 7.3 | 慢 1.9x |
+| ⑧ +展平 N batch（9→3 barriers） | `544dfaa` | 08-10 | barrier 少但 U/M_buf ×N；Case 4 U=88MB 劣化 +76%（无 L3 教训） | 6.4 | 慢 1.7x（不可用） |
+| ⑨ 回退 per-batch（**A1/A2 前最终**） | `2325e1e` | 08-10 | per-batch 流水：每 batch 2 barrier + Phase3 `nowait` | 7.2 | 慢 2.0x |
+| **A1/A2/A3** | `702d195`+`6599a80` | 08-10 | 免 memset + `thread_local` 缓冲复用 + SVE 拷贝 | **1.937** | **快 1.83x ✓** |
+
+### 9.2 并行化引擎（③④⑦⑨）：6/9 反超的基础
+
+- **③ 的原理**：Winograd GEMM 的 36 个 `ts_idx`（BᵀdB 的 36 个变换位置）两两无依赖，天然可并行；`schedule(dynamic,2)` 让碎 tile 动态派发做负载均衡。**先决条件在分配**：每 tile 在循环内 `std::vector::resize` 触发堆锁竞争——这就是早先「加了 OpenMP 反而无加速」的根因，换 raw `malloc` 后并行才生效。这是本实现「固定开销趋近于零」的第一块基石（§4.1）。
+- **④ 的原理**：初版输入变换 / GEMM / 输出变换是 3 个独立 `#pragma omp parallel`，每次调用 3 次 fork/join。合并成 1 个 region 后**每次调用只 1 次 fork/join**——这就是 §4.2 所谓「粗粒度 OpenMP vs 细粒度 NEScheduler」的工程形态：对方每次调用构建 NEScheduler 任务图并切 kernel window，我们只是进一个 region。
+- **⑦ 的教训**：权重变换并行化放**独立** region 时，小 OC（Case 0/1）的收益被多出来的 fork/join（~1-2ms）抵消，反而变慢；大 IC（Case 4/5）则受益 -19~-30%（权重变换工作量大，摊得回）。解法：并入主 region、共享一次 fork/join，权重变换与 batch 循环之间用 barrier 同步（V 必须完成后才能进 batch）。
+- **⑧→⑨ 的教训（920F 无 L3 的第一课）**：展平 N 个 batch 把 barrier 从 9 降到 3，代价是 U/M_buf 内存 ×N。Case 0（U=11MB）改善 -14%，Case 4（U=88MB）却劣化 +76%——**920F 无 L3、L2 仅 768KB/核，任何把驻留数据放大的做法都是自杀**。于是回退 per-batch：U/M/V 只容一个 batch，每 batch 2 barrier + Phase3 `nowait`（跨 batch 重叠输出变换）。这就是今天 `winograd_convolution_nhwc_core` 的结构（`src/winograd_conv.cpp:391-479`）。
+
+### 9.3 A1/A2/A3：把拷贝/缓冲受限的 3 个 case 翻过来
+
+这是 8 月 10 日从 9 case 加速比定位到的「拷贝/缓冲受限」问题（后来被 `--timing` 拆解量化成 `docs/timing_breakdown_920f.md` 的步耗时）。
+
+| # | 改动 | 算法依据 | 对 Case 0/1/2 的收益 |
+|---|------|---------|----------------------|
+| A1 | `std::vector(n, 0.0f)` → `scratch_f32()`（malloc 不清零） | U 被 scatter **完整覆写**、M 被 GEMM **beta=0 覆写**、V 被权重变换覆写——三个缓冲读取前必被覆写，清零是纯浪费 | 免掉每次调用对最大 ~33MB 的无谓 memset |
+| A2 | 6 个 per-thread tile 缓冲 + U/M/V 改 `thread_local` 增长式（容量不足才 realloc） | 缓冲驻留进程/线程生命周期 → 每次调用**零堆分配** | 免掉 6 vector/线程 × N 线程的分配 churn（③ 的根治） |
+| A3 | 4 处拷贝（tile 提取 / scatter / gather / 输出写回）改 `copy_f32()` | SVE-512 每指令 16 float（vs NEON 4），谓词自动处理 tail；**编译期**由 `-march` 选择 | Case 0/1/2 是 tile 多 + 通道浅，拷贝流量占比大 |
+
+**A2 的坑（`6599a80`）**：最初用一个 `thread_local Scratch` 服务全部 9 个缓冲，导致它们全部别名同一内存，正确性测试全挂（天文数字误差）。每个逻辑缓冲必须持有**独立**的 `Scratch`——这就是今天代码里 `Scratch` 是一族 thread_local 对象而不是一个的原因。
+
+**为什么专治 Case 0/1/2**：这三个是「大图小通道」——IH/IW 大 → tiles 多、每次调用 buffer 大、scatter/gather 数据量大，A1/A2/A3 全部打在内存侧。而 GEMM 受限的 Case 4/5（IC=384/768，U 缓冲 22~44MB 远超 L2）只有 ~1.1x——瓶颈在 naive GEMM 不在拷贝/分配，A 类优化够不着（这正是后续把 arm_gemm 列为 Tier 0 的原因）。
+
+### 9.4 结论：转折点在哪
+
+- **「超过 oneDNN」的起点 = 并行化引擎（③④⑦⑨）**。到阶段⑨，6/9 已反超（快 43-59%）。即使 Case 0/1/2 还慢 1.8-2.6x，整体趋势已经确立。
+- **「压倒性 8/9」= A1/A2/A3**。把三个拷贝/缓冲受限 case 从慢 2x 翻成快 1.7-1.8x，Case 2 追到 11.5% 以内。8/9 是这两段加起来的。
+- **Case 2 始终没翻**：1600 tile + IC=48 的碎片化极端，与我们调度最碎的地方重合（§3.2、`timing_breakdown_920f.md` §3.2）。
+- **与 §4 六原因的对应**：并行结构（§4.2）在阶段④⑦落地；固定开销趋零（§4.1）到 A1/A2 才完成；内存契合 920F（§4.3）从 NHWC（②）一路累积到 A3。
