@@ -45,6 +45,8 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
 | `test_winograd.cpp` | 正确性验证 | `run_test()`, 变换级调试, B^T 矩阵求解器 |
 | `bench_winograd.cpp` | 性能基准 | CSV 解析, GFLOPS 测量, 细粒度计时, 多线程对比, `--verify` 逐 case 正确性验证（OpenMP 并行 **fp64** 直接卷积参考，相对容差） |
 | `profile_case.cpp` | 单 case profiling | `--timing` 8 子步骤, `--verify`, `--perf` 命令生成, 9 case preset |
+| `swish_sve.h` | SVE Swish/SiLU 实现 | `exp_sve_f32()` (fexpa+fscale), `sigmoid_sve_f32()`, `swish_fwd_sve()`, `swish_bwd_sve()` |
+| `swish_sve_bench.cpp` | Swish 性能/正确性基准 | 标量 ref 对比, GB/s 吞吐, 多 alpha/范围测试 |
 
 ### ISA 调度
 
@@ -131,11 +133,26 @@ perf script | flamegraph.pl > flame.svg
 # NUMA 优化
 numactl --interleave=all env OMP_PROC_BIND=spread OMP_PLACES=cores \
   ./bench_winograd --sve --nhwc --threads 32 shapes.csv
+
+# Swish/SiLU SVE 性能/正确性基准
+./swish_sve_bench
 ```
 
 测试包含：
 1. **变换级调试**：权重/输入/输出/全流水线，用已知输入验证
 2. **端到端测试**：12 个用例（小图到大图），对比直接卷积，容差 1e-3
+
+### Swish/SiLU SVE 实现要点
+
+`swish_sve/swish_sve.h` 是独立的 header-only SVE Swish 实现，算法对齐 oneDNN 3.12.1：
+
+- **算法链**：`swish → sigmoid → exp`
+- **exp**：`fexpa` + `fscale`（SVE 专用硬件加速）+ 线性多项式修正
+- **sigmoid**：对称性优化 $\sigma(-x)=1-\sigma(x)$，只对负数算 exp 避免溢出
+- **alpha=1 快速路径**：SiLU 跳过 alpha 乘法
+- **backward**：`fmls` + `fmla` 链式计算 $Q(1+R(1-Q))$，无栈访问（优于 oneDNN JIT 版）
+- **VLA**：`svwhilelt_b32` 谓词处理 tail，适配 128/256/512-bit SVE
+- **fexpa**：通过 inline assembly 包装（ACLE 标准未直接暴露）
 
 ## 代码约定
 
@@ -191,11 +208,12 @@ numactl --interleave=all env OMP_PROC_BIND=spread OMP_PLACES=cores \
 ## 已知限制
 
 1. **GEMM 内核**：3 种可选（arm_gemm JIT > OpenBLAS > naive）。默认 naive，生产环境推荐 arm_gemm
-2. **NCHW 包装 vs 原生**：NCHW 现在是「转换 + NHWC 计算」包装。计算是共享的，NCHW 输入的实际开销 = 转换（整图两遍全量数据搬运）vs 旧内核的跨步提取/写回。**转换方案是否净赚未在目标机验证**——若转换反而更慢，可回退用 `ref/winograd_conv_nchw_ref.cpp` 里的原生内核（`Layout::NCHW` 换成 `winograd_convolution_nchw_ref`）
+2. **NCHW 包装 vs 原生**：NCHW 现在是「转换 + NHWC 计算」包装。计算是共享的，NCHW 输入的实际开销 = 转换（整图两遍全量数据搬运）vs 旧内核的跨步提取/写回。2026-08-20 在 920F（9T NCHW 端到端）实测**转换开销较小**，后续性能比较统一用 NCHW 端到端口径。若某些 shape 转换反而更慢，可回退用 `ref/winograd_conv_nchw_ref.cpp` 里的原生内核（`Layout::NCHW` 换成 `winograd_convolution_nchw_ref`）
 3. **OpenMP 并行**：权重变换 + 输入/输出变换 + GEMM 均已并行。Phase 1-3 合并 1 区域，2 barrier（输入→GEMM, GEMM→输出），输出 `nowait`。权重变换独立并行区域
 4. **多线程扩展性受限**：8 线程后加速停滞，剩余瓶颈：OpenMP barrier 开销、GEMM 内核质量（OpenBLAS vs arm_gemm JIT）、NUMA 远程访问（920F 16 NUMA）
 5. **SME 仅 F(4,4,3,3) 输出变换**：F(2,2,3,3) 输出变换回退到 SVE
 6. **`--timing` 模式是串行的**：用于分析各阶段时间占比，不代表并行后的实际性能
+7. **9 线程 NCHW 端到端落后 oneDNN**：2026-08-20 实测多数 case（7/9）落后 `wino:acl`（仅 row 4/9 赢）。瓶颈在 **per-tile 内核效率**（GEMM/变换/scatter-gather/权重变换重算），不在固定开销——详见「性能优化记录」→「9 线程 NCHW 端到端实测」，差距归因见 `docs/why_faster_than_acl_23.11.md` §10
 
 ### 性能对比（NHWC, SVE, 16 线程，完整 9 case）
 
@@ -350,6 +368,52 @@ Case 3/4/5 已大幅超越 oneDNN（大 IC 时变换计算量大，OpenMP 并行
 **输的条件**（3/9 case, 慢 1.79-2.56x）：
 - IC ≤ 192 且 tiles ≥ 100（GEMM K 维小 + barrier 开销占比大）
 - Case 2 最差（IC=48, tiles=1600）：GEMM K=48 极小 + 8 个 barrier
+
+### 9 线程 NCHW 端到端实测（2026-08-20）：多数 case 落后 oneDNN wino:acl
+
+**测量**：NCHW 端到端计时、numactl 绑核、6 线程档（4/8/9/16/32/38）。onednn 走 ACL SVE Winograd（`wino:acl`，8/9 row）或直接卷积（`brgconv:sve_512`，1/9 row）；我们走 `winograd_convolution`（NCHW 包装层 → NHWC core）。转换开销实测较小（用户确认），差距在核心 per-tile 效率，不在包装层。（benchdnn 与端到端测速为何不同、怎么公平对照 → `docs/why_faster_than_acl_23.11.md` §10.4）
+
+**读数约定**：加速比 = **onednn / 我们**，>1 表示我们快（曾误读为 <1 快，方向反了会得出完全相反的结论）。
+
+| row | Count | onednn 实现 | 我们 ms (4/8/9/16/32/38T) | onednn ms (4/8/9/16/32/38T) | 加速比 (4/8/9/16/32/38T) |
+|---|---|---|---|---|---|
+| 1 | 24 | wino:acl | 5.733/3.303/2.975/2.113/1.749/1.605 | 4.398/1.864/1.886/1.463/1.661/1.139 | 0.77/0.56/0.63/0.69/0.95/0.71 |
+| 2 | 17 | wino:acl | 8.571/4.701/4.284/2.915/2.137/1.876 | 4.145/3.101/2.758/2.051/1.308/1.127 | 0.48/0.66/0.64/0.70/0.61/0.60 |
+| 3 | 8 | brgconv:sve_512 | 17.788/9.483/8.273/5.427/3.544/2.800 | 9.241/4.734/4.137/2.335/1.203/1.039 | 0.52/0.50/0.50/0.43/0.34/0.37 |
+| 4 | 16 | wino:acl | 2.500/1.498/1.327/0.901/0.742/0.852 | 1.708/1.713/2.045/1.436/0.393/0.315 | 0.68/1.14/**1.54**/1.59/0.53/0.37 |
+| 5 | 1 | wino:acl | 22.903/12.102/10.684/7.102/4.895/4.120 | 9.954/6.884/7.461/6.198/6.658/5.569 | 0.43/0.57/0.70/0.87/1.36/1.35 |
+| 6 | 1 | wino:acl | 12.946/7.064/6.478/4.529/3.346/3.117 | 6.007/3.551/3.650/2.503/5.873/5.183 | 0.46/0.50/0.56/0.55/1.76/1.66 |
+| 7 | 1 | wino:acl | 5.420/3.012/2.964/1.908/1.527/1.256 | 2.312/2.152/2.069/1.464/1.890/1.677 | 0.43/0.71/0.70/0.77/1.24/1.34 |
+| 8 | 1 | wino:acl | 2.909/1.624/1.443/1.019/1.045/1.111 | 1.473/1.074/0.988/0.564/0.323/0.301 | 0.51/0.66/0.68/0.55/0.31/0.27 |
+| 9 | 1 | wino:acl | 0.998/0.592/0.541/0.418/0.474/0.515 | 0.641/0.519/0.642/0.514/0.087/0.080 | 0.64/0.88/**1.19**/1.23/0.18/0.16 |
+
+> ⚠️ shape（mb,ic,ih,iw,oc）**待补**——当前只能按 row 编号对应，无法映射 tiles/IC，也就无法精确判定每行是 GEMM/变换/内存受限。
+
+**胜率分布**：
+
+| 线程 | 赢的 row | 说明 |
+|---|---|---|
+| 4T | 无 | 全面落后 |
+| 8T | 4 | |
+| 9T | 4、9 | ← 当前关注点 |
+| 16T | 4、9 | |
+| 32/38T | 5、6、7 | 因 onednn 自身 32/38 退化（row 5/6/7 的 onednn 16→32 反而变慢） |
+
+onednn 的 32/38 行为反常：row 8/9 塌缩 4-6x（0.514→0.087ms）、row 5/6/7 反而退化——两个方向暂不深究，聚焦 9T。
+
+**9T 落后的结构性原因**（代码已核实）：
+1. **GEMM**：我们 `openblas_set_num_threads(1)`（src/winograd_conv.cpp:331）+ `cblas_sgemm`（240-246）钉死单线程小矩阵；对方就是 arm_gemm JIT——`winograd_gemm` 的 arm_gemm 分支（233-239）已写好、默认未开，**同一套内核**。
+2. **变换内核**：编译器生成 vs 对方手写 SVE 汇编（`sve_fp32_6x6.cpp`，完全展开无分支、周期级调度）。
+3. **scatter/gather**：Phase 1 散入 U + Phase 3 从 M 收集 = 两笔全量内存遍历；对方 `matrix_stride` 布局让变换直接写进 GEMM 顺序，不做 scatter/gather。
+4. **权重变换每调用重算**：对方把 TransformedWeights 缓存到 primitive。
+
+**9T 定向优化**（按性价比）：
+1. **arm_gemm JIT**：`-DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=...`，CMake 已接好（CMakeLists.txt:11-66）、`winograd_gemm` 分支已就绪，纯构建接入。GEMM 受限 row 直接拉平。小优化：`GemmHybrid` 每次调用构造一次（36 次/批），提为静态缓存按 shape 复用。
+2. **缓存 V**（权重变换跨调用复用，key = 权重指针 + shape）：Count≥8 的 row 1-4 立省一次权重变换。
+3. **变换内核手写/展开**（对应「新增优化思路 F」）。
+4. **消除 scatter/gather**：变换直接写 GEMM 布局，砍掉 Phase 1 scatter + Phase 3 gather。
+
+**待补数据**：9 行的 shape 列（映射 GEMM/变换/内存受限）；转换开销数字（用户可提供，确认 wrapper 占比）。
 
 ### 下一步优化方向（按预期收益排序）
 
