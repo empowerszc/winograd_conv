@@ -355,6 +355,31 @@ batch N 的输出变换与 batch N+1 的输入变换并行，用 OpenMP task 实
 
 F(4,4) 的 B^T 有 50% 零元素，专用展开可跳过零系数行/列，减少 ~50% 变换计算量。参考 `docs/acl_reference/acl_wino_neon_intrinsics_annotated.md`。
 
+### G. per-thread 缓冲的 NUMA 本地绑定（2026-08-21 新增）
+
+**问题**：6 个 per-thread `thread_local Scratch`（`sd_tile`/`sU_tile`/`sM_tile`/`sf_tile`/`sg_wt`/`sV_oc_wt`，见 `src/winograd_conv.cpp:89`，在 `#pragma omp parallel` 内按 `scratch_f32(...)` 首次分配于 `:369-374`）各自由**单个线程**独占访问。但运行时若用 `numactl --interleave=all`（见 §运行方式 / AGENTS.md），整个进程的内存策略是 `MPOL_INTERLEAVE`，这些 per-thread 缓冲的首触页被**轮询散布到 16 个 NUMA 节点**——之后每次访问只有 1/16 概率落在本线程所在节点，15/16 是远程 NUMA 访问。920F 无 L3、L2 仅 768KB/核，远程 NUMA 访问 ≈ 直接进 DRAM；`d_tile`/`U_tile` 在每 tile 提取/变换都要读写一遍，对 tile 多的 case（Case 2: 1600 tile）是持续性惩罚。
+
+**关键区分（共享 vs per-thread，numactl 无法同时满足）**：
+- **共享缓冲** `U`/`M_buf`/`V`（`sU`/`sM`/`sV`，被所有线程读写）：**应当** interleave——`numactl --interleave=all` 已正确处理，无需改。
+- **per-thread 缓冲**（6 个 tile 缓冲，只被属主线程访问）：**不应当** interleave，应绑定到属主线程所在 NUMA 节点（local）。
+- `numactl` 是**进程级单一策略**，无法对共享缓冲和 per-thread 缓冲施加不同策略 → 必须在代码层区分。
+
+**方案**：per-thread Scratch 在 `scratch_f32` 的 grow 分支（首次 `malloc` 后、首触前）按属主线程的 NUMA 节点做本地绑定：
+```cpp
+// 获取当前线程所在 NUMA 节点（需 libnuma，或读 /sys/devices/system/node/...）
+int node = numa_node_of_cpu(sched_getcpu());
+// 对 per-thread 缓冲做本地绑定：覆盖进程级 interleave
+unsigned long nodemask = 1UL << node;
+mbind(ptr, size, MPOL_PREFERRED, &nodemask, sizeof(nodemask)*8, 0);
+```
+- `MPOL_PREFERRED` 非强制（节点满则回退），配合 `OMP_PROC_BIND=spread OMP_PLACES=cores`（线程不迁移 → 节点不变）已足够；需严格可用 `MPOL_BIND`。
+- per-thread 与共享 Scratch 复用同一 `scratch_f32`，需加 `bool numa_local` 参数或独立函数 `scratch_f32_local` 区分；只有 6 个 per-thread Scratch 走 local 路径，3 个共享 Scratch 不变。
+- `mbind` 在 `malloc` 后、首触前调用 → 首次写页（`memset 0` / scatter 覆写）按 `MPOL_PREFERRED` 落 local 节点；后续复用（`cap >= n` 不 realloc）页面位置已定，无需重复 `mbind`。
+
+**预期**：消除 per-tile 缓冲的远程 NUMA 访问。对 Case 2（1600 tile，每 tile 读 d_tile、写 U_tile、读 M_tile、写 f_tile）受益最大。需用 `perf stat --per-node ./profile_case ...` + `numastat` 对比前后远程访问量来量化（NUMA 计数器方法见 `docs/why_faster_than_acl_23.11.md` §8.3/§8.4）。
+
+**依赖**：libnuma（`-lnuma`）提供 `numa_node_of_cpu`；`mbind` 可直接 syscall（`<numaif.h>`），无外部依赖。需在 CMakeLists 加可选 `-DENABLE_NUMA=ON`。
+
 ---
 
 ## 8. 测试 shape 列表
