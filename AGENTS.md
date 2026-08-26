@@ -231,7 +231,7 @@ numactl --interleave=all env OMP_PROC_BIND=spread OMP_PLACES=cores \
 
 **6/9 case 超越 oneDNN**（快 43-59%）。慢的 case 是多 tile + 小 IC（barrier 开销占比大）。
 
-> ⚠️ **适用范围**：16T NHWC 微基准（历史）。NCHW 端到端、9T 等线程档的实测见「性能优化记录」→「9 线程 NCHW 端到端实测」。
+> ⚠️ **适用范围**：16T NHWC 微基准（历史；oneDNN 侧为 **benchdnn WINO 口径**，见 `docs/why_faster_than_acl_23.11.md` §10.4）。NCHW 端到端、9T 等线程档的实测见「性能优化记录」→「9 线程 NCHW 端到端实测」。
 
 ### t32 对比
 
@@ -329,7 +329,7 @@ Case 3/4/5 已大幅超越 oneDNN（大 IC 时变换计算量大，OpenMP 并行
 
 **8/9 case 超越 oneDNN**（t16 几何平均加速 ~1.67x）。Case 0/1 从落后 2x 反超为领先；Case 2 从慢 2.56x 追到 11.5% 以内。
 
-> ⚠️ **适用范围**：16T NHWC 微基准（历史）。NCHW 端到端实测（9T）只赢 2/9，见「9 线程 NCHW 端到端实测」与 `docs/why_faster_than_acl_23.11.md` §10。
+> ⚠️ **适用范围**：16T NHWC 微基准（历史；oneDNN 侧为 **benchdnn WINO 口径**而非端到端——见 `docs/why_faster_than_acl_23.11.md` §10.4，8/9 含金量打折）。NCHW 端到端实测（9T）只赢 2/9，见「9 线程 NCHW 端到端实测」与 why_faster §10。
 - **改进分布三档**：拷贝/缓冲受限的 Case 0/1/2 加速 2.3~3.7x（A1/A2/A3 正中要害）；均衡 Case 3/6/7/8 加速 1.2~1.5x；**GEMM 受限的 Case 4/5 仅 ~1.1x**（IC=384/768，U 缓冲 22~44MB 远超 L2，瓶颈在 naive GEMM，A1/A2/A3 未触及）
 - **高线程扩展性**：t1→t38 缩放 6.2~26.6x。Case 2（1600 tile）最好 26.6x；小 tile 数 Case 0/7/8 在 16 线程后平台化（~10x），无 L3 + 768KB L2 内存带宽受限
 - **峰值**：Case 4 达 5108 GFLOPS（t38, ~5.1 TFLOPS）
@@ -417,12 +417,13 @@ onednn 的 32/38 行为反常：row 8/9 塌缩 4-6x（0.514→0.087ms）、row 5
 3. **变换内核手写/展开**（对应「新增优化思路 F」）。
 4. **消除 scatter/gather**：变换直接写 GEMM 布局，砍掉 Phase 1 scatter + Phase 3 gather。
 
-**待补数据**：9 行的 shape 列（映射 GEMM/变换/内存受限）；转换开销数字（用户可提供，确认 wrapper 占比）；benchdnn 实测数字（用于 why_faster §10.4 逐行归因）。
+**待补数据**：端到端 row 7-9 的 shape 列（row 1-6 已由 benchdnn 输出确认 = Case 0-5）；转换开销数字（用户可提供）。
 
-**benchdnn vs 端到端测速**（why_faster §10.4 摘要；做 oneDNN 性能对照前必读）：
-- 现象：同 shape 下 benchdnn 测的 oneDNN **慢于**端到端（用户实测确认）。
-- 主因（920F 特化）：① 端到端 numactl 绑核、benchdnn 常不绑/线程过订阅 → 16 NUMA 跨节点 + 小 shape 过订阅灾难；② 实现选择不同（端到端自主选 `wino:acl`，benchdnn 可能选到直接卷积/不同变体）；③ 布局/重排；④ 每 iteration 固定开销 + 逐行冷启动。
-- 推论：**benchdnn 慢 ≠ 端到端慢**。公平对照三条件：**同样 numactl 绑核 + `--alg=WINO` 并核对 label + 重复迭代复用 primitive**。
+**benchdnn vs 端到端测速**（why_faster §10.4 全量对照；做 oneDNN 性能对照前必读）：
+- 实测（2026-08-26，benchdnn 16T WINO vs 端到端 16T，同 shape）：Case 0-5 慢 **1.74~3.63x**（benchdnn 3.55/4.22/4.06/2.83/13.78/9.09 vs 端到端 1.46/2.05/2.34/1.44/6.20/2.50）。
+- **关键**：benchdnn 数字与历史「oneDNN 16 线程性能参考」（PERFORMANCE_ANALYSIS §2）**逐位一致**——历史参考就是 benchdnn WINO 口径。所以 6/9、8/9 两表是「**我们端到端 vs oneDNN benchdnn**」的不对等比较，oneDNN 被测量方式拖慢 1.7-3.6x，**8/9 的含金量要打折**；9T NCHW 端到端（两边同口径）才是公平战场，7/9 落后真实。
+- 主因（920F 特化，按嫌疑）：① 端到端 numactl 绑核 vs benchdnn 未绑 → 16 NUMA 跨节点全 miss；② `--alg=WINO` 可能选中 `wino_dlb` 而非端到端的 `wino:acl`（用 `--verbose` 核对实现名）；③ 布局/重排；④ 每 iteration 固定开销 + 逐行冷启动。
+- 公平对照三条件：**同样 numactl 绑核 + `--alg=WINO` 核对实现名 + 重复迭代复用 primitive**。
 
 ### 下一步优化方向（按预期收益排序）
 

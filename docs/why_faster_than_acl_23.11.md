@@ -429,14 +429,35 @@ perf script > spe.dump
 
 ### 10.4 为什么 benchdnn 测的 oneDNN 比我端到端测得慢
 
-> ⚠️ 数据缺口：端到端 9 行 oneDNN 数据已在手（AGENTS.md）；**benchdnn 实测数字未提供**（用户确认了「benchdnn 慢于端到端」这一现象，但具体数字没给）。下面按机制给解释；拿到数字后可逐行归因定位主导因素。
+#### 实测差距（2026-08-26，benchdnn 16T WINO vs 端到端 16T，同 shape）
 
-**先点破反直觉之处**：微基准通常比端到端**快**（无周边层、只测单个 conv）。这里反过来，恰恰说明**端到端环境对 oneDNN 更友好**——它占了「绑核 + 自主选实现 + primitive 复用」三样便宜，benchdnn 把这三样都拿掉了。所以「benchdnn 慢」方向上是可解释的。机制按嫌疑排序：
+| case | shape (N,IC,IH,IW)→OC | benchdnn WINO 16T (ms) | 端到端 16T (ms) | 慢多少倍 |
+|---|---|---|---|---|
+| 0 | 4,192,40,40→192 | 3.55005 | 1.463 | 2.43x |
+| 1 | 4,96,80,80→96 | 4.21704 | 2.051 | 2.06x |
+| 2 | 4,48,160,160→48 | 4.05884 | 2.335 | 1.74x |
+| 3 | 4,192,20,20→192 | 2.83203 | 1.436 | 1.97x |
+| 4 | 4,384,80,80→96 | 13.7839 | 6.198 | 2.22x |
+| 5 | 4,768,40,40→96 | 9.09399 | 2.503 | 3.63x |
 
-1. **线程/绑定差异（920F 最大嫌疑）**：端到端 numactl 绑核（~9T、单 NUMA、内存本地）。benchdnn 若没绑核，OpenMP/线程池可能铺满 16 个 NUMA 节点甚至全部 608 核——小 shape 的 winograd 在线程过订阅下开销是灾难（线程创建/同步、跨节点访存全 miss，无 L3 兜底）。即使绑了，绑哪个节点、绑几核也直接影响数字。
-2. **实现选择不同**：端到端 oneDNN 对每个 shape 自主选实现（9 行里 8 行 `wino:acl`）。benchdnn 不指定 alg 时按自己的启发式选，可能选到直接卷积或不同的 winograd 变体（端到端 row 3 就是 `brgconv:sve_512`）；`--alg=WINO` 强制 winograd，但也只能保证「是 winograd」，不等于端到端选中的那条 ACL 路径。生成的 `shapes/conv_all.list` 用 `--alg=WINO`。
-3. **布局/重排**：端到端若让 oneDNN 用内部最优布局（format_any），不需要每次执行前重排；benchdnn 若用显式 plain 格式描述符，每次 execute 内部可能要 nchw→blocked 重排，多一遍全量搬运。
-4. **每 iteration 固定开销**：benchdnn 每 iteration 一次 `prim->execute` + 计时/同步点，驱动循环/scratch/屏障摊到每次；端到端连续调用、无同步点可流水。小 shape（row 9 端到端 0.5ms）固定开销占比放大，差距更大。
-5. **权重变换与缓存冷热**：端到端同一 primitive 跨调用复用、TransformedWeights 缓存在 primitive 内、输入/中间缓冲在 L2 热；benchdnn 每行重建 primitive（59 行 = 59 次权重变换，端到端每 shape 只 1 次 + 跨调用复用），且逐行冷启动。
+> 说明：benchdnn 输出中 stride-2 的行（如 4,768,80,80→768 等 5 行）WINO 不支持，kernel 耗时为空（`/`），不在上表。
 
-**结论与公平对照三条件**：benchdnn 的数字不是「同一个 oneDNN 的另一个计时器」，而是「不同实现选择 + 不同执行环境」下的数字。它比端到端慢，**不能当作「oneDNN 更慢」的证据**，反而说明端到端对比里 oneDNN 占了便宜。要与我方端到端数字公平对照，benchdnn 必须：① 与端到端**同样的 numactl 绑核**；② `--alg=WINO` 且**核对选中 label 与端到端一致**（wino:acl）；③ **重复迭代**让 primitive 复用（权重变换只做一次）。
+**关键发现 1：benchdnn 数字 = 历史「oneDNN 16 线程性能参考」**（`PERFORMANCE_ANALYSIS.md` §2 的 case 0-5：3.55/4.22/4.06/2.83/13.78/9.09，逐位一致）。**历史参考就是 benchdnn WINO 测的**。由此推得：本文 §2/§9 的「8/9 赢」与 `AGENTS.md` 的 6/9、8/9 两表，oneDNN 侧全是 benchdnn 口径，我们侧是端到端口径——**两边测量口径从一开始就不对等**（我们 warm+绑核+primitive 复用，oneDNN 侧 cold+未绑+每行重建）。
+
+**关键发现 2：oneDNN 真实端到端性能比历史参考好 1.7-3.6x**（同 shape、同为 16T，case 0 = 1.46ms vs 3.55ms）。这解释了为什么「16T NHWC 8/9 赢」和「9T NCHW 7/9 输」两张画面差这么多：**不只是线程/布局变了，oneDNN 的基准口径从 benchdnn 换成了端到端**。§10 的 9T NCHW 端到端是两边同口径的公平战场，7/9 落后是真实的。
+
+#### 为什么 benchdnn 慢（按嫌疑排序）
+
+1. **numactl 绑定差异（920F 最大嫌疑）**：端到端 numactl 绑核、内存本地；benchdnn 16T 若不绑，线程散到多个 NUMA 节点——920F 无 L3、L2 仅 768KB/核，跨节点访存几乎全 miss，惩罚量级正好落在实测的 2-3x。
+2. **实现选择差异**：端到端 oneDNN 自主选 `wino:acl`（ACL SVE）；benchdnn `--alg=WINO` 可能选中 oneDNN 内置 winograd（`wino_dlb`）而非 ACL 路径。需 `--verbose` 核对实现名。
+3. **权重变换/缓存冷热**：端到端 primitive 跨调用复用、TransformedWeights 缓存在 primitive 内、缓冲 L2 热；benchdnn 每行重建 primitive（59 行 = 59 次权重变换）、逐行冷启动。
+4. **每 iteration 固定开销**：benchdnn 每轮一次 `execute` + 同步/计时点摊到单次调用；端到端连续调用可流水。小 shape 放大。
+
+#### 验证方法（区分「绑核」还是「实现选择」）
+
+- `benchdnn --conv ... --alg=WINO --verbose=1` 打印实现名：若 `wino_dlb` 而非 `wino_acl` → 实现选择差异；若同为 `wino_acl` → 就是绑核/环境差异。
+- 在**与端到端完全相同的 numactl 绑定**下重跑 benchdnn，看差距是否消失。
+
+#### 结论
+
+benchdnn 慢 ≠ oneDNN 端到端慢，它是「不同实现选择 + 不同执行环境」的数字。**历史 8/9 赢的含金量按此打折**——oneDNN 真实端到端能力明显强于 benchdnn 参考值；9T NCHW 端到端才是公平战场。公平对照三条件：同样绑核 + 核对实现名（`--verbose`）+ 重复迭代复用 primitive。

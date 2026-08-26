@@ -28,7 +28,7 @@ cache thrashing 在内存占用 > 768KB 时就开始显现（而非通常假设�
 
 ### oneDNN 16 线程性能参考（完整 9 case 对比）
 
-> 注：本表为本项目**阶段⑨（A1/A2/A3 前）**基线。A1/A2/A3 落地后的最终 8/9 对比见 `AGENTS.md`「最终性能对比」；各阶段转折点与 commit 锚点（哪一步让 6/9 先反超、哪一步补成 8/9）见 `docs/why_faster_than_acl_23.11.md` §9。NCHW 端到端（9T）实测多数落后 oneDNN——见 `AGENTS.md`「9 线程 NCHW 端到端实测」与 why_faster §10。
+> 注：本表为本项目**阶段⑨（A1/A2/A3 前）**基线。A1/A2/A3 落地后的最终 8/9 对比见 `AGENTS.md`「最终性能对比」；各阶段转折点与 commit 锚点（哪一步让 6/9 先反超、哪一步补成 8/9）见 `docs/why_faster_than_acl_23.11.md` §9。NCHW 端到端（9T）实测多数落后 oneDNN——见 `AGENTS.md`「9 线程 NCHW 端到端实测」与 why_faster §10。**且本表 oneDNN 数字 = benchdnn WINO 16T（2026-08-26 复测逐位一致），非端到端口径——oneDNN 端到端实测快 1.7-3.6x，8/9 含金量打折，见 why_faster §10.4。**
 
 | Case | Input (N,IC,IH,IW) | Weight (OC,IC) | Tiles | 本项目 t16(ms) | oneDNN t16(ms) | 比率 | 胜负 |
 |------|---------------------|-----------------|-------|---------------|---------------|------|------|
