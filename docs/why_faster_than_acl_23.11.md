@@ -442,22 +442,24 @@ perf script > spe.dump
 
 > 说明：benchdnn 输出中 stride-2 的行（如 4,768,80,80→768 等 5 行）WINO 不支持，kernel 耗时为空（`/`），不在上表。
 
-**关键发现 1：benchdnn 数字 = 历史「oneDNN 16 线程性能参考」**（`PERFORMANCE_ANALYSIS.md` §2 的 case 0-5：3.55/4.22/4.06/2.83/13.78/9.09，逐位一致）。**历史参考就是 benchdnn WINO 测的**。由此推得：本文 §2/§9 的「8/9 赢」与 `AGENTS.md` 的 6/9、8/9 两表，oneDNN 侧全是 benchdnn 口径，我们侧是端到端口径——**两边测量口径从一开始就不对等**（我们 warm+绑核+primitive 复用，oneDNN 侧 cold+未绑+每行重建）。
+**关键发现 1：benchdnn 数字 = 历史「oneDNN 16 线程性能参考」**（`PERFORMANCE_ANALYSIS.md` §2 的 case 0-5：3.55/4.22/4.06/2.83/13.78/9.09，逐位一致），**且用户已确认**：历史参考就是 benchdnn 跑的、实现为 `wino_acl`（与端到端**同为 wino_acl，无 wino_dlb**）。因此本文 §2/§9 的「8/9 赢」与 `AGENTS.md` 的 6/9、8/9 两表，oneDNN 侧全是 benchdnn 口径，我们侧是端到端口径——**两边测量口径从一开始就不对等**（我们 warm+绑核+primitive 复用，oneDNN 侧 cold+未绑+每行重建）。
 
 **关键发现 2：oneDNN 真实端到端性能比历史参考好 1.7-3.6x**（同 shape、同为 16T，case 0 = 1.46ms vs 3.55ms）。这解释了为什么「16T NHWC 8/9 赢」和「9T NCHW 7/9 输」两张画面差这么多：**不只是线程/布局变了，oneDNN 的基准口径从 benchdnn 换成了端到端**。§10 的 9T NCHW 端到端是两边同口径的公平战场，7/9 落后是真实的。
 
 #### 为什么 benchdnn 慢（按嫌疑排序）
 
+> 已排除：实现选择差异——用户确认 benchdnn 与端到端**同为 `wino_acl`**（无 `wino_dlb`）。gap 纯属执行环境，非内核差异。
+
 1. **numactl 绑定差异（920F 最大嫌疑）**：端到端 numactl 绑核、内存本地；benchdnn 16T 若不绑，线程散到多个 NUMA 节点——920F 无 L3、L2 仅 768KB/核，跨节点访存几乎全 miss，惩罚量级正好落在实测的 2-3x。
-2. **实现选择差异**：端到端 oneDNN 自主选 `wino:acl`（ACL SVE）；benchdnn `--alg=WINO` 可能选中 oneDNN 内置 winograd（`wino_dlb`）而非 ACL 路径。需 `--verbose` 核对实现名。
+2. **布局/重排**：benchdnn 用显式 plain 格式描述符，wino_acl 每次 execute 内部可能要 nchw→blocked 重排（多一遍全量搬运）；端到端若用 format_any 则布局 baked-in、无运行时重排。
 3. **权重变换/缓存冷热**：端到端 primitive 跨调用复用、TransformedWeights 缓存在 primitive 内、缓冲 L2 热；benchdnn 每行重建 primitive（59 行 = 59 次权重变换）、逐行冷启动。
 4. **每 iteration 固定开销**：benchdnn 每轮一次 `execute` + 同步/计时点摊到单次调用；端到端连续调用可流水。小 shape 放大。
 
-#### 验证方法（区分「绑核」还是「实现选择」）
+#### 验证方法（实现选择已排除，剩绑定/格式/缓存/固定开销）
 
-- `benchdnn --conv ... --alg=WINO --verbose=1` 打印实现名：若 `wino_dlb` 而非 `wino_acl` → 实现选择差异；若同为 `wino_acl` → 就是绑核/环境差异。
-- 在**与端到端完全相同的 numactl 绑定**下重跑 benchdnn，看差距是否消失。
+- **决定性实验**：在**与端到端完全相同的 numactl 绑定**下重跑 benchdnn，看差距是否消失/缩小——消失 → 绑核差异实锤；不消失 → 查格式（`--verbose` 看是否触发重排）与 primitive 复用。
+- 实现选择已确认同为 `wino_acl`，无需再核对。
 
 #### 结论
 
-benchdnn 慢 ≠ oneDNN 端到端慢，它是「不同实现选择 + 不同执行环境」的数字。**历史 8/9 赢的含金量按此打折**——oneDNN 真实端到端能力明显强于 benchdnn 参考值；9T NCHW 端到端才是公平战场。公平对照三条件：同样绑核 + 核对实现名（`--verbose`）+ 重复迭代复用 primitive。
+benchdnn 慢 ≠ oneDNN 端到端慢，它是「不同执行环境」的数字（实现选择已排除：两边同为 `wino_acl`）。**历史 8/9 赢的含金量按此打折**——oneDNN 真实端到端能力明显强于 benchdnn 参考值；9T NCHW 端到端才是公平战场。公平对照三条件：同样绑核 + 同样实现（已确认同为 wino_acl）+ 重复迭代复用 primitive。

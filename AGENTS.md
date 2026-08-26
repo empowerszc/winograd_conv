@@ -421,9 +421,9 @@ onednn 的 32/38 行为反常：row 8/9 塌缩 4-6x（0.514→0.087ms）、row 5
 
 **benchdnn vs 端到端测速**（why_faster §10.4 全量对照；做 oneDNN 性能对照前必读）：
 - 实测（2026-08-26，benchdnn 16T WINO vs 端到端 16T，同 shape）：Case 0-5 慢 **1.74~3.63x**（benchdnn 3.55/4.22/4.06/2.83/13.78/9.09 vs 端到端 1.46/2.05/2.34/1.44/6.20/2.50）。
-- **关键**：benchdnn 数字与历史「oneDNN 16 线程性能参考」（PERFORMANCE_ANALYSIS §2）**逐位一致**——历史参考就是 benchdnn WINO 口径。所以 6/9、8/9 两表是「**我们端到端 vs oneDNN benchdnn**」的不对等比较，oneDNN 被测量方式拖慢 1.7-3.6x，**8/9 的含金量要打折**；9T NCHW 端到端（两边同口径）才是公平战场，7/9 落后真实。
-- 主因（920F 特化，按嫌疑）：① 端到端 numactl 绑核 vs benchdnn 未绑 → 16 NUMA 跨节点全 miss；② `--alg=WINO` 可能选中 `wino_dlb` 而非端到端的 `wino:acl`（用 `--verbose` 核对实现名）；③ 布局/重排；④ 每 iteration 固定开销 + 逐行冷启动。
-- 公平对照三条件：**同样 numactl 绑核 + `--alg=WINO` 核对实现名 + 重复迭代复用 primitive**。
+- **关键**：benchdnn 数字与历史「oneDNN 16 线程性能参考」（PERFORMANCE_ANALYSIS §2）**逐位一致**，且**用户已确认**：历史参考就是 benchdnn 跑的、实现为 **`wino_acl`**（与端到端**同为 wino_acl，无 wino_dlb**）。所以 6/9、8/9 两表是「**我们端到端 vs oneDNN benchdnn**」的不对等比较，oneDNN 被测量方式拖慢 1.7-3.6x，**8/9 的含金量要打折**；9T NCHW 端到端（两边同口径、同实现）才是公平战场，7/9 落后真实。
+- 归因（同为 wino_acl → **gap 纯执行环境**，实现选择已排除，按嫌疑）：① 端到端 numactl 绑核 vs benchdnn 未绑 → 16 NUMA 跨节点全 miss（决定性验证：同 numactl 重跑 benchdnn）；② 布局/重排（benchdnn plain 格式 vs 端到端 format_any 可能不同）；③ 缓存冷热 + 每行重建 primitive；④ 每 iteration 固定开销。
+- 公平对照三条件：**同样 numactl 绑核 + 同样实现（已确认同为 wino_acl）+ 重复迭代复用 primitive**。
 
 ### 下一步优化方向（按预期收益排序）
 
