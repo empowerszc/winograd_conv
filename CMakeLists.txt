@@ -108,9 +108,18 @@ endif()
 add_executable(test_ref_vs_nchw tests/test_ref_vs_nchw.cpp)
 target_link_libraries(test_ref_vs_nchw winograd_nchw_ref winograd_conv)
 
+# Swish SVE benchmark
+add_executable(swish_sve_bench swish_sve/swish_sve_bench.cpp)
+target_include_directories(swish_sve_bench PRIVATE swish_sve)
+if(ENABLE_OPENMP)
+    target_compile_options(swish_sve_bench PRIVATE ${OpenMP_CXX_FLAGS})
+    target_link_libraries(swish_sve_bench PRIVATE ${OpenMP_CXX_LIBRARIES})
+endif()
+
 # Install
-install(TARGETS winograd_conv test_winograd bench_winograd profile_case
+install(TARGETS winograd_conv test_winograd bench_winograd profile_case swish_sve_bench
         RUNTIME DESTINATION bin
         ARCHIVE DESTINATION lib
         LIBRARY DESTINATION lib)
 install(DIRECTORY include/ DESTINATION include)
+install(DIRECTORY swish_sve/ DESTINATION include/swish_sve)

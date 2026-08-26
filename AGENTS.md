@@ -231,6 +231,8 @@ numactl --interleave=all env OMP_PROC_BIND=spread OMP_PLACES=cores \
 
 **6/9 case 超越 oneDNN**（快 43-59%）。慢的 case 是多 tile + 小 IC（barrier 开销占比大）。
 
+> ⚠️ **适用范围**：16T NHWC 微基准（历史）。NCHW 端到端、9T 等线程档的实测见「性能优化记录」→「9 线程 NCHW 端到端实测」。
+
 ### t32 对比
 
 | Case | 本项目 t32(ms) | oneDNN t32(估) | 结果 |
@@ -326,6 +328,8 @@ Case 3/4/5 已大幅超越 oneDNN（大 IC 时变换计算量大，OpenMP 并行
 | 8 | 4,96,20,20 | 96,96 | 25 | 0.50 | **0.344** | 1.45x | 1.15 | **快 3.34x** ✓ |
 
 **8/9 case 超越 oneDNN**（t16 几何平均加速 ~1.67x）。Case 0/1 从落后 2x 反超为领先；Case 2 从慢 2.56x 追到 11.5% 以内。
+
+> ⚠️ **适用范围**：16T NHWC 微基准（历史）。NCHW 端到端实测（9T）只赢 2/9，见「9 线程 NCHW 端到端实测」与 `docs/why_faster_than_acl_23.11.md` §10。
 - **改进分布三档**：拷贝/缓冲受限的 Case 0/1/2 加速 2.3~3.7x（A1/A2/A3 正中要害）；均衡 Case 3/6/7/8 加速 1.2~1.5x；**GEMM 受限的 Case 4/5 仅 ~1.1x**（IC=384/768，U 缓冲 22~44MB 远超 L2，瓶颈在 naive GEMM，A1/A2/A3 未触及）
 - **高线程扩展性**：t1→t38 缩放 6.2~26.6x。Case 2（1600 tile）最好 26.6x；小 tile 数 Case 0/7/8 在 16 线程后平台化（~10x），无 L3 + 768KB L2 内存带宽受限
 - **峰值**：Case 4 达 5108 GFLOPS（t38, ~5.1 TFLOPS）
@@ -444,7 +448,7 @@ onednn 的 32/38 行为反常：row 8/9 塌缩 4-6x（0.514→0.087ms）、row 5
    - 当 `NM * n_tiles * IC * 4 < 16MB` 时展平 N 个 batch（9→3 barriers）
    - 当内存大时保持 per-batch（避免 cache thrashing）
 
-**对已超越 oneDNN 的 case（3-8）**：当前已优，无需进一步优化
+**对已超越 oneDNN 的 case（3-8, 16T NHWC）**：⚠️ 该结论仅限 16T NHWC 微基准口径。2026-08-20 NCHW 端到端实测（9T）多数 case 落后 oneDNN——**不再存在「已优无需优化」的 case**，全部优先执行 arm_gemm JIT（见「9 线程 NCHW 端到端实测」）
 
 ## 扩展指南
 
@@ -500,7 +504,7 @@ arm_gemm 路径示例：`ComputeLibrary-53.1.0/src/core/NEON/kernels/convolution
    - 当 `NM * n_tiles * IC * 4 < 16MB` 时展平 N 个 batch（9→3 barriers）
    - 当内存大时保持 per-batch（避免 cache thrashing）
 
-**对已超越 oneDNN 的 case（3-8, 快 43-59%）**：当前已优，无需进一步优化
+**对已超越 oneDNN 的 case（3-8, 16T NHWC, 快 43-59%）**：⚠️ 该结论仅限 16T NHWC 微基准口径。2026-08-20 NCHW 端到端实测（9T）多数 case 落后 oneDNN——不再有「已优无需优化」的 case，全部优先 arm_gemm JIT（见「9 线程 NCHW 端到端实测」）
 
 ### 新增优化思路（基于 920F 硬件特性 + 性能数据）
 
