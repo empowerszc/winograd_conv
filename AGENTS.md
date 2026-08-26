@@ -25,7 +25,7 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
     │   调用 dispatch_input_transform() → NEON/SVE/SME
     │
     ├── GEMM (每 Winograd 元素): M[ts][tile][OC] = Σ U[ts][tile][IC]·V[ts][OC][IC]
-    │   调用 winograd_gemm() (naive, 可替换为 OpenBLAS cblas_sgemm)
+    │   调用 winograd_gemm() (naive / OpenBLAS cblas_sgemm / arm_gemm JIT SVE)
     │
     └── 输出变换 (每 tile): M_tile[6][6][OC] → f_tile[4][4][OC] = A^T·M·A + bias + ReLU
         调用 dispatch_output_transform() → NEON/SVE/SME
@@ -77,8 +77,8 @@ cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_SME=ON
 # OpenBLAS GEMM（推荐）
 cmake .. -DUSE_OPENBLAS=ON
 
-# arm_gemm GEMM（与 oneDNN 相同的 JIT 内核，需 ACL 源码树）
-cmake .. -DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/gemm
+# arm_gemm GEMM（与 oneDNN 相同的 SVE JIT 内核，需 ACL 源码树，见 tools/build_arm_gemm.md）
+cmake .. -DUSE_ARM_GEMM=ON -DENABLE_SVE=ON -DARM_GEMM_ROOT=/path/to/ComputeLibrary-23.11/ComputeLibrary-23.11
 
 # 全部启用（OpenBLAS 版）
 cmake .. -DENABLE_SME=ON -DENABLE_OPENMP=ON -DUSE_OPENBLAS=ON
@@ -94,7 +94,7 @@ make -j && ./test_winograd
 - 修改 CMakeLists.txt 后必须 `rm -rf build` 清缓存
 - GEMM 内核优先级：arm_gemm > OpenBLAS > naive（互斥，arm_gemm 优先）
 - OpenBLAS 需要 `cblas.h` + `libopenblas`：`apt install libopenblas-dev`
-- arm_gemm 是 ACL 的 JIT GEMM 库（header-only + JIT），路径示例：`ComputeLibrary-53.1.0/src/core/NEON/kernels/convolution/common/gemm`
+- arm_gemm 从 ACL 23.11 源码树**就地编译 fp32-SVE 子集**（19 个源 + `src/arm_gemm_cpuinfo.cpp`），用 `include/arm_compute/core/CPP/CPPTypes.h` 自包含 shim 替代 CPUInfo，无需编译整个 ACL。构建细节见 `tools/build_arm_gemm.md`
 
 ## 测试
 
@@ -193,8 +193,8 @@ numactl --interleave=all env OMP_PROC_BIND=spread OMP_PLACES=cores \
    **教训**：权重变换最初放在独立 `#pragma omp parallel` 中，导致 Case 0/1 变慢（额外 fork/join ~1-2ms 抵消权重并行收益）。修复方法是合并进主 parallel region。Case 4/5（大 IC）则受益明显（-19%~-30%）。
 
 9. **GEMM 内核切换**：编译期选择，优先级 arm_gemm > OpenBLAS > naive
-   - `USE_ARM_GEMM`：ACL JIT SVE 内核（与 oneDNN 相同），`-DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=...`
-   - `USE_OPENBLAS`：`cblas_sgemm`，`-DUSE_OPENBLAS=ON`
+   - `USE_ARM_GEMM`：ACL 23.11 arm_gemm 现代 API（`GemmArgs` + `gemm()` 工厂），`cfg.filter="sve_"` 强制 SVE 内核，每次调用 `pretranspose_B_array` 预转置 V（即 pack B）+ `execute` 单线程
+   - `USE_OPENBLAS`：`cblas_sgemm` 单线程，`-DUSE_OPENBLAS=ON`
    - 默认：naive 三重循环
 
 10. **NHWC 布局优化**：`Layout` 枚举选择 NCHW 或 NHWC。NHWC 下 tile 提取用 `vld1q_f32` 连续加载（3.8x 快于 NCHW 标量）
@@ -207,7 +207,7 @@ numactl --interleave=all env OMP_PROC_BIND=spread OMP_PLACES=cores \
 
 ## 已知限制
 
-1. **GEMM 内核**：3 种可选（arm_gemm JIT > OpenBLAS > naive）。默认 naive，生产环境推荐 arm_gemm
+1. **GEMM 内核**：3 种可选（arm_gemm JIT SVE > OpenBLAS > naive）。默认 naive，生产环境推荐 arm_gemm（代码就绪、920F 构建指南见 `tools/build_arm_gemm.md`，待 920F 实测验证）
 2. **NCHW 包装 vs 原生**：NCHW 现在是「转换 + NHWC 计算」包装。计算是共享的，NCHW 输入的实际开销 = 转换（整图两遍全量数据搬运）vs 旧内核的跨步提取/写回。2026-08-20 在 920F（9T NCHW 端到端）实测**转换开销较小**，后续性能比较统一用 NCHW 端到端口径。若某些 shape 转换反而更慢，可回退用 `ref/winograd_conv_nchw_ref.cpp` 里的原生内核（`Layout::NCHW` 换成 `winograd_convolution_nchw_ref`）
 3. **OpenMP 并行**：权重变换 + 输入/输出变换 + GEMM 均已并行。Phase 1-3 合并 1 区域，2 barrier（输入→GEMM, GEMM→输出），输出 `nowait`。权重变换独立并行区域
 4. **多线程扩展性受限**：8 线程后加速停滞，剩余瓶颈：OpenMP barrier 开销、GEMM 内核质量（OpenBLAS vs arm_gemm JIT）、NUMA 远程访问（920F 16 NUMA）
@@ -412,7 +412,7 @@ onednn 的 32/38 行为反常：row 8/9 塌缩 4-6x（0.514→0.087ms）、row 5
 4. **权重变换每调用重算**：对方把 TransformedWeights 缓存到 primitive。
 
 **9T 定向优化**（按性价比）：
-1. **arm_gemm JIT**：`-DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=...`，CMake 已接好（CMakeLists.txt:11-66）、`winograd_gemm` 分支已就绪，纯构建接入。GEMM 受限 row 直接拉平。小优化：`GemmHybrid` 每次调用构造一次（36 次/批），提为静态缓存按 shape 复用。
+1. **arm_gemm JIT**：✅ 代码已就绪（现代 API 重写，`src/winograd_conv.cpp` + `include/arm_compute/core/CPP/CPPTypes.h` shim + `src/arm_gemm_cpuinfo.cpp` + CMake 编译 fp32-SVE 子集）。**待 920F 实测**：`tools/build_arm_gemm.md` 按步骤构建 + `WINO_GEMM_DEBUG=1` 确认 SVE 内核 + 与 OpenBLAS A/B。GEMM 受限 row 直接拉平。小优化：`gemm()` 每次调用构造一次（36 次/批），提为静态缓存按 shape 复用。
 2. **缓存 V**（权重变换跨调用复用，key = 权重指针 + shape）：Count≥8 的 row 1-4 立省一次权重变换。
 3. **变换内核手写/展开**（对应「新增优化思路 F」）。
 4. **消除 scatter/gather**：变换直接写 GEMM 布局，砍掉 Phase 1 scatter + Phase 3 gather。
@@ -431,11 +431,11 @@ onednn 的 32/38 行为反常：row 8/9 塌缩 4-6x（0.514→0.087ms）、row 5
 
 **针对慢 case（0/1/2）的优化**：
 
-1. **arm_gemm 替换 OpenBLAS**（预期 Case 0/1/2 各 -1~2ms）
+1. **arm_gemm 替换 OpenBLAS**（预期 Case 0/1/2 各 -1~2ms）✅ 代码就绪，待 920F 实测
    - OpenBLAS 对小 K（48-192）矩阵效率不如 arm_gemm JIT
    - arm_gemm 针对具体矩阵大小自动生成最优 SVE 指令序列
-   - 使用：`-DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/gemm`
-   - 参考：`docs/acl_reference/acl_wino_implementation_details.md` 中 arm_gemm 选择机制
+   - 使用：`-DUSE_ARM_GEMM=ON -DENABLE_SVE=ON -DARM_GEMM_ROOT=/path/to/ComputeLibrary-23.11/ComputeLibrary-23.11`
+   - 构建/验证：`tools/build_arm_gemm.md`；内核选择机制参考 `docs/acl_reference/acl_wino_implementation_details.md`
 
 2. **变换用 SVE intrinsics 优化**（预期 -0.5~1ms）
    - 当前 `transform_2d` 用泛型模板循环，ACL 用手写 SVE intrinsics 完全展开
@@ -460,12 +460,19 @@ onednn 的 32/38 行为反常：row 8/9 塌缩 4-6x（0.514→0.087ms）、row 5
 
 ### GEMM 内核切换
 
-已有 3 种 GEMM 内核（编译期选择，互斥）：
+已有 3 种 GEMM 内核（编译期选择，互斥），实现见 `winograd_gemm` + `arm_gemm_driver`（`src/winograd_conv.cpp`）：
 
 ```cpp
-#if defined(USE_ARM_GEMM)      // ACL JIT SVE 内核（与 oneDNN 相同）
-    arm_gemm::GemmHybrid<...> gemm(...); gemm.matmul(...);
-#elif defined(USE_OPENBLAS)     // OpenBLAS cblas_sgemm
+#if defined(USE_ARM_GEMM)      // ACL 23.11 arm_gemm SVE JIT（与 oneDNN 相同）
+    // 现代 API：GemmArgs → gemm() 工厂 → pretranspose_B_array → execute
+    GemmConfig cfg; cfg.filter = "sve_";
+    GemmArgs args(&CPUInfo::get(), M, N, K, ...);
+    auto gemm = gemm<float,float>(args);
+    gemm->pretranspose_B_array(pretrans, V, ldb, 0);
+    gemm->set_pretransposed_B_data(pretrans);
+    gemm->set_arrays(U, ...); ...
+    gemm->execute(to_ndcoord(gemm->get_window_size()), {}, 0);
+#elif defined(USE_OPENBLAS)     // OpenBLAS cblas_sgemm（单线程，与基线同构）
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, ...);
 #else                           // naive 三重循环
     for (...) ...
@@ -473,11 +480,11 @@ onednn 的 32/38 行为反常：row 8/9 塌缩 4-6x（0.514→0.087ms）、row 5
 ```
 
 CMake 选项：
-- `-DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/gemm`（优先级最高，与 oneDNN 相同内核）
+- `-DUSE_ARM_GEMM=ON -DENABLE_SVE=ON -DARM_GEMM_ROOT=/path/to/ComputeLibrary-23.11/ComputeLibrary-23.11`（优先级最高，与 oneDNN 相同内核）
 - `-DUSE_OPENBLAS=ON`（当前使用，对小 K 矩阵不如 arm_gemm）
 - 默认 naive（开发/验证用）
 
-arm_gemm 路径示例：`ComputeLibrary-53.1.0/src/core/NEON/kernels/convolution/common/gemm`
+构建与 920F 验证步骤：`tools/build_arm_gemm.md`（含 WINO_GEMM_DEBUG 确认 SVE 内核名、--verify 正确性门、与 OpenBLAS 的 A/B 计时）。
 
 ### 下一步优化方向（按预期收益排序）
 
@@ -651,3 +658,4 @@ OMP_PROC_BIND=spread OMP_PLACES=cores ./bench_winograd --sve --nhwc --threads 32
 - **快于 ACL 23.11 的分析**：`docs/why_faster_than_acl_23.11.md` — 独立分析：双方都是 Winograd+SVE，8/9 赢是固定开销主导的小负载微基准结果（含有效 GFLOPS 证据、3 个具体例子、6 个原因、验证清单）
 - **ACL 参考文档**：`docs/acl_reference/` — 从 oneDNN 源码树复制的 ACL Winograd 实现分析文档（8 个文件）。用于指导后续优化（SVE/SME 汇编变换、arm_gemm GEMM 内核、权重变换手写公式等）
 - **性能分析**：`PERFORMANCE_ANALYSIS.md` — 完整优化历程（9 阶段）、9 case 对比数据、细粒度计时、差距分析、新优化思路（A-F）、数值精度分析（第 9 节）
+- **arm_gemm 构建指南**：`tools/build_arm_gemm.md` — 920F 上把 Winograd GEMM 切到 arm_gemm fp32-SVE 的完整步骤（cmake/make/内核名确认/正确性门/与 OpenBLAS A/B）

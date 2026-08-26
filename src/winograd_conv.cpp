@@ -16,6 +16,8 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdlib>
+#include <cstdio>
+#include <vector>
 #include <arm_neon.h>
 
 #ifdef USE_OPENBLAS
@@ -25,13 +27,17 @@ extern "C" void openblas_set_num_threads(int);
 #endif
 
 #ifdef USE_ARM_GEMM
+// <string> must come first: arm_gemm.hpp uses std::string without including it.
+#include <string>
 #include <arm_gemm.hpp>
 // arm_gemm usage:
-//   Build: -DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/gemm
-//   Source: ComputeLibrary-53.1.0/src/core/NEON/kernels/convolution/common/gemm/
-//   The arm_gemm.hpp header provides GemmHybrid/GemmDirect classes.
-//   For Winograd: each GEMM is (n_tiles × IC) × (OC × IC)^T → (n_tiles × OC)
-//   arm_gemm auto-selects best SVE/SME kernel via JIT.
+//   Build: -DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/ComputeLibrary-23.11/ComputeLibrary-23.11
+//   The embedded arm_gemm copy is compiled standalone (see CMakeLists.txt):
+//   we shadow arm_compute/core/CPP/CPPTypes.h with our own minimal header so
+//   no arm_compute dependency is pulled in.
+//   For Winograd: each GEMM is (n_tiles × IC) × (OC × IC)^T → (n_tiles × OC),
+//   which is arm_gemm's native A(M×K)·B(N×K)^T layout with A=U, B=V.
+//   Modern API: arm_gemm::gemm<fp32>(GemmArgs) factory + pretranspose_B_array.
 #endif
 
 // Include ISA-specific transform implementations
@@ -222,30 +228,16 @@ void dispatch_output_transform(
 // This is M[n_tiles x OC] = U[n_tiles x IC] * V[OC x IC]^T
 // Called n_multis times (16 for F(2,2,3,3), 36 for F(4,4,3,3)).
 
-void winograd_gemm(
+// Naive triple-loop GEMM — the portable fallback (also used by the arm_gemm
+// driver if strategy selection ever fails).
+static void winograd_gemm_naive(
     const float* U,   // [n_tiles][IC]
-    const float* V,    // [OC][IC]
-    float* M,           // [n_tiles][OC]
+    const float* V,   // [OC][IC]
+    float* M,         // [n_tiles][OC]
     int n_tiles,
     int OC,
     int IC
 ) {
-#if defined(USE_ARM_GEMM)
-    // arm_gemm: use GemmHybrid with SVE kernel
-    // Requires: -DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/arm_gemm
-    // arm_gemm computes M = U * V^T (V is transposed)
-    arm_gemm::GemmHybrid<arm_gemm::gemm_wide, float, float> gemm(
-        n_tiles, OC, IC, false /* transpose A */, true /* transpose B */);
-    gemm.matmul(M, U, V, 1.0f, 0.0f);
-#elif defined(USE_OPENBLAS)
-    // OpenBLAS: cblas_sgemm
-    // Requires: -DUSE_OPENBLAS=ON
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                n_tiles, OC, IC,
-                1.0f, U, IC, V, IC,
-                0.0f, M, OC);
-#else
-    // Naive fallback: triple loop (no external dependency)
     for (int t = 0; t < n_tiles; t++) {
         for (int oc = 0; oc < OC; oc++) {
             float sum = 0.0f;
@@ -255,6 +247,133 @@ void winograd_gemm(
             M[t * OC + oc] = sum;
         }
     }
+}
+
+#if defined(USE_ARM_GEMM)
+// ----------------------------------------------------------------------------
+// arm_gemm JIT driver (modern API, ACL 23.11 embedded copy).
+//
+// arm_gemm computes C(MxN) = A(MxK) * B(NxK)^T with A/B row-major, which maps
+// straight onto our data: A=U (lda=IC), B=V (ldb=IC), C=M (ldc=OC).
+//
+// Hybrid/interleaved kernels require B to be pre-transposed before execute();
+// the pretranspose + workspace buffers are cached per-thread so the steady
+// state has no mallocs. The GEMM object itself is created per call (this is
+// called from inside `#pragma omp parallel`, so a shared/cached object would
+// race); maxthreads=1 matches the OpenBLAS-1-thread baseline.
+//
+// The GemmConfig filter forces SVE kernels — on Kunpeng 920F (SVE-512) that
+// is the entire point of using arm_gemm. If a shape ever runs faster with a
+// NEON kernel, change/remove the filter to let arm_gemm decide.
+// ----------------------------------------------------------------------------
+namespace arm_gemm_driver
+{
+// 64-byte aligned per-thread scratch buffer (grows, never shrinks).
+struct Buf
+{
+    std::vector<uint8_t> storage;
+    uint8_t             *p   = nullptr;
+    size_t               cap = 0;
+
+    uint8_t *ensure(size_t n)
+    {
+        if (n > cap)
+        {
+            storage.resize(n + 64);                               // room to align
+            const uintptr_t base = reinterpret_cast<uintptr_t>(storage.data());
+            const uintptr_t up   = (base + 63) & ~static_cast<uintptr_t>(63);
+            p   = reinterpret_cast<uint8_t *>(up);
+            cap = n;
+        }
+        return p;
+    }
+};
+
+void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
+{
+    static arm_compute::CPUInfo &ci = arm_compute::CPUInfo::get();
+    thread_local Buf pretrans;
+    thread_local Buf work;
+
+    // Force SVE fp32 kernels (the reason to use arm_gemm on SVE-512 hardware).
+    arm_gemm::GemmConfig cfg;
+    cfg.filter = "sve_";
+
+    arm_gemm::GemmArgs args(&ci, n_tiles, OC, IC,
+                            1 /*Ksections*/, 1 /*nbatches*/, 1 /*nmulti*/,
+                            false /*indirect_input*/, {}, /*no activation*/
+                            1 /*maxthreads*/,
+                            false /*fixed_format*/, false /*fast_mode*/, &cfg);
+
+    auto gemm = arm_gemm::gemm<float, float>(args);
+    if (!gemm)
+    {
+        // Strategy selection failed (shouldn't happen) — fall back to naive.
+        winograd_gemm_naive(U, V, M, n_tiles, OC, IC);
+        return;
+    }
+
+    // One-time debug: print which arm_gemm kernel was selected.
+    static const bool debug = (getenv("WINO_GEMM_DEBUG") != nullptr);
+    static bool printed = false;
+    if (debug && !printed)
+    {
+        const arm_gemm::KernelDescription kd = arm_gemm::get_gemm_method<float, float>(args);
+        fprintf(stderr, "[winograd_gemm] arm_gemm selected: %s (M=%d N=%d K=%d)\n",
+                kd.name.c_str(), n_tiles, OC, IC);
+        printed = true;
+    }
+
+    // Pre-transpose B (=V, OCxIC row-major) into the cached per-thread buffer.
+    const size_t bsz = gemm->get_B_pretransposed_array_size();
+    gemm->pretranspose_B_array(pretrans.ensure(bsz), V, IC, 0);
+    gemm->set_pretransposed_B_data(pretrans.p);
+
+    gemm->set_arrays(U, IC, 0, 0,    // A: MxK, ld=IC
+                     V, IC, 0,       // B: NxK, ld=IC (ignored; pretransposed)
+                     M, OC, 0, 0,    // C: MxN, ld=OC
+                     nullptr, 0);    // no bias
+
+    const size_t wsz = gemm->get_working_size();
+    if (wsz != 0)
+        gemm->set_working_space(work.ensure(wsz));
+
+    const arm_gemm::ndrange_t win = gemm->get_window_size();
+    // execute() takes an ndcoord_t (position + size per dim); a full-range
+    // coord with all dims at their window sizes computes the whole GEMM.
+    arm_gemm::ndcoord_t coord{{0, win.get_size(0)},
+                              {0, win.get_size(1)},
+                              {0, win.get_size(2)},
+                              {0, win.get_size(3)},
+                              {0, win.get_size(4)},
+                              {0, win.get_size(5)}};
+    gemm->execute(coord, arm_gemm::ndcoord_t{}, 0);
+}
+} // namespace arm_gemm_driver
+#endif // USE_ARM_GEMM
+
+void winograd_gemm(
+    const float* U,   // [n_tiles][IC]
+    const float* V,    // [OC][IC]
+    float* M,           // [n_tiles][OC]
+    int n_tiles,
+    int OC,
+    int IC
+) {
+#if defined(USE_ARM_GEMM)
+    // arm_gemm JIT (modern API). Requires:
+    //   -DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/ComputeLibrary-23.11/ComputeLibrary-23.11
+    arm_gemm_driver::run(U, V, M, n_tiles, OC, IC);
+#elif defined(USE_OPENBLAS)
+    // OpenBLAS: cblas_sgemm
+    // Requires: -DUSE_OPENBLAS=ON
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                n_tiles, OC, IC,
+                1.0f, U, IC, V, IC,
+                0.0f, M, OC);
+#else
+    // Naive fallback: triple loop (no external dependency)
+    winograd_gemm_naive(U, V, M, n_tiles, OC, IC);
 #endif
 }
 

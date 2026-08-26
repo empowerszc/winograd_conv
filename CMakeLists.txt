@@ -51,20 +51,65 @@ if(USE_OPENBLAS AND NOT USE_ARM_GEMM)
     endif()
 endif()
 
-# arm_gemm support (requires ACL source tree)
+# arm_gemm support (compiles the fp32-SVE subset of the embedded arm_gemm copy
+# from an ACL 23.11 source tree, fully standalone -- no arm_compute dependency;
+# our include/arm_compute/core/CPP/CPPTypes.h shim provides the CPUInfo types)
 if(USE_ARM_GEMM)
-    find_path(ARM_GEMM_INCLUDE_DIR arm_gemm.hpp
-              PATHS ${ARM_GEMM_ROOT} ${ARM_GEMM_ROOT}/include)
-    if(ARM_GEMM_INCLUDE_DIR)
-        add_compile_definitions(USE_ARM_GEMM)
-        include_directories(${ARM_GEMM_INCLUDE_DIR})
-        message(STATUS "arm_gemm found: ${ARM_GEMM_INCLUDE_DIR}")
-        # arm_gemm is header-only with JIT, needs to be compiled as source
-        # The user needs to add arm_gemm.cpp to the build or compile it as a library
-        # See: https://github.com/ARM-software/ComputeLibrary/tree/main/src/core/NEON/kernels/convolution/common/gemm
-    else()
-        message(FATAL_ERROR "arm_gemm.hpp not found. Set -DARM_GEMM_ROOT=/path/to/gemm")
+    if(NOT ENABLE_SVE)
+        message(FATAL_ERROR "USE_ARM_GEMM requires -DENABLE_SVE=ON (SVE kernels on AArch64)")
     endif()
+    if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+        message(FATAL_ERROR "USE_ARM_GEMM requires an AArch64 target (SVE). Current: ${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
+    find_path(ARM_GEMM_GUARD arm_gemm.hpp
+              PATHS ${ARM_GEMM_ROOT}/src/cpu/kernels/assembly
+              NO_DEFAULT_PATH)
+    if(NOT ARM_GEMM_GUARD)
+        message(FATAL_ERROR "arm_gemm.hpp not found. Set -DARM_GEMM_ROOT=/path/to/ComputeLibrary-23.11/ComputeLibrary-23.11")
+    endif()
+    add_compile_definitions(USE_ARM_GEMM)
+
+    set(AG ${ARM_GEMM_ROOT})
+    set(AG_ARM_GEMM ${AG}/src/core/NEON/kernels/arm_gemm)
+    # Exactly the sources gemm_fp32.cpp's fp32 list needs with only
+    # ARM_COMPUTE_ENABLE_SVE set (no BF16/SME2/FIXED_FORMAT/SVEF32MM).
+    set(ARM_GEMM_SRCS
+        ${AG_ARM_GEMM}/gemm_fp32.cpp
+        ${AG_ARM_GEMM}/interleave_indirect.cpp
+        ${AG_ARM_GEMM}/interleave_indirect-sve.cpp
+        ${AG_ARM_GEMM}/mergeresults.cpp
+        ${AG_ARM_GEMM}/mergeresults-sve.cpp
+        ${AG_ARM_GEMM}/misc.cpp
+        ${AG_ARM_GEMM}/misc-sve.cpp
+        ${AG_ARM_GEMM}/transform.cpp
+        ${AG_ARM_GEMM}/transform-sve.cpp
+        # a64 (NEON) fp32 kernels referenced by the gemm_fp32 list
+        ${AG_ARM_GEMM}/kernels/a64_sgemm_8x6/generic.cpp
+        ${AG_ARM_GEMM}/kernels/a64_sgemm_8x12/generic.cpp
+        ${AG_ARM_GEMM}/kernels/a64_smallK_hybrid_fp32_mla_6x4/generic.cpp
+        ${AG_ARM_GEMM}/kernels/a64_smallK_hybrid_fp32_mla_8x4/generic.cpp
+        ${AG_ARM_GEMM}/kernels/a64_hybrid_fp32_mla_4x24/generic.cpp
+        ${AG_ARM_GEMM}/kernels/a64_hybrid_fp32_mla_6x16/generic.cpp
+        ${AG_ARM_GEMM}/kernels/a64_hybrid_fp32_mla_8x4/generic.cpp
+        # SVE fp32 kernels -- the point: SVE-512 on Kunpeng 920F
+        ${AG_ARM_GEMM}/kernels/sve_hybrid_fp32_mla_6x4VL/generic.cpp
+        ${AG_ARM_GEMM}/kernels/sve_hybrid_fp32_mla_8x1VL/generic.cpp
+        ${AG_ARM_GEMM}/kernels/sve_interleaved_fp32_mla_8x3VL/generic.cpp
+        # our CPUInfo shim implementation
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/arm_gemm_cpuinfo.cpp
+    )
+    add_library(arm_gemm STATIC ${ARM_GEMM_SRCS})
+    # The SVE kernel asm is large; O2 keeps the build sane (O3 gains nothing).
+    target_compile_options(arm_gemm PRIVATE -O2)
+    # Put our shim first so it shadows any arm_compute headers on the machine.
+    target_include_directories(arm_gemm PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${AG}
+        ${AG}/src/cpu/kernels/assembly
+        ${AG_ARM_GEMM}
+    )
+    target_compile_definitions(arm_gemm PUBLIC ARM_COMPUTE_ENABLE_SVE)
+    message(STATUS "arm_gemm fp32-SVE subset compiled from ${AG}")
 endif()
 
 # Include directories
@@ -72,6 +117,11 @@ include_directories(include)
 
 # Library
 add_library(winograd_conv STATIC src/winograd_conv.cpp)
+
+# arm_gemm (built above) is required by winograd_conv when USE_ARM_GEMM is on.
+if(USE_ARM_GEMM)
+    target_link_libraries(winograd_conv PUBLIC arm_gemm)
+endif()
 
 # Apply OpenMP to library target (propagates to all consumers)
 if(ENABLE_OPENMP)
