@@ -429,13 +429,14 @@ perf script > spe.dump
 
 ### 10.4 为什么 benchdnn 测的 oneDNN 比我端到端测得慢
 
-> ⚠️ 数据缺口：端到端 9 行 oneDNN 数据已在手（见 §10 关联的 AGENTS.md 表）；**benchdnn 实测数字未提供**。下面先给机制性解释，拿到具体数字后可逐行归因确认。
+> ⚠️ 数据缺口：端到端 9 行 oneDNN 数据已在手（AGENTS.md）；**benchdnn 实测数字未提供**（用户确认了「benchdnn 慢于端到端」这一现象，但具体数字没给）。下面按机制给解释；拿到数字后可逐行归因定位主导因素。
 
-benchdnn 与端到端测的不是同一件事，方向上 benchdnn 几乎总是偏慢，机制：
+**先点破反直觉之处**：微基准通常比端到端**快**（无周边层、只测单个 conv）。这里反过来，恰恰说明**端到端环境对 oneDNN 更友好**——它占了「绑核 + 自主选实现 + primitive 复用」三样便宜，benchdnn 把这三样都拿掉了。所以「benchdnn 慢」方向上是可解释的。机制按嫌疑排序：
 
-1. **实现选择路径不同（最可能）**：端到端里 oneDNN 对每个 shape 自主选实现（9 行里 8 行 `wino:acl`），且 primitive 被复用、TransformedWeights 缓存在 primitive 内——第二次调用起省掉权重变换。benchdnn `--conv --alg=WINO` 每行**重建** primitive，权重变换每次都做；不指定 alg 时可能选到直接卷积，路径完全不同。生成的 `shapes/conv_all.list` 带 `--alg=WINO` 只能保证「是 winograd」，不等于端到端选中的那条 ACL 路径。
-2. **线程与绑定不同**：端到端 numactl 绑核；benchdnn 若未绑定或绑定方式不同，920F 16 NUMA 下跨节点访存惩罚显著（无 L3、L2 仅 768KB/核，远程内存几乎全 miss）。
-3. **测量循环结构**：benchdnn 每 iteration 一次 `prim->execute` + 计时/同步点，单次调用的固定开销（驱动循环、scratch、屏障）摊到每次；端到端连续调用、无同步点可流水，重复多次取最优。小 shape（row 9 端到端 0.5ms）固定开销占比放大，差距更大。
-4. **缓存状态**：端到端同一 conv 反复执行，输入/中间缓冲在 L2 内热；benchdnn 逐行冷启动。
+1. **线程/绑定差异（920F 最大嫌疑）**：端到端 numactl 绑核（~9T、单 NUMA、内存本地）。benchdnn 若没绑核，OpenMP/线程池可能铺满 16 个 NUMA 节点甚至全部 608 核——小 shape 的 winograd 在线程过订阅下开销是灾难（线程创建/同步、跨节点访存全 miss，无 L3 兜底）。即使绑了，绑哪个节点、绑几核也直接影响数字。
+2. **实现选择不同**：端到端 oneDNN 对每个 shape 自主选实现（9 行里 8 行 `wino:acl`）。benchdnn 不指定 alg 时按自己的启发式选，可能选到直接卷积或不同的 winograd 变体（端到端 row 3 就是 `brgconv:sve_512`）；`--alg=WINO` 强制 winograd，但也只能保证「是 winograd」，不等于端到端选中的那条 ACL 路径。生成的 `shapes/conv_all.list` 用 `--alg=WINO`。
+3. **布局/重排**：端到端若让 oneDNN 用内部最优布局（format_any），不需要每次执行前重排；benchdnn 若用显式 plain 格式描述符，每次 execute 内部可能要 nchw→blocked 重排，多一遍全量搬运。
+4. **每 iteration 固定开销**：benchdnn 每 iteration 一次 `prim->execute` + 计时/同步点，驱动循环/scratch/屏障摊到每次；端到端连续调用、无同步点可流水。小 shape（row 9 端到端 0.5ms）固定开销占比放大，差距更大。
+5. **权重变换与缓存冷热**：端到端同一 primitive 跨调用复用、TransformedWeights 缓存在 primitive 内、输入/中间缓冲在 L2 热；benchdnn 每行重建 primitive（59 行 = 59 次权重变换，端到端每 shape 只 1 次 + 跨调用复用），且逐行冷启动。
 
-**结论**：benchdnn 的数字不是「同一个 oneDNN 的另一个计时器」，而是「不同实现选择 + 不同执行环境」下的数字。它比我方端到端慢，恰好说明**我方端到端对比里 oneDNN 占了实现选择 + primitive 复用 + 绑核的便宜**；要公平对照，应保证两边同样的绑核、同样走 winograd、同样让 primitive 复用（重复迭代）。
+**结论与公平对照三条件**：benchdnn 的数字不是「同一个 oneDNN 的另一个计时器」，而是「不同实现选择 + 不同执行环境」下的数字。它比端到端慢，**不能当作「oneDNN 更慢」的证据**，反而说明端到端对比里 oneDNN 占了便宜。要与我方端到端数字公平对照，benchdnn 必须：① 与端到端**同样的 numactl 绑核**；② `--alg=WINO` 且**核对选中 label 与端到端一致**（wino:acl）；③ **重复迭代**让 primitive 复用（权重变换只做一次）。

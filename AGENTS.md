@@ -417,7 +417,12 @@ onednn 的 32/38 行为反常：row 8/9 塌缩 4-6x（0.514→0.087ms）、row 5
 3. **变换内核手写/展开**（对应「新增优化思路 F」）。
 4. **消除 scatter/gather**：变换直接写 GEMM 布局，砍掉 Phase 1 scatter + Phase 3 gather。
 
-**待补数据**：9 行的 shape 列（映射 GEMM/变换/内存受限）；转换开销数字（用户可提供，确认 wrapper 占比）。
+**待补数据**：9 行的 shape 列（映射 GEMM/变换/内存受限）；转换开销数字（用户可提供，确认 wrapper 占比）；benchdnn 实测数字（用于 why_faster §10.4 逐行归因）。
+
+**benchdnn vs 端到端测速**（why_faster §10.4 摘要；做 oneDNN 性能对照前必读）：
+- 现象：同 shape 下 benchdnn 测的 oneDNN **慢于**端到端（用户实测确认）。
+- 主因（920F 特化）：① 端到端 numactl 绑核、benchdnn 常不绑/线程过订阅 → 16 NUMA 跨节点 + 小 shape 过订阅灾难；② 实现选择不同（端到端自主选 `wino:acl`，benchdnn 可能选到直接卷积/不同变体）；③ 布局/重排；④ 每 iteration 固定开销 + 逐行冷启动。
+- 推论：**benchdnn 慢 ≠ 端到端慢**。公平对照三条件：**同样 numactl 绑核 + `--alg=WINO` 并核对 label + 重复迭代复用 primitive**。
 
 ### 下一步优化方向（按预期收益排序）
 
