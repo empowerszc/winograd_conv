@@ -101,6 +101,27 @@ if(USE_ARM_GEMM)
         # our CPUInfo shim implementation
         ${CMAKE_CURRENT_SOURCE_DIR}/src/arm_gemm_cpuinfo.cpp
     )
+    # ACL >= 24.x split each fp32 kernel's implementations out of generic.cpp
+    # into per-variant files (_a53/_a55/_a55r1/_x1 for a64_sgemm_8x12, _a55 for
+    # the a64 hybrids, _a64fx for the SVE kernels) and moved Transform<12,1,...>
+    # into interleave-8way.cpp. 23.11 kept all of these inside generic.cpp, so
+    # append them conditionally to stay compatible with both layouts.
+    foreach(_ag_src
+            interleave-8way.cpp
+            kernels/a64_hybrid_fp32_mla_4x24/a55.cpp
+            kernels/a64_hybrid_fp32_mla_6x16/a55.cpp
+            kernels/a64_hybrid_fp32_mla_8x4/a55.cpp
+            kernels/a64_sgemm_8x12/a53.cpp
+            kernels/a64_sgemm_8x12/a55.cpp
+            kernels/a64_sgemm_8x12/a55r1.cpp
+            kernels/a64_sgemm_8x12/x1.cpp
+            kernels/sve_hybrid_fp32_mla_6x4VL/a64fx.cpp
+            kernels/sve_hybrid_fp32_mla_8x1VL/a64fx.cpp
+            kernels/sve_interleaved_fp32_mla_8x3VL/a64fx.cpp)
+        if(EXISTS ${AG_ARM_GEMM}/${_ag_src})
+            list(APPEND ARM_GEMM_SRCS ${AG_ARM_GEMM}/${_ag_src})
+        endif()
+    endforeach()
     # ACL >= 24.x merged misc-sve.cpp into misc.cpp (no -sve suffix file);
     # 23.11 still has both.
     if(EXISTS ${AG_ARM_GEMM}/misc-sve.cpp)

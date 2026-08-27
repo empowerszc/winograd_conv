@@ -16,6 +16,8 @@ CMake 自动探测两种布局，无需手改：
 | `pretranspose_B_array` | 4 参数 | **多了尾部 `transposed` bool**（无默认值） |
 | `gemm<T,T>()` | `Tret=Tlop` 默认 | **必须显式 `gemm<T,T,T>()`** |
 | 头文件 `<string>` | 传递包含偶然覆盖 | **arm_gemm 头文件自己缺 `#include <string>`**（见下） |
+| `get_gemm_method<T,T>()` | 有定义 | **只声明无定义（dead API）**，驱动调试打印改用 `cfg.filter` |
+| fp32 内核源码 | 全在 `generic.cpp` | **拆成 per-variant 文件**（`a53/a55/a55r1/x1`、`_a64fx`），CMake 按 `if(EXISTS)` 追加 |
 
 检测到新布局时 CMake 定义 `ARM_GEMM_NEW_API`，驱动自动用新签名
 （见 `src/winograd_conv.cpp` arm_gemm_driver 的 `#if defined(ARM_GEMM_NEW_API)`）。

@@ -335,9 +335,17 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
     static bool printed = false;
     if (debug && !printed)
     {
+#if defined(ARM_GEMM_NEW_API)
+        // 53.1.0 declares get_gemm_method() but ships no definition (dead API),
+        // so the selected kernel name cannot be queried here. The SVE path is
+        // forced via cfg.filter anyway -- print the filter instead.
+        fprintf(stderr, "[winograd_gemm] arm_gemm selected: filter=%s (M=%d N=%d K=%d)\n",
+                cfg.filter.c_str(), n_tiles, OC, IC);
+#else
         const arm_gemm::KernelDescription kd = arm_gemm::get_gemm_method<float, float>(args);
         fprintf(stderr, "[winograd_gemm] arm_gemm selected: %s (M=%d N=%d K=%d)\n",
                 kd.name.c_str(), n_tiles, OC, IC);
+#endif
         printed = true;
     }
 
