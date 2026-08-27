@@ -89,16 +89,20 @@ test_winograd 大面积 FAIL（误差随 IC 增长、跨次运行不稳定）」
 | `WINO_GEMM_VERIFY_GEMM=1` | 每次 execute 后用标量循环复算并比对，前 10 处 mismatch 打到 stderr（慢一倍，仅诊断用） |
 | `WINO_GEMM_DEBUG=1` | 打印 filter/M/N/K（每进程一次，已修 OpenMP 多线程重复打印竞态） |
 
-另配独立最小复现工具（不进 git，`build/arm_gemm_repro.cpp`）：直接反复调用
-`winograd_gemm()` 与标量参考比对，不带任何变换/OpenMP 流水线，用于隔离
-「GEMM 层自身算错 / 并发状态污染」。把它临时加进 CMake 编一个
-`arm_gemm_repro` 目标，或按 test_winograd 同款链接参数手工编。
+另配独立最小复现工具 `tools/arm_gemm_repro.cpp`（有 CMake 目标 `arm_gemm_repro`，
+与 test_winograd 链同一库）：直接反复调用 `winograd_gemm()` 与标量参考比对，
+不带任何变换/OpenMP 流水线，用于隔离「GEMM 层自身算错 / 并发状态污染」。
+支持 `--threads T --iters I --bconst [M N K ...]`；`--bconst` 把 B 每行沿 K
+复制成常数（模拟 identity 权重的 V 结构）。
 
 920F 上定位顺序（2026-08-27 实测进度：①NAIVE 对照已全对 ⇒ 管线其余部分无问题；
 ②VERIFY_GEMM 显示连 M=1 N=3 K=3 的极小 GEMM 都错且逐位可复现 ⇒ 问题锁定在
-arm_gemm 执行层。注意：ACL>=24.x 里没有 cycle_estimator 的内核 estimate=0，
-find_implementation() 见 0 即「立即选中」——filter="sve_" 时 N<12 的 GEMM 一律
-落到 sve_hybrid_fp32_mla_8x1VL，与适不适配无关）：
+arm_gemm 执行层；③跨引擎二分全部同错（6x4VL / 8x1VL / ""）⇒ 引擎共性层；
+④test_winograd 里所有 PASS 的用例权重都是 identity（其 V 沿 K 为常数），
+权重一般随机即错 ⇒ 主嫌疑是 B 面（pretranspose/K 配对），下一步跑 repro 工具的
+--bconst 两步对照验证。注意：ACL>=24.x 里没有 cycle_estimator 的内核
+estimate=0，find_implementation() 见 0 即「立即选中」——filter="sve_" 时 N<12
+的 GEMM 一律落到 sve_hybrid_fp32_mla_8x1VL，与适不适配无关）：
 
 ```bash
 # 0) 内核选择可视化（每个不同 M,N,K 打一次候选表, 标出实际选中者）
@@ -111,6 +115,12 @@ for f in sve_hybrid_fp32_mla_6x4VL sve_interleaved_fp32_mla_8x3VL \
 done
 #    判读: 某 engine 下 PASS⇒只有它被坏配置坑; 全 SVE 坏而 ""(自动, 可能选 NEON)好
 #          ⇒ SVE 子集共性错误; 仅 8x1VL 坏⇒无估计器短路选中它的问题(N<12 时)。
+#
+# 1.5) 最小 GEMM 复现（已证实各引擎同坏后跑这个, 不带卷积管线）：
+#   ./arm_gemm_repro --iters 3            # 随机 A/B, 预期多个 case FAIL
+#   ./arm_gemm_repro --iters 3 --bconst   # B 沿 K 为常数, 若全 ok ⇒ 锁定 B 面
+#   两步对照判读: --bconst 全过而随机全坏 ⇒ pretranspose/K 维配对问题;
+#   两者同坏 ⇒ 与 B 结构无关（回到缓冲/workspace 假设）。
 #
 # 2) 若确认与「哪个引擎」无关（各引擎同坏）：换 ACL 23.11 重编同一份驱动 A/B，
 #    23.11 对 / 53.1.0 错 ⇒ 问题锁定在 53.1.0 库子集适配；

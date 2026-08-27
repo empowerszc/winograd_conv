@@ -205,6 +205,13 @@ endif()
 add_executable(test_ref_vs_nchw tests/test_ref_vs_nchw.cpp)
 target_link_libraries(test_ref_vs_nchw winograd_nchw_ref winograd_conv)
 
+# Bare-GEMM repro/diagnosis tool (arm_gemm accuracy debugging, 2026-08).
+# Calls winograd_gemm() directly with random data -- no transforms, no OpenMP
+# pipeline -- and diffs against a scalar reference. See header comment for
+# usage (--bconst tests the "B constant along K" hypothesis).
+add_executable(arm_gemm_repro tools/arm_gemm_repro.cpp)
+target_link_libraries(arm_gemm_repro winograd_conv)
+
 # Swish SVE benchmark. swish_sve/ is user work that is not in git yet, so only
 # build it when the sources are actually present in this checkout (otherwise the
 # 920F clone without swish_sve/ would fail to configure).
