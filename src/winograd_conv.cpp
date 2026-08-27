@@ -19,6 +19,9 @@
 #include <cstdio>
 #include <vector>
 #include <arm_neon.h>
+#if defined(_OPENMP)
+#include <omp.h>         // omp_get_thread_num/num_threads (Phase-2 static partition)
+#endif
 
 #ifdef USE_OPENBLAS
 #include <cblas.h>
@@ -268,6 +271,28 @@ static void winograd_gemm_naive(
     }
 }
 
+// Same math on the K-major ("kt") V the NHWC pipeline produces: element
+// (n,k) of B sits at V[k*OC + n] (V stored IC x OC). Reference for
+// winograd_gemm_kt/_batched_kt and the driver's VERIFY self-check.
+static void winograd_gemm_naive_kt(
+    const float* U,   // [n_tiles][IC]
+    const float* V,   // [IC][OC]
+    float* M,         // [n_tiles][OC]
+    int n_tiles,
+    int OC,
+    int IC
+) {
+    for (int t = 0; t < n_tiles; t++) {
+        for (int oc = 0; oc < OC; oc++) {
+            float sum = 0.0f;
+            for (int ic = 0; ic < IC; ic++) {
+                sum += U[t * IC + ic] * V[ic * OC + oc];
+            }
+            M[t * OC + oc] = sum;
+        }
+    }
+}
+
 #if defined(USE_ARM_GEMM)
 // ----------------------------------------------------------------------------
 // arm_gemm JIT driver (modern API, ACL 23.11 embedded copy).
@@ -308,8 +333,19 @@ struct Buf
     }
 };
 
-void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
+// One driver behind all three public contracts: row-major V
+// (winograd_gemm), K-major V ("kt", winograd_gemm_kt) and the batched kt
+// form. nmulti>1 folds consecutive slices into ONE arm_gemm object via
+// GemmArgs.nmulti -- object construction, kernel selection and the B
+// pretranspose all amortize over the batch. Slices use the pipeline's
+// native strides: A += n_tiles*IC, B += OC*IC, C += n_tiles*OC per multi.
+void run(const float *U, const float *V, float *M, int n_tiles, int OC,
+         int IC, bool v_kmajor = false, int nmulti = 1)
 {
+    const size_t A_ms = static_cast<size_t>(n_tiles) * IC;
+    const size_t B_ms = static_cast<size_t>(OC) * IC;
+    const size_t C_ms = static_cast<size_t>(n_tiles) * OC;
+
     // Env knobs are read once per process (function-local static init is
     // thread-safe under OpenMP; the branch below is negligible per call).
     static const bool use_naive = [] {
@@ -318,7 +354,15 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
     }();
     if (use_naive)
     {
-        winograd_gemm_naive(U, V, M, n_tiles, OC, IC);
+        for (int r = 0; r < nmulti; r++)
+        {
+            if (v_kmajor)
+                winograd_gemm_naive_kt(U + r * A_ms, V + r * B_ms, M + r * C_ms,
+                                       n_tiles, OC, IC);
+            else
+                winograd_gemm_naive(U + r * A_ms, V + r * B_ms, M + r * C_ms,
+                                    n_tiles, OC, IC);
+        }
         return;
     }
 
@@ -331,8 +375,9 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
     // transposed to K-major ("Bt", shape KxN, ld=N). Handing it row-major
     // NxK with ld=K made every SVE engine compute u . V[:,n] instead of
     // u . V[n,:] (exact match on all three equations of the M=1 N=3 K=3
-    // dump). Pack Bt here per call until the transpose moves upstream into
-    // the weight-transform stage (future perf work).
+    // dump). The pipeline now produces V in exactly that layout and comes in
+    // via v_kmajor=true: then NO staging is needed at all, bind directly.
+    // For legacy row-major callers the pack still happens here per call.
     //   WINO_GEMM_BTRANS=0 falls back to the old (wrong on 53.1.0) layout --
     // kept purely as an A/B diagnostic switch.
     static const bool b_transposed = [] {
@@ -345,9 +390,11 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
     thread_local FBuf bt;
 
     float *B_arg      = const_cast<float *>(V);
-    int    B_ld       = IC;
+    int    B_ld       = v_kmajor ? OC : IC;
 
-    if (b_transposed)
+    // kt data already satisfies the Bt expectation above -- bind directly,
+    // zero staging copies. (WINO_GEMM_BTRANS only affects the legacy layout.)
+    if (b_transposed && !v_kmajor)
     {
         const size_t need = static_cast<size_t>(OC) * IC;
         if (need > bt.cap)
@@ -381,14 +428,16 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
     // the explicit false the cfg pointer would bind to the bool (accumulate
     // silently ON, C never zeroed) and cfg would stay nullptr (filter ignored).
     arm_gemm::GemmArgs args(&ci, n_tiles, OC, IC,
-                            1 /*Ksections*/, 1 /*nbatches*/, 1 /*nmulti*/,
+                            1 /*Ksections*/, 1 /*nbatches*/,
+                            static_cast<unsigned int>(nmulti),
                             false /*indirect_input*/, {}, /*no activation*/
                             1 /*maxthreads*/,
                             false /*fixed_format*/, false /*fast_mode*/,
                             false /*accumulate*/, &cfg);
 #else
     arm_gemm::GemmArgs args(&ci, n_tiles, OC, IC,
-                            1 /*Ksections*/, 1 /*nbatches*/, 1 /*nmulti*/,
+                            1 /*Ksections*/, 1 /*nbatches*/,
+                            static_cast<unsigned int>(nmulti),
                             false /*indirect_input*/, {}, /*no activation*/
                             1 /*maxthreads*/,
                             false /*fixed_format*/, false /*fast_mode*/, &cfg);
@@ -403,7 +452,15 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
     if (!gemm)
     {
         // Strategy selection failed (shouldn't happen) — fall back to naive.
-        winograd_gemm_naive(U, V, M, n_tiles, OC, IC);
+        for (int r = 0; r < nmulti; r++)
+        {
+            if (v_kmajor)
+                winograd_gemm_naive_kt(U + r * A_ms, V + r * B_ms, M + r * C_ms,
+                                       n_tiles, OC, IC);
+            else
+                winograd_gemm_naive(U + r * A_ms, V + r * B_ms, M + r * C_ms,
+                                    n_tiles, OC, IC);
+        }
         return;
     }
 
@@ -449,7 +506,8 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
         }();
         (void)banner;
         const std::string key = std::to_string(n_tiles) + "x" +
-                                std::to_string(OC) + "x" + std::to_string(IC);
+                                std::to_string(OC) + "x" + std::to_string(IC) +
+                                "x" + std::to_string(nmulti);
         if (key != last_shape)
         {
             last_shape = key;
@@ -458,35 +516,42 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
             // exist in the 23.11 layout.
             const auto kds = arm_gemm::get_compatible_kernels<float, float, float>(
                 args, arm_gemm::Nothing());
-            fprintf(stderr, "[winograd_gemm] filter='%s' shapes M=%d N=%d K=%d -- %zu kernels:\n",
-                    cfg.filter.c_str(), n_tiles, OC, IC, kds.size());
+            fprintf(stderr, "[winograd_gemm] filter='%s' shapes M=%d N=%d K=%d multi=%d -- %zu kernels:\n",
+                    cfg.filter.c_str(), n_tiles, OC, IC, nmulti, kds.size());
             for (const auto &kd : kds)
                 fprintf(stderr, "    %-42s est=%-10llu %s\n", kd.name.c_str(),
                         static_cast<unsigned long long>(kd.cycle_estimate),
                         kd.is_default ? "<== SELECTED" : "");
 #else
-            fprintf(stderr, "[winograd_gemm] filter='%s' shapes M=%d N=%d K=%d (23.11: no kernel list)\n",
-                    cfg.filter.c_str(), n_tiles, OC, IC);
+            fprintf(stderr, "[winograd_gemm] filter='%s' shapes M=%d N=%d K=%d multi=%d (23.11: no kernel list)\n",
+                    cfg.filter.c_str(), n_tiles, OC, IC, nmulti);
 #endif
         }
     }
 
-    // Pre-transpose B into the cached per-thread buffer.
+    // Pre-transpose/pack B into the cached per-thread buffer. The buffer size
+    // already scales with nmulti and the pack itself walks panels via its OWN
+    // B_multi_stride argument (independent of set_arrays) -- passing 0 here
+    // would repack panel 0 into every multi slot.
     const size_t bsz = gemm->get_B_pretransposed_array_size();
 #if defined(ARM_GEMM_NEW_API)
     // 53.1.0: pretranspose_B_array takes a trailing 'transposed' flag; the SVE
     // StdTransformsSVE path asserts !transposed. The input layout expectation
     // (empirically established -- see B_arg comment) is K-major "Bt".
-    gemm->pretranspose_B_array(pretrans.ensure(bsz), B_arg, B_ld, 0, false);
+    gemm->pretranspose_B_array(pretrans.ensure(bsz), B_arg, B_ld,
+                               static_cast<int>(B_ms), false);
 #else
-    gemm->pretranspose_B_array(pretrans.ensure(bsz), B_arg, B_ld, 0);
+    gemm->pretranspose_B_array(pretrans.ensure(bsz), B_arg, B_ld,
+                               static_cast<int>(B_ms));
 #endif
     gemm->set_pretransposed_B_data(pretrans.p);
 
-    gemm->set_arrays(U, IC, 0, 0,    // A: MxK, ld=IC
-                     B_arg, B_ld, 0, // B: K-major Bt, ld=OC (or legacy V/IC)
-                     M, OC, 0, 0,    // C: MxN, ld=OC
-                     nullptr, 0);    // no bias
+    // With nmulti>1 one execute() walks every slice via the *_multi_stride
+    // values (batches would share B and use _batch_stride -- not used here).
+    gemm->set_arrays(U, IC, 0, A_ms,          // A: MxK, ld=IC
+                     B_arg, B_ld, B_ms,       // B: K-major Bt, ld=OC (or legacy V/IC)
+                     M, OC, 0, C_ms,          // C: MxN, ld=OC
+                     nullptr, 0);             // no bias
 
     const size_t wsz = gemm->get_working_size();
     if (wsz != 0)
@@ -513,27 +578,37 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
     if (verify)
     {
         std::vector<float> ref(static_cast<size_t>(n_tiles) * OC);
-        winograd_gemm_naive(U, V, ref.data(), n_tiles, OC, IC);
+        // Compare every multi slice (batched calls cover several).
+        for (int r = 0; r < nmulti; r++)
+        {
+            const float *U_r = U + r * A_ms;
+            const float *V_r = V + r * B_ms;
+            float       *M_r = M + r * C_ms;
+            if (v_kmajor)
+                winograd_gemm_naive_kt(U_r, V_r, ref.data(), n_tiles, OC, IC);
+            else
+                winograd_gemm_naive(U_r, V_r, ref.data(), n_tiles, OC, IC);
 
-        float maxerr = 0.0f;
-        int   bad_i  = -1;
-        bool  nonfinite = false;
-        for (int i = 0; i < n_tiles * OC; i++)
-        {
-            if (!std::isfinite(M[i])) { nonfinite = true; bad_i = i; break; }
-            const float err = std::fabs(M[i] - ref[i]);
-            if (err > maxerr) { maxerr = err; bad_i = i; }
-        }
-        if (nonfinite ||
-            maxerr > 1e-3f * std::max(1.0f, std::fabs(ref[bad_i < 0 ? 0 : bad_i])))
-        {
-            static std::atomic<int> reported{0};
-            if (reported.fetch_add(1) < 10)
-                fprintf(stderr,
-                        "[winograd_gemm VERIFY] MISMATCH M=%d N=%d K=%d: "
-                        "max|diff|=%.6g at flat %d (got=%.6g want=%.6g)\n",
-                        n_tiles, OC, IC, maxerr, bad_i,
-                        M[bad_i], ref[bad_i]);
+            float maxerr = 0.0f;
+            int   bad_i  = -1;
+            bool  nonfinite = false;
+            for (int i = 0; i < n_tiles * OC; i++)
+            {
+                if (!std::isfinite(M_r[i])) { nonfinite = true; bad_i = i; break; }
+                const float err = std::fabs(M_r[i] - ref[i]);
+                if (err > maxerr) { maxerr = err; bad_i = i; }
+            }
+            if (nonfinite ||
+                maxerr > 1e-3f * std::max(1.0f, std::fabs(ref[bad_i < 0 ? 0 : bad_i])))
+            {
+                static std::atomic<int> reported{0};
+                if (reported.fetch_add(1) < 10)
+                    fprintf(stderr,
+                            "[winograd_gemm VERIFY] MISMATCH M=%d N=%d K=%d r=%d: "
+                            "max|diff|=%.6g at flat %d (got=%.6g want=%.6g)\n",
+                            n_tiles, OC, IC, r, maxerr, bad_i,
+                            M_r[bad_i], ref[bad_i]);
+            }
         }
     }
 }
@@ -562,6 +637,53 @@ void winograd_gemm(
 #else
     // Naive fallback: triple loop (no external dependency)
     winograd_gemm_naive(U, V, M, n_tiles, OC, IC);
+#endif
+}
+
+// K-major V variant -- what the NHWC pipeline itself produces (and what the
+// modern arm_gemm wants). See include/winograd_convolution.hpp for layout.
+void winograd_gemm_kt(
+    const float* U,   // [n_tiles][IC]
+    const float* V,   // [IC][OC]
+    float* M,         // [n_tiles][OC]
+    int n_tiles,
+    int OC,
+    int IC
+) {
+#if defined(USE_ARM_GEMM)
+    arm_gemm_driver::run(U, V, M, n_tiles, OC, IC, /*v_kmajor=*/true);
+#elif defined(USE_OPENBLAS)
+    // RowMajor(NoTrans,NoTrans): B is (K x N) = V, ld = OC.
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                n_tiles, OC, IC,
+                1.0f, U, IC, V, OC,
+                0.0f, M, OC);
+#else
+    winograd_gemm_naive_kt(U, V, M, n_tiles, OC, IC);
+#endif
+}
+
+// Batched kt form over nmulti consecutive slices with the pipeline's native
+// strides. USE_ARM_GEMM folds them into one GemmArgs.nmulti call; other
+// backends keep per-slice GEMMs (their B packing dominates anyway).
+void winograd_gemm_batched_kt(
+    const float* U,   // [nmulti][n_tiles][IC]
+    const float* V,   // [nmulti][IC][OC]
+    float* M,         // [nmulti][n_tiles][OC]
+    int n_tiles,
+    int OC,
+    int IC,
+    int nmulti
+) {
+#if defined(USE_ARM_GEMM)
+    arm_gemm_driver::run(U, V, M, n_tiles, OC, IC, /*v_kmajor=*/true, nmulti);
+#else
+    const size_t A_ms = static_cast<size_t>(n_tiles) * IC;
+    const size_t B_ms = static_cast<size_t>(OC) * IC;
+    const size_t C_ms = static_cast<size_t>(n_tiles) * OC;
+    for (int r = 0; r < nmulti; r++)
+        winograd_gemm_kt(U + r * A_ms, V + r * B_ms, M + r * C_ms,
+                         n_tiles, OC, IC);
 #endif
 }
 
@@ -689,9 +811,18 @@ static void winograd_convolution_nhwc_core(
                         g_wt[(kh * 3 + kw) * IC + ic] =
                             wei[((oc * IC + ic) * 3 + kh) * 3 + kw];
             dispatch_weight_transform(g_wt, V_oc_wt, IC, is_f44, isa);
+            // Scatter in K-major ("kt") layout: element (n,k) of the GEMM's B
+            // lives at V[k*OC + n], i.e. panel m occupies [(m*IC)*OC,
+            // (m+1)*IC*OC) with [ic][oc] inside. Modern arm_gemm consumes B
+            // in exactly this layout (zero per-call staging); OpenBLAS reads
+            // it as RowMajor NN instead of NT. This is a once-per-conv cost.
             for (int m = 0; m < TS * TS; m++)
+            {
+                const float* src_m = V_oc_wt + m * IC;
+                float*       dst_m = V + static_cast<size_t>(m) * IC * OC;
                 for (int ic = 0; ic < IC; ic++)
-                    V[m * OC * IC + oc * IC + ic] = V_oc_wt[m * IC + ic];
+                    dst_m[static_cast<size_t>(ic) * OC + oc] = src_m[ic];
+            }
         }
 
         // ---- Step 2: Per-batch loop ----
@@ -744,14 +875,45 @@ static void winograd_convolution_nhwc_core(
                 }
             }
 
-            // Phase 2: GEMM
+            // Phase 2: GEMM. All NM slices have identical (M,N,K) -- dynamic
+            // scheduling buys nothing and costs a chunk-claim per slice.
+#if defined(USE_ARM_GEMM)
+            #if defined(_OPENMP)
+            // Static per-thread partition (near-even: b = i*NM/nth keeps all
+            // threads alive even when nth does not divide NM); each thread
+            // folds its contiguous share into ONE batched call
+            // (GemmArgs.nmulti): object construction, kernel selection and
+            // the B pretranspose amortize over cnt slices instead of
+            // repeating cnt times.
+            {
+                const int nth = omp_get_num_threads();
+                const int tid = omp_get_thread_num();
+                const int b0  = tid * NM / nth;
+                const int b1  = (tid + 1) * NM / nth;
+                if (b1 > b0) {
+                    winograd_gemm_batched_kt(
+                        U     + static_cast<size_t>(b0) * n_tiles * IC,
+                        V     + static_cast<size_t>(b0) * OC * IC,
+                        M_buf + static_cast<size_t>(b0) * n_tiles * OC,
+                        n_tiles, OC, IC, b1 - b0);
+                }
+                // The legacy omp-for ended with an implicit barrier and
+                // Phase 3 below is 'nowait' -- spell the sync out explicitly.
+                #pragma omp barrier
+            }
+            #else
+            // Serial build: one batch covers everything.
+            winograd_gemm_batched_kt(U, V, M_buf, n_tiles, OC, IC, NM);
+            #endif
+#else
             #pragma omp for schedule(dynamic)
             for (int ts_idx = 0; ts_idx < NM; ts_idx++) {
                 const float* U_slice = U + ts_idx * n_tiles * IC;
                 const float* V_slice = V + ts_idx * OC * IC;
                 float* M_slice = M_buf + ts_idx * n_tiles * OC;
-                winograd_gemm(U_slice, V_slice, M_slice, n_tiles, OC, IC);
+                winograd_gemm_kt(U_slice, V_slice, M_slice, n_tiles, OC, IC);
             }
+#endif
 
             // Phase 3: Output transform
             #pragma omp for collapse(2) schedule(dynamic, 2) nowait

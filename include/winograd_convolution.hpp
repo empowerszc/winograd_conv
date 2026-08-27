@@ -39,6 +39,38 @@ void winograd_gemm(
     int IC
 );
 
+// K-major ("kt") V variant -- the layout the NHWC pipeline produces and the
+// one modern arm_gemm consumes natively: element (n,k) of B lives at
+// V[k*OC + n], i.e. V is stored IC x OC. Eliminates every per-call B
+// transpose/pack. Other backends adapt trivially (OpenBLAS switches from
+// RowMajor(NoTrans,Trans) to RowMajor(NoTrans,NoTrans)).
+//
+// Note: only the pipeline is guaranteed to produce/expect kt data. External
+// callers should stick to winograd_gemm() above (row-major V).
+void winograd_gemm_kt(
+    const float* U,   // [n_tiles][IC]
+    const float* V,   // [IC][OC] k-major
+    float* M,         // [n_tiles][OC]
+    int n_tiles,
+    int OC,
+    int IC
+);
+
+// Batched kt variant over nmulti CONSECUTIVE ts_idx slices with the pipeline's
+// native strides (U: n_tiles*IC, V: IC*OC, M: n_tiles*OC between slices).
+// Under USE_ARM_GEMM this folds several formerly separate GEMMs into a single
+// arm_gemm object (GemmArgs.nmulti): object construction, kernel selection and
+// B pretranspose all amortize over the batch.
+void winograd_gemm_batched_kt(
+    const float* U,   // [nmulti][n_tiles][IC]
+    const float* V,   // [nmulti][IC][OC] k-major
+    float* M,         // [nmulti][n_tiles][OC]
+    int n_tiles,
+    int OC,
+    int IC,
+    int nmulti
+);
+
 // ============================================================================
 // Direct (reference) convolution
 // ============================================================================

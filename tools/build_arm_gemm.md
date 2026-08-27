@@ -132,6 +132,55 @@ c++ --version; grep -m1 "COMPILER" CMakeCache.txt
 判读要点：测试输出里 stderr 的 VERIFY 行先于 stdout 出现属正常缓冲现象；
 VERBOSE 内核表的 `est=0 ... <== SELECTED` 组合即短路选中的直接证据。
 
+## 结构优化：K 主序 V + nmulti 批量调用（2026-08-27 第二步改造）
+
+### 背景
+
+全量 A/B 显示 arm_gemm 在中高 IC 输 OpenBLAS 1.2~2.6x，嫌疑之一是 Phase 2 的
+每 ts_idx 固定开销：36 次 GEMM 对象构造 + 选核 + B 预转置/打包。第二步把两者一并消掉：
+
+### 契约变化（对外 API 保持兼容）
+
+| 入口 | V 布局 | 行为 |
+|---|---|---|
+| `winograd_gemm` | `[OC][IC]` 行主序 | **契约不变**（repro/test 仍走这条），arm_gemm 分支内部照旧做 Bt 暂存打包 |
+| `winograd_gemm_kt` | `[IC][OC]` K 主序 | 管线实际产出的布局；arm_gemm 直接零拷贝绑定，OpenBLAS 换成 NN 公式 |
+| `winograd_gemm_batched_kt` | 同上 ×nmulti | 把连续多个 ts_idx 切片折成**一次** arm_gemm 调用（`GemmArgs.nmulti`），对象构造/选核/B 预转置全部摊薄 |
+
+### 内部改动
+
+- **Phase 1 权重散写改为 K 主序**：`V[(m*IC+ic)*OC+oc] = V_oc_wt[m*IC+ic]`
+  （panel m 占据 `[m*IC*OC, (m+1)*IC*OC)`，内层 [ic][oc]）。整卷一次的开销，
+  换取 GEMM 阶段零 B 暂存。
+- **Phase 2（USE_ARM_GEMM 分支）静态切分 + 批量**：不再 `omp for dynamic`
+  逐 ts_idx 单发；按 `b = tid*NM/nth` 近均分给每个线程一段连续切片，线程内
+  **一次** `winograd_gemm_batched_kt(..., cnt)` 完成（等 FLOP 切片，dynamic 无收益）。
+  显式 `#pragma omp barrier` 补上原 omp-for 的隐式栅栏（Phase 3 是 nowait）。
+- 驱动 `run()` 增加 `v_kmajor / nmulti` 参数：kt 时跳过 Bt 暂存直接绑
+  （`B_ld=OC`）；`GemmArgs.nmulti=cnt`，`set_arrays` 传 multi 步长
+  （A=n_tiles*IC，B=OC*IC，C=n_tiles*OC）；`pretranspose_B_array` 第 4 参
+  （它自己的 B_multi_stride，与 set_arrays 无关）必须传 OC*IC——传 0 会把
+  panel 0 重打包进所有 multi 槽。
+- 已核实 ACL 库语义支持该用法：hybrid_indirect 的
+  `get_B_pretransposed_array_size()` 含 `*nmulti`、`pretranspose_B_array_part`
+  按 `B + multi*B_multi_stride` 循环覆盖全部面板、execute 按 multi 步长遍历
+  A/B/C。
+- 非 arm 后端（OpenBLAS/naive）与非 OpenMP 构建的旧循环原样保留。
+- x86 类型检查三方通过：53.1.0 新签名（`ARM_GEMM_NEW_API`）、23.11 旧布局、
+  无外部后端的 plain 构建（`build/x86_stubs/arm_neon.h` 为本仓库自带的
+  仅声明桩，只含工程实际用到的 NEON 符号，供 -fsyntax-only 用）。
+
+### 性能验证
+
+编译后先跑正确性门：
+
+```bash
+WINO_GEMM_VERIFY_GEMM=1 ./test_winograd   # 或 tests/README 的验证方式
+```
+
+再对比 A/B 数据；引擎轮换定位脚本见 `tools/perf_engine_sweep.md`
+（注意：本改造后固定开销已摊薄，与历史数字比较时时间基数会整体下移）。
+
 ## 根因与修复（2026-08-27 定位）
 
 **现象**：53.1.0 下所有 SVE 引擎全错；identity 权重（V 沿 K 常数）反而 PASS；
