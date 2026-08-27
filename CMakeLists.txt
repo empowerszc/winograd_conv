@@ -114,10 +114,14 @@ if(USE_ARM_GEMM)
     # sources compile standalone on the 920F.
     target_compile_options(arm_gemm PRIVATE -O2 -include string)
     # Put our shim first so it shadows any arm_compute headers on the machine.
+    # The final dir makes winograd_conv.cpp's #include <arm_gemm.hpp> (no
+    # prefix) resolve in both layouts: 23.11 keeps arm_gemm.hpp directly under
+    # assembly/, 53.1.0 moved it into assembly/arm_gemm/.
     target_include_directories(arm_gemm PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${AG}
         ${AG}/src/cpu/kernels/assembly
+        ${AG}/src/cpu/kernels/assembly/arm_gemm
         ${AG_ARM_GEMM}
     )
     target_compile_definitions(arm_gemm PUBLIC ARM_COMPUTE_ENABLE_SVE)
