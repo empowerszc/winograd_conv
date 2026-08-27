@@ -61,11 +61,15 @@ if(USE_ARM_GEMM)
     if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
         message(FATAL_ERROR "USE_ARM_GEMM requires an AArch64 target (SVE). Current: ${CMAKE_SYSTEM_PROCESSOR}")
     endif()
+    # arm_gemm.hpp moved to src/cpu/kernels/assembly/arm_gemm/ in ACL 53.1.0
+    # (was directly in src/cpu/kernels/assembly/ in 23.11).
     find_path(ARM_GEMM_GUARD arm_gemm.hpp
-              PATHS ${ARM_GEMM_ROOT}/src/cpu/kernels/assembly
+              PATHS ${ARM_GEMM_ROOT}/src/cpu/kernels/assembly/arm_gemm
+                    ${ARM_GEMM_ROOT}/src/cpu/kernels/assembly
+                    ${ARM_GEMM_ROOT}/src/core/NEON/kernels/arm_gemm
               NO_DEFAULT_PATH)
     if(NOT ARM_GEMM_GUARD)
-        message(FATAL_ERROR "arm_gemm.hpp not found. Set -DARM_GEMM_ROOT=/path/to/ComputeLibrary-23.11/ComputeLibrary-23.11")
+        message(FATAL_ERROR "arm_gemm.hpp not found under -DARM_GEMM_ROOT=${ARM_GEMM_ROOT}")
     endif()
     add_compile_definitions(USE_ARM_GEMM)
 
@@ -80,7 +84,6 @@ if(USE_ARM_GEMM)
         ${AG_ARM_GEMM}/mergeresults.cpp
         ${AG_ARM_GEMM}/mergeresults-sve.cpp
         ${AG_ARM_GEMM}/misc.cpp
-        ${AG_ARM_GEMM}/misc-sve.cpp
         ${AG_ARM_GEMM}/transform.cpp
         ${AG_ARM_GEMM}/transform-sve.cpp
         # a64 (NEON) fp32 kernels referenced by the gemm_fp32 list
@@ -98,6 +101,11 @@ if(USE_ARM_GEMM)
         # our CPUInfo shim implementation
         ${CMAKE_CURRENT_SOURCE_DIR}/src/arm_gemm_cpuinfo.cpp
     )
+    # ACL >= 24.x merged misc-sve.cpp into misc.cpp (no -sve suffix file);
+    # 23.11 still has both.
+    if(EXISTS ${AG_ARM_GEMM}/misc-sve.cpp)
+        list(APPEND ARM_GEMM_SRCS ${AG_ARM_GEMM}/misc-sve.cpp)
+    endif()
     add_library(arm_gemm STATIC ${ARM_GEMM_SRCS})
     # The SVE kernel asm is large; O2 keeps the build sane (O3 gains nothing).
     target_compile_options(arm_gemm PRIVATE -O2)
@@ -109,6 +117,16 @@ if(USE_ARM_GEMM)
         ${AG_ARM_GEMM}
     )
     target_compile_definitions(arm_gemm PUBLIC ARM_COMPUTE_ENABLE_SVE)
+    # ACL 53.1.0: arm_gemm.hpp lives in src/cpu/kernels/assembly/arm_gemm/ and
+    # GemmArgs gained an 'accumulate' param before cfg while pretranspose_B_array
+    # gained a trailing 'transposed' bool. Tell the driver (winograd_conv.cpp)
+    # to use the new call signatures when this layout is detected.
+    if(EXISTS ${AG}/src/cpu/kernels/assembly/arm_gemm/arm_gemm.hpp)
+        target_compile_definitions(arm_gemm PUBLIC ARM_GEMM_NEW_API=1)
+        message(STATUS "arm_gemm: new-API layout detected (ACL >= 24.x, e.g. 53.1.0)")
+    else()
+        message(STATUS "arm_gemm: legacy-API layout detected (ACL 23.11)")
+    endif()
     message(STATUS "arm_gemm fp32-SVE subset compiled from ${AG}")
 endif()
 

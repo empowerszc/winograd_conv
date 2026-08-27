@@ -28,6 +28,9 @@
 #ifndef HWCAP_SVE
 #define HWCAP_SVE (1 << 22)
 #endif
+#ifndef HWCAP_FHM
+#define HWCAP_FHM (1 << 23)
+#endif
 #ifndef HWCAP2_SVE2
 #define HWCAP2_SVE2 (1 << 1)
 #endif
@@ -128,6 +131,27 @@ bool CPUInfo::has_sme() const
     return false; /* SME unsupported on 920F and on GCC < 12 toolchains */
 }
 bool CPUInfo::has_sme2() const
+{
+    return false;
+}
+bool CPUInfo::has_fhm() const
+{
+    /* FEAT_FHM (fp16fml). Present on A76-class cores. */
+    return (hwcap() & HWCAP_FHM) != 0;
+}
+bool CPUInfo::has_sme_b16f32() const
+{
+    return false; /* SME outer-product features: no SME on 920F */
+}
+bool CPUInfo::has_sme_f16f32() const
+{
+    return false;
+}
+bool CPUInfo::has_sme_f32f32() const
+{
+    return false;
+}
+bool CPUInfo::has_sme_i8i32() const
 {
     return false;
 }

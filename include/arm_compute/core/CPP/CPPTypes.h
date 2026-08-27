@@ -19,6 +19,10 @@
  *
  * The enum values and the CPUModel name list mirror ACL 23.11 exactly so the
  * strategy kernel headers (which switch on CPUModel::A76 etc.) compile as-is.
+ *
+ * ACL 53.1.0 added has_fhm() plus the SME outer-product probes
+ * (has_sme_b16f32/f16f32/f32f32/i8i32); they are declared here so the newer
+ * sources compile unchanged, and all return false on non-SME hardware.
  */
 #pragma once
 
@@ -69,6 +73,11 @@ public:
     bool has_sve2() const;
     bool has_sme() const;
     bool has_sme2() const;
+    bool has_fhm() const;            // FEAT_FHM (fp16fml) -- added in ACL 53.x
+    bool has_sme_b16f32() const;     // SME b16f32 outer product (no SME on 920F)
+    bool has_sme_f16f32() const;     // SME f16f32 outer product
+    bool has_sme_f32f32() const;     // SME f32f32 outer product
+    bool has_sme_i8i32() const;      // SME i8i32 outer product
     CPUModel get_cpu_model(unsigned int cpuid) const;
     CPUModel get_cpu_model() const;
     unsigned int get_L1_cache_size() const;

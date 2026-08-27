@@ -299,13 +299,30 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
     arm_gemm::GemmConfig cfg;
     cfg.filter = "sve_";
 
+#if defined(ARM_GEMM_NEW_API)
+    // ACL 53.1.0: GemmArgs gained an 'accumulate' param before cfg. Without
+    // the explicit false the cfg pointer would bind to the bool (accumulate
+    // silently ON, C never zeroed) and cfg would stay nullptr (filter ignored).
+    arm_gemm::GemmArgs args(&ci, n_tiles, OC, IC,
+                            1 /*Ksections*/, 1 /*nbatches*/, 1 /*nmulti*/,
+                            false /*indirect_input*/, {}, /*no activation*/
+                            1 /*maxthreads*/,
+                            false /*fixed_format*/, false /*fast_mode*/,
+                            false /*accumulate*/, &cfg);
+#else
     arm_gemm::GemmArgs args(&ci, n_tiles, OC, IC,
                             1 /*Ksections*/, 1 /*nbatches*/, 1 /*nmulti*/,
                             false /*indirect_input*/, {}, /*no activation*/
                             1 /*maxthreads*/,
                             false /*fixed_format*/, false /*fast_mode*/, &cfg);
+#endif
 
+#if defined(ARM_GEMM_NEW_API)
+    // 53.1.0: gemm() no longer defaults Tret to Tlop -- pass it explicitly.
+    auto gemm = arm_gemm::gemm<float, float, float>(args);
+#else
     auto gemm = arm_gemm::gemm<float, float>(args);
+#endif
     if (!gemm)
     {
         // Strategy selection failed (shouldn't happen) — fall back to naive.
@@ -326,7 +343,14 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
 
     // Pre-transpose B (=V, OCxIC row-major) into the cached per-thread buffer.
     const size_t bsz = gemm->get_B_pretransposed_array_size();
+#if defined(ARM_GEMM_NEW_API)
+    // 53.1.0: pretranspose_B_array takes a trailing 'transposed' flag. B is
+    // row-major NxK here (V, ld=IC) -- the non-transposed case, which the SVE
+    // interleaved/hybrid kernels require (std_transforms_sve asserts it).
+    gemm->pretranspose_B_array(pretrans.ensure(bsz), V, IC, 0, false);
+#else
     gemm->pretranspose_B_array(pretrans.ensure(bsz), V, IC, 0);
+#endif
     gemm->set_pretransposed_B_data(pretrans.p);
 
     gemm->set_arrays(U, IC, 0, 0,    // A: MxK, ld=IC

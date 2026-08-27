@@ -1,8 +1,25 @@
 # arm_gemm JIT 集成构建指南（920F）
 
-Winograd GEMM 改用 arm_gemm（ACL 23.11 内嵌版）fp32-SVE 子集，替代 OpenBLAS 1 线程。
+Winograd GEMM 改用 arm_gemm（ACL 内嵌版，23.11 / 53.1.0 均可）fp32-SVE 子集，替代 OpenBLAS 1 线程。
 arm_gemm 是 ARM 手写的 SVE/NEON 高性能 GEMM（每个内核 ~2000 行汇编），其 SVE 混合内核
 正是为 920F（SVE-512, A76 类核心）这类芯片调优的。
+
+## 版本兼容（23.11 vs 53.1.0）
+
+CMake 自动探测两种布局，无需手改：
+
+| | 23.11 | 53.1.0 |
+|---|---|---|
+| arm_gemm.hpp | `src/cpu/kernels/assembly/` | `src/cpu/kernels/assembly/arm_gemm/` |
+| misc-sve.cpp | 存在 | **已并入 misc.cpp**（不再单独编译） |
+| `GemmArgs` | 13 参数 | **多了 `accumulate`**（cfg 前） |
+| `pretranspose_B_array` | 4 参数 | **多了尾部 `transposed` bool**（无默认值） |
+| `gemm<T,T>()` | `Tret=Tlop` 默认 | **必须显式 `gemm<T,T,T>()`** |
+
+检测到新布局时 CMake 定义 `ARM_GEMM_NEW_API`，驱动自动用新签名
+（见 `src/winograd_conv.cpp` arm_gemm_driver 的 `#if defined(ARM_GEMM_NEW_API)`）。
+若在 53.1.0 上误用了旧签名：`&cfg` 会错位绑定到 `accumulate`（变成每次都累加、
+filter 失效），pretranspose 4 参调用直接编译失败。x86 上已用 53.1.0 头文件做过 API 类型检查。
 
 ## 改了什么
 
@@ -17,32 +34,34 @@ arm_gemm 是 ARM 手写的 SVE/NEON 高性能 GEMM（每个内核 ~2000 行汇�
 ## 920F 上构建
 
 ```bash
-# 1) ACL 23.11 源码在 920F 上的路径（本仓库只引用它，不提交它）
+# 1) ACL 源码在 920F 上的路径（本仓库只引用它，不提交它）。23.11 或 53.1.0 均可：
 git clone --depth 1 --branch v23.11 https://github.com/ARM-software/ComputeLibrary.git
-# 或从本地已有目录指定
+# 或已有 53.1.0：/workspace/.../ComputeLibrary-53.1.0
 
-# 2) 配置 + 编译
-cd winograd_conv
+# 2) 先 git pull 拿最新 master（含 swish_sve 存在性守卫 + 53.1.0 适配）
+cd winograd_conv && git pull
+
+# 3) 配置 + 编译
 mkdir -p build && cd build
 cmake .. \
   -DCMAKE_BUILD_TYPE=Release \
   -DENABLE_SVE=ON \
   -DENABLE_OPENMP=ON \
   -DUSE_ARM_GEMM=ON \
-  -DARM_GEMM_ROOT=/path/to/ComputeLibrary-23.11/ComputeLibrary-23.11
+  -DARM_GEMM_ROOT=/workspace/.../ComputeLibrary-53.1.0   # 或 23.11 路径
 make -j$(nproc)
 
-# 3) 确认 SVE 内核被选中（一次打印）
+# 4) 确认 SVE 内核被选中（一次打印）
 WINO_GEMM_DEBUG=1 ./test_winograd
 #   期望输出形如:
 #   [winograd_gemm] arm_gemm selected: sve_hybrid_fp32_mla_6x4VL (M=.. N=.. K=..)
 #   （也可能选 sve_interleaved_fp32_mla_8x3VL / sve_hybrid_fp32_mla_8x1VL，都是 SVE）
 
-# 4) 正确性门（必须全 PASS）
+# 5) 正确性门（必须全 PASS）
 ./test_winograd --verify        # 若支持该参数；否则按 tests/README 的验证方式
 ./bench_winograd --verify ...
 
-# 5) 性能 A/B（arm_gemm vs OpenBLAS）
+# 6) 性能 A/B（arm_gemm vs OpenBLAS）
 #    a) 无 USE_ARM_GEMM 的 OpenBLAS 基线：-DUSE_OPENBLAS=ON
 #    b) arm_gemm：-DUSE_ARM_GEMM=ON
 #    两边同样形状、同样 --threads/--repeats，对比端到端 ms。
@@ -58,8 +77,9 @@ WINO_GEMM_DEBUG=1 ./test_winograd
   arm_gemm 自己选。
 - **CPUInfo 可调**：`WINO_GEMM_L1_KB` / `WINO_GEMM_L2_KB` 覆盖缓存大小假设。
 - **首次在 920F 编译可能有个别汇编/宏问题**：本机是 x86 无法编译 AArch64 SVE，驱动已按
-  ACL 23.11 头文件逐行核对并在 x86 上做过 API 类型检查（`build/arm_gemm_driver_check.cpp`）。
-  若有编译错误，贴出来我修。
+  ACL 23.11 / 53.1.0 头文件逐行核对，并分别在两套布局（旧签名 / `ARM_GEMM_NEW_API`）
+  下做过 x86 上的 API 类型检查（`build/arm_gemm_driver_check.cpp`，用
+  `-DARM_GEMM_NEW_API` 切换新签名）。若有编译错误，贴出来我修。
 
 ## 为什么不用「手写 SVE GEMM」替代 arm_gemm
 
