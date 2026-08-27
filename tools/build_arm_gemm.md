@@ -15,11 +15,19 @@ CMake 自动探测两种布局，无需手改：
 | `GemmArgs` | 13 参数 | **多了 `accumulate`**（cfg 前） |
 | `pretranspose_B_array` | 4 参数 | **多了尾部 `transposed` bool**（无默认值） |
 | `gemm<T,T>()` | `Tret=Tlop` 默认 | **必须显式 `gemm<T,T,T>()`** |
+| 头文件 `<string>` | 传递包含偶然覆盖 | **arm_gemm 头文件自己缺 `#include <string>`**（见下） |
 
 检测到新布局时 CMake 定义 `ARM_GEMM_NEW_API`，驱动自动用新签名
 （见 `src/winograd_conv.cpp` arm_gemm_driver 的 `#if defined(ARM_GEMM_NEW_API)`）。
 若在 53.1.0 上误用了旧签名：`&cfg` 会错位绑定到 `accumulate`（变成每次都累加、
 filter 失效），pretranspose 4 参调用直接编译失败。x86 上已用 53.1.0 头文件做过 API 类型检查。
+
+> **53.1.0 的 `<string>` 缺失**：`arm_gemm.hpp`（`KernelDescription.name`、
+> `GemmConfig.filter`）和 `arm_common/internal/utils.hpp`（`get_type_name`）都用
+> `std::string`，但整个头文件链都不 `#include <string>`，只经 `<memory>`→`iosfwd`
+> 拿到前向声明 → 几十个「incomplete type」级联报错。CMake 用
+> `target_compile_options(arm_gemm PRIVATE -include string)` 强制预包含修复，
+> 不动 ACL 源码。（23.11 靠传递包含侥幸通过。）
 
 ## 改了什么
 

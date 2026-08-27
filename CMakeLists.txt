@@ -108,7 +108,11 @@ if(USE_ARM_GEMM)
     endif()
     add_library(arm_gemm STATIC ${ARM_GEMM_SRCS})
     # The SVE kernel asm is large; O2 keeps the build sane (O3 gains nothing).
-    target_compile_options(arm_gemm PRIVATE -O2)
+    # ACL >= 24.x arm_gemm headers use std::string without including <string>
+    # (arm_gemm.hpp: KernelDescription.name / GemmConfig.filter; arm_common/
+    # internal/utils.hpp: get_type_name). Force-include it so the embedded
+    # sources compile standalone on the 920F.
+    target_compile_options(arm_gemm PRIVATE -O2 -include string)
     # Put our shim first so it shadows any arm_compute headers on the machine.
     target_include_directories(arm_gemm PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
