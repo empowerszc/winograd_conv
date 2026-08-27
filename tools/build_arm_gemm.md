@@ -132,6 +132,30 @@ c++ --version; grep -m1 "COMPILER" CMakeCache.txt
 判读要点：测试输出里 stderr 的 VERIFY 行先于 stdout 出现属正常缓冲现象；
 VERBOSE 内核表的 `est=0 ... <== SELECTED` 组合即短路选中的直接证据。
 
+## 根因与修复（2026-08-27 定位）
+
+**现象**：53.1.0 下所有 SVE 引擎全错；identity 权重（V 沿 K 常数）反而 PASS；
+NAIVE 对照全对。`--bconst` 裸 GEMM 对照同坏 ⇒ 排除 K 排列类。
+
+**定位手段**：`./arm_gemm_repro --dump`（M=1 N=3 K=3，哨兵保护区）。三个输出方程
+被精确解出：
+
+    got[t][n] = Σ_k U[t][k] * V_flat[k*N + n]     （B 被按列向量消费）
+
+**根因**：现代 arm_gemm（≥24.x / 53.1.0）对 B 的布局约定是「调用方已按 K 主序
+存放」，即元素 (n,k) 位于 `ptr[k*ldb + n]`（等价于传入 Bᵀ）。此前驱动传的是行主序
+N×K 的 V（ld=K），引擎把它的**列**当成 B 行用了 ⇒ U·V[:,n] 而非 U·V[n,:]。
+ACL 自家流水线在进 arm_gemm 前有 Interleave/Transpose 内核预打包，掩盖了该约定。
+
+**修复**：驱动内把每个 `V_slice` 打包成 Bt（K×N，ld=OC）后再交给
+pretranspose_B_array / set_arrays（thread_local 缓冲，无锁安全）。
+环境开关 `WINO_GEMM_BTRANS=0` 可回退旧行为做 A/B。
+后续优化：把该转置上提到权重变换阶段（整次卷积一次），消除每 ts_idx 一次的打包。
+
+**工具链事实**：920F 构建用毕昇 Clang 17.0.6（BiSheng Enterprise 4.2.0.2.B002），
+SVE 可变长（SVE_BITS=0），fp16/bf16/i8mm 开、f32mm 关。WINO_GEMM_DEBUG 首行会打印
+这些信息（banner），无需再查 flags.make。
+
 已知现象记录（53.1.0, 2026-08-27）：变换单项测试与 identity-kernel 端到端均
 PASS，随机权重即错且误差随 IC 近似线性增长；同二进制多次运行失败模式不同
 （一次恒等/随机双双通过后手动管线错误 0.99，另一次 Manual=GEMM 正确而整管

@@ -325,6 +325,50 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
     static arm_compute::CPUInfo &ci = arm_compute::CPUInfo::get();
     thread_local Buf pretrans;
     thread_local Buf work;
+    // Transposed staging for B. On-device evidence (2026-08-27, --dump
+    // fingerprint): the >=24.x/53.1.0 modern arm_gemm consumes B expecting
+    // element (n,k) at ptr[k*ldb + n] -- i.e. the CALLER provides B already
+    // transposed to K-major ("Bt", shape KxN, ld=N). Handing it row-major
+    // NxK with ld=K made every SVE engine compute u . V[:,n] instead of
+    // u . V[n,:] (exact match on all three equations of the M=1 N=3 K=3
+    // dump). Pack Bt here per call until the transpose moves upstream into
+    // the weight-transform stage (future perf work).
+    //   WINO_GEMM_BTRANS=0 falls back to the old (wrong on 53.1.0) layout --
+    // kept purely as an A/B diagnostic switch.
+    static const bool b_transposed = [] {
+        const char *e = getenv("WINO_GEMM_BTRANS");
+        return e == nullptr || e[0] == '\0' || strcmp(e, "0") != 0;
+    }();
+    // Per-thread grow-only staging (the driver runs inside the outer OpenMP
+    // parallel region, so process-global staging would race).
+    struct FBuf { float *p = nullptr; size_t cap = 0; ~FBuf(){ free(p); } };
+    thread_local FBuf bt;
+
+    float *B_arg      = const_cast<float *>(V);
+    int    B_ld       = IC;
+
+    if (b_transposed)
+    {
+        const size_t need = static_cast<size_t>(OC) * IC;
+        if (need > bt.cap)
+        {
+            free(bt.p);
+            bt.p   = static_cast<float *>(malloc(need * sizeof(float)));
+            bt.cap = need;
+        }
+        if (bt.p != nullptr)
+        {
+            // Bt[k*OC + n] = V[n*IC + k]
+            for (int ic = 0; ic < IC; ic++)
+                for (int oc = 0; oc < OC; oc++)
+                    bt.p[static_cast<size_t>(ic) * OC + oc] =
+                        V[static_cast<size_t>(oc) * IC + ic];
+            B_arg = bt.p;
+            B_ld  = OC;
+        }
+        // malloc failure => keep legacy layout (VERIFY will flag it);
+        // realistically unreachable at these sizes.
+    }
 
     // Force SVE fp32 kernels (the reason to use arm_gemm on SVE-512 hardware),
     // overridable for diagnosis ("" lets arm_gemm pick NEON ones too).
@@ -427,20 +471,20 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
         }
     }
 
-    // Pre-transpose B (=V, OCxIC row-major) into the cached per-thread buffer.
+    // Pre-transpose B into the cached per-thread buffer.
     const size_t bsz = gemm->get_B_pretransposed_array_size();
 #if defined(ARM_GEMM_NEW_API)
-    // 53.1.0: pretranspose_B_array takes a trailing 'transposed' flag. B is
-    // row-major NxK here (V, ld=IC) -- the non-transposed case, which the SVE
-    // interleaved/hybrid kernels require (std_transforms_sve asserts it).
-    gemm->pretranspose_B_array(pretrans.ensure(bsz), V, IC, 0, false);
+    // 53.1.0: pretranspose_B_array takes a trailing 'transposed' flag; the SVE
+    // StdTransformsSVE path asserts !transposed. The input layout expectation
+    // (empirically established -- see B_arg comment) is K-major "Bt".
+    gemm->pretranspose_B_array(pretrans.ensure(bsz), B_arg, B_ld, 0, false);
 #else
-    gemm->pretranspose_B_array(pretrans.ensure(bsz), V, IC, 0);
+    gemm->pretranspose_B_array(pretrans.ensure(bsz), B_arg, B_ld, 0);
 #endif
     gemm->set_pretransposed_B_data(pretrans.p);
 
     gemm->set_arrays(U, IC, 0, 0,    // A: MxK, ld=IC
-                     V, IC, 0,       // B: NxK, ld=IC (ignored; pretransposed)
+                     B_arg, B_ld, 0, // B: K-major Bt, ld=OC (or legacy V/IC)
                      M, OC, 0, 0,    // C: MxN, ld=OC
                      nullptr, 0);    // no bias
 
