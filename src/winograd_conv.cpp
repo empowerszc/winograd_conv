@@ -30,6 +30,7 @@ extern "C" void openblas_set_num_threads(int);
 // <string> must come first: arm_gemm.hpp uses std::string without including it.
 #include <string>
 #include <atomic>
+#include <mutex>
 #include <arm_gemm.hpp>
 // arm_gemm usage:
 //   Build: -DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/ComputeLibrary-23.11 or -53.1.0
@@ -39,6 +40,7 @@ extern "C" void openblas_set_num_threads(int);
 //   For Winograd: each GEMM is (n_tiles × IC) × (OC × IC)^T → (n_tiles × OC),
 //   which is arm_gemm's native A(M×K)·B(N×K)^T layout with A=U, B=V.
 //   Modern API: arm_gemm::gemm<fp32>(GemmArgs) factory + pretranspose_B_array.
+#include "gemm_implementation.hpp"      // get_compatible_kernels (debug print)
 //
 // Diagnostics env vars (all optional, defaults preserve plain behavior):
 //   WINO_GEMM_NAIVE=1     skip arm_gemm, use the scalar triple loop (baseline)
@@ -46,6 +48,13 @@ extern "C" void openblas_set_num_threads(int);
 //                         arm_gemm choose freely, incl. NEON kernels)
 //   WINO_GEMM_VERIFY_GEMM=1  after each execute() recompute with the naive
 //                         loop and report max|diff| for the first 10 mismatches
+//   WINO_GEMM_DEBUG=1     once per distinct (M,N,K): list all compatible
+//                         kernels marking the selected one. NOTE: in ACL
+//                         >=24.x a kernel WITHOUT a cycle estimator reports
+//                         estimate=0 and find_implementation() treats 0 as
+//                         "select immediately" -- so e.g. filter="sve_" +
+//                         Nsize<12 deterministically picks
+//                         sve_hybrid_fp32_mla_8x1VL regardless of fitness.
 #endif
 
 // Include ISA-specific transform implementations
@@ -352,26 +361,31 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
         return;
     }
 
-    // One-time debug: print which arm_gemm path was requested. Exactly one
-    // thread wins the fetch_add race and prints; the old "static bool
-    // printed" lost races under OpenMP and spammed the line per thread.
+    // Debug: once per distinct (M,N,K) shape, dump the compatible-kernel list
+    // with the selected one marked. Exactly one thread wins the fetch_add per
+    // shape; the old single "static bool" spammed the line once per OpenMP
+    // thread. get_compatible_kernels() marks is_default via the same
+    // find_implementation() the factory uses, so this shows the ACTUAL pick.
     static const bool debug = (getenv("WINO_GEMM_DEBUG") != nullptr);
     if (debug)
     {
-        static std::atomic<int> printed{0};
-        if (printed.fetch_add(1) == 0)
+        // Serialize the shape-key check + printing (debug-only path).
+        static std::mutex   print_mu;
+        static std::string  last_shape;
+        std::lock_guard<std::mutex> lk(print_mu);
+        const std::string key = std::to_string(n_tiles) + "x" +
+                                std::to_string(OC) + "x" + std::to_string(IC);
+        if (key != last_shape)
         {
-#if defined(ARM_GEMM_NEW_API)
-            // 53.1.0 declares get_gemm_method() but ships no definition (dead API),
-            // so the selected kernel name cannot be queried here. The SVE path is
-            // forced via cfg.filter anyway -- print the filter instead.
-            fprintf(stderr, "[winograd_gemm] arm_gemm filter='%s' (M=%d N=%d K=%d)\n",
-                    cfg.filter.c_str(), n_tiles, OC, IC);
-#else
-            const arm_gemm::KernelDescription kd = arm_gemm::get_gemm_method<float, float>(args);
-            fprintf(stderr, "[winograd_gemm] arm_gemm selected: %s (M=%d N=%d K=%d)\n",
-                    kd.name.c_str(), n_tiles, OC, IC);
-#endif
+            last_shape = key;
+            const auto kds = arm_gemm::get_compatible_kernels<float, float, float>(
+                args, arm_gemm::Nothing());
+            fprintf(stderr, "[winograd_gemm] filter='%s' shapes M=%d N=%d K=%d -- %zu kernels:\n",
+                    cfg.filter.c_str(), n_tiles, OC, IC, kds.size());
+            for (const auto &kd : kds)
+                fprintf(stderr, "    %-42s est=%-10llu %s\n", kd.name.c_str(),
+                        static_cast<unsigned long long>(kd.cycle_estimate),
+                        kd.is_default ? "<== SELECTED" : "");
         }
     }
 

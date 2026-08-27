@@ -94,30 +94,33 @@ test_winograd 大面积 FAIL（误差随 IC 增长、跨次运行不稳定）」
 「GEMM 层自身算错 / 并发状态污染」。把它临时加进 CMake 编一个
 `arm_gemm_repro` 目标，或按 test_winograd 同款链接参数手工编。
 
-920F 上定位顺序（依次贴回输出）：
+920F 上定位顺序（2026-08-27 实测进度：①NAIVE 对照已全对 ⇒ 管线其余部分无问题；
+②VERIFY_GEMM 显示连 M=1 N=3 K=3 的极小 GEMM 都错且逐位可复现 ⇒ 问题锁定在
+arm_gemm 执行层。注意：ACL>=24.x 里没有 cycle_estimator 的内核 estimate=0，
+find_implementation() 见 0 即「立即选中」——filter="sve_" 时 N<12 的 GEMM 一律
+落到 sve_hybrid_fp32_mla_8x1VL，与适不适配无关）：
 
 ```bash
-# 1) 对照组：关 arm_gemm —— 若仍 FAIL 则问题根本不在 GEMM 层
-WINO_GEMM_NAIVE=1 ./test_winograd --sve --nhwc
+# 0) 内核选择可视化（每个不同 M,N,K 打一次候选表, 标出实际选中者）
+WINO_GEMM_DEBUG=1 ./test_winograd --f44 --sve 2>&1 | grep -A8 "shapes M="
 
-# 2) GEMM 自检：定位是 GEMM 段算错还是外围段错、误差量级
-WINO_GEMM_VERIFY_GEMM=1 ./test_winograd --f44 --sve
-
-# 3) 解除 SVE 强制：NEON 内核对 vs SVE 内核错 ⇒ 指向 SVE 内核子集编译
-WINO_GEMM_FILTER= ./test_winograd --f44 --sve
-
-# 4) 最小 GEMM 复现（无变换）：单线程 & 多线程各自哪些 shape 错
-./arm_gemm_repro                        # 默认 shape 扫描, 单线程
-./arm_gemm_repro --threads 16           # 同上, 16 路并发(暴露静态/共享态污染)
-
-# 5) 若 #3 下 NEON 全对而 SVE 全错：降级验证内核源文件编译选项
-#    确认 arm_gemm 目标拿到了 -march 含 sve 且 ARM_COMPUTE_ENABLE_SVE：
-grep -m1 "flags" CMakeFiles/arm_gemm.dir/flags.make
-grep -m1 "ARM_COMPUTE_ENABLE_SVE" CMakeFiles/arm_gemm.dir/flags.make
-
-# 6) 终极对照：换 ACL 23.11 重编同一份驱动（CMake 兼容两版）
-#    23.11 对 / 53.1.0 错 ⇒ 问题锁定在 53.1.0 库子集的适配，非驱动逻辑。
+# 1) 按引擎二分（不用重编, filter 直接指定具体内核名）：
+for f in sve_hybrid_fp32_mla_6x4VL sve_interleaved_fp32_mla_8x3VL \
+         sve_hybrid_fp32_mla_8x1VL ""; do
+  echo "== filter='$f'"; WINO_GEMM_FILTER="$f" ./test_winograd --f44 2>/dev/null | tail -2
+done
+#    判读: 某 engine 下 PASS⇒只有它被坏配置坑; 全 SVE 坏而 ""(自动, 可能选 NEON)好
+#          ⇒ SVE 子集共性错误; 仅 8x1VL 坏⇒无估计器短路选中它的问题(N<12 时)。
+#
+# 2) 若确认与「哪个引擎」无关（各引擎同坏）：换 ACL 23.11 重编同一份驱动 A/B，
+#    23.11 对 / 53.1.0 错 ⇒ 问题锁定在 53.1.0 库子集适配；
+#    并检查实际编译开关：
+grep -m2 "CXX_FLAGS\|DEFINES" CMakeFiles/arm_gemm.dir/flags.make
+c++ --version; grep -m1 "COMPILER" CMakeCache.txt
 ```
+
+判读要点：测试输出里 stderr 的 VERIFY 行先于 stdout 出现属正常缓冲现象；
+VERBOSE 内核表的 `est=0 ... <== SELECTED` 组合即短路选中的直接证据。
 
 已知现象记录（53.1.0, 2026-08-27）：变换单项测试与 identity-kernel 端到端均
 PASS，随机权重即错且误差随 IC 近似线性增长；同二进制多次运行失败模式不同
