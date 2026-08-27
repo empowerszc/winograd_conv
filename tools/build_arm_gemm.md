@@ -77,6 +77,55 @@ WINO_GEMM_DEBUG=1 ./test_winograd
 #    两边同样形状、同样 --threads/--repeats，对比端到端 ms。
 ```
 
+## 数值错误排查（arm_gemm 结果不对时）
+
+驱动内置诊断开关（默认全关，不改运行行为），2026-08 为排查「接入 53.1.0 后
+test_winograd 大面积 FAIL（误差随 IC 增长、跨次运行不稳定）」而加：
+
+| 开关 | 作用 |
+|---|---|
+| `WINO_GEMM_NAIVE=1` | 完全绕过 arm_gemm，走标量三重循环（对照组：其余管线应 22/22 PASS） |
+| `WINO_GEMM_FILTER=<子串>` | 覆盖内核过滤串；置空 `""` 让 arm_gemm 自由选（含 NEON 内核），可逐个试 `sve_hybrid_fp32_mla_6x4VL` 等具体内核名 |
+| `WINO_GEMM_VERIFY_GEMM=1` | 每次 execute 后用标量循环复算并比对，前 10 处 mismatch 打到 stderr（慢一倍，仅诊断用） |
+| `WINO_GEMM_DEBUG=1` | 打印 filter/M/N/K（每进程一次，已修 OpenMP 多线程重复打印竞态） |
+
+另配独立最小复现工具（不进 git，`build/arm_gemm_repro.cpp`）：直接反复调用
+`winograd_gemm()` 与标量参考比对，不带任何变换/OpenMP 流水线，用于隔离
+「GEMM 层自身算错 / 并发状态污染」。把它临时加进 CMake 编一个
+`arm_gemm_repro` 目标，或按 test_winograd 同款链接参数手工编。
+
+920F 上定位顺序（依次贴回输出）：
+
+```bash
+# 1) 对照组：关 arm_gemm —— 若仍 FAIL 则问题根本不在 GEMM 层
+WINO_GEMM_NAIVE=1 ./test_winograd --sve --nhwc
+
+# 2) GEMM 自检：定位是 GEMM 段算错还是外围段错、误差量级
+WINO_GEMM_VERIFY_GEMM=1 ./test_winograd --f44 --sve
+
+# 3) 解除 SVE 强制：NEON 内核对 vs SVE 内核错 ⇒ 指向 SVE 内核子集编译
+WINO_GEMM_FILTER= ./test_winograd --f44 --sve
+
+# 4) 最小 GEMM 复现（无变换）：单线程 & 多线程各自哪些 shape 错
+./arm_gemm_repro                        # 默认 shape 扫描, 单线程
+./arm_gemm_repro --threads 16           # 同上, 16 路并发(暴露静态/共享态污染)
+
+# 5) 若 #3 下 NEON 全对而 SVE 全错：降级验证内核源文件编译选项
+#    确认 arm_gemm 目标拿到了 -march 含 sve 且 ARM_COMPUTE_ENABLE_SVE：
+grep -m1 "flags" CMakeFiles/arm_gemm.dir/flags.make
+grep -m1 "ARM_COMPUTE_ENABLE_SVE" CMakeFiles/arm_gemm.dir/flags.make
+
+# 6) 终极对照：换 ACL 23.11 重编同一份驱动（CMake 兼容两版）
+#    23.11 对 / 53.1.0 错 ⇒ 问题锁定在 53.1.0 库子集的适配，非驱动逻辑。
+```
+
+已知现象记录（53.1.0, 2026-08-27）：变换单项测试与 identity-kernel 端到端均
+PASS，随机权重即错且误差随 IC 近似线性增长；同二进制多次运行失败模式不同
+（一次恒等/随机双双通过后手动管线错误 0.99，另一次 Manual=GEMM 正确而整管
+线乱数 5 万+）⇒ 高度怀疑非确定性行为（并发/静态状态/内核选择变化），而非
+确定性参数绑定错误——驱动的全部 API 调用已逐一对照 ACL 自己的
+`CpuGemmAssemblyDispatch.cpp` 用法核实。
+
 ## 预期与注意事项
 
 - **单线程 GEMM/次调用**：`maxthreads=1` 与 OpenBLAS 基线（`openblas_set_num_threads(1)`）同构，
@@ -92,6 +141,12 @@ WINO_GEMM_DEBUG=1 ./test_winograd
   `-DARM_GEMM_NEW_API` 切换新签名）。若有编译错误，贴出来我修。
 
 ## 为什么不用「手写 SVE GEMM」替代 arm_gemm
+
+arm_gemm 的 SVE 混合内核本身就是 ARM 手写的高性能 SVE GEMM（汇编级调优），
+我们手写一份大概率前期更慢、且无法复用它的多 shape 选择逻辑。真正的优化点是：
+把 V 的预转置从「每次调用」变为「每次卷积一次」——这已列入优化计划（cache V）。
+若实测后 arm_gemm 的 per-call 开销仍显著，再考虑把预转置并入权重变换阶段或手写。
+（详见 why_faster §10 优化路径。）
 
 arm_gemm 的 SVE 混合内核本身就是 ARM 手写的高性能 SVE GEMM（汇编级调优），
 我们手写一份大概率前期更慢、且无法复用它的多 shape 选择逻辑。真正的优化点是：

@@ -29,15 +29,23 @@ extern "C" void openblas_set_num_threads(int);
 #ifdef USE_ARM_GEMM
 // <string> must come first: arm_gemm.hpp uses std::string without including it.
 #include <string>
+#include <atomic>
 #include <arm_gemm.hpp>
 // arm_gemm usage:
-//   Build: -DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/ComputeLibrary-23.11/ComputeLibrary-23.11
+//   Build: -DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=/path/to/ComputeLibrary-23.11 or -53.1.0
 //   The embedded arm_gemm copy is compiled standalone (see CMakeLists.txt):
 //   we shadow arm_compute/core/CPP/CPPTypes.h with our own minimal header so
 //   no arm_compute dependency is pulled in.
 //   For Winograd: each GEMM is (n_tiles × IC) × (OC × IC)^T → (n_tiles × OC),
 //   which is arm_gemm's native A(M×K)·B(N×K)^T layout with A=U, B=V.
 //   Modern API: arm_gemm::gemm<fp32>(GemmArgs) factory + pretranspose_B_array.
+//
+// Diagnostics env vars (all optional, defaults preserve plain behavior):
+//   WINO_GEMM_NAIVE=1     skip arm_gemm, use the scalar triple loop (baseline)
+//   WINO_GEMM_FILTER=f    override the kernel filter substring ("" = let
+//                         arm_gemm choose freely, incl. NEON kernels)
+//   WINO_GEMM_VERIFY_GEMM=1  after each execute() recompute with the naive
+//                         loop and report max|diff| for the first 10 mismatches
 #endif
 
 // Include ISA-specific transform implementations
@@ -291,13 +299,27 @@ struct Buf
 
 void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
 {
+    // Env knobs are read once per process (function-local static init is
+    // thread-safe under OpenMP; the branch below is negligible per call).
+    static const bool use_naive = [] {
+        const char *e = getenv("WINO_GEMM_NAIVE");
+        return e != nullptr && e[0] != '\0' && strcmp(e, "0") != 0;
+    }();
+    if (use_naive)
+    {
+        winograd_gemm_naive(U, V, M, n_tiles, OC, IC);
+        return;
+    }
+
     static arm_compute::CPUInfo &ci = arm_compute::CPUInfo::get();
     thread_local Buf pretrans;
     thread_local Buf work;
 
-    // Force SVE fp32 kernels (the reason to use arm_gemm on SVE-512 hardware).
+    // Force SVE fp32 kernels (the reason to use arm_gemm on SVE-512 hardware),
+    // overridable for diagnosis ("" lets arm_gemm pick NEON ones too).
+    static const char *filter_env = getenv("WINO_GEMM_FILTER"); // may be nullptr
     arm_gemm::GemmConfig cfg;
-    cfg.filter = "sve_";
+    cfg.filter = filter_env ? filter_env : "sve_";
 
 #if defined(ARM_GEMM_NEW_API)
     // ACL 53.1.0: GemmArgs gained an 'accumulate' param before cfg. Without
@@ -330,23 +352,27 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
         return;
     }
 
-    // One-time debug: print which arm_gemm kernel was selected.
+    // One-time debug: print which arm_gemm path was requested. Exactly one
+    // thread wins the fetch_add race and prints; the old "static bool
+    // printed" lost races under OpenMP and spammed the line per thread.
     static const bool debug = (getenv("WINO_GEMM_DEBUG") != nullptr);
-    static bool printed = false;
-    if (debug && !printed)
+    if (debug)
     {
+        static std::atomic<int> printed{0};
+        if (printed.fetch_add(1) == 0)
+        {
 #if defined(ARM_GEMM_NEW_API)
-        // 53.1.0 declares get_gemm_method() but ships no definition (dead API),
-        // so the selected kernel name cannot be queried here. The SVE path is
-        // forced via cfg.filter anyway -- print the filter instead.
-        fprintf(stderr, "[winograd_gemm] arm_gemm selected: filter=%s (M=%d N=%d K=%d)\n",
-                cfg.filter.c_str(), n_tiles, OC, IC);
+            // 53.1.0 declares get_gemm_method() but ships no definition (dead API),
+            // so the selected kernel name cannot be queried here. The SVE path is
+            // forced via cfg.filter anyway -- print the filter instead.
+            fprintf(stderr, "[winograd_gemm] arm_gemm filter='%s' (M=%d N=%d K=%d)\n",
+                    cfg.filter.c_str(), n_tiles, OC, IC);
 #else
-        const arm_gemm::KernelDescription kd = arm_gemm::get_gemm_method<float, float>(args);
-        fprintf(stderr, "[winograd_gemm] arm_gemm selected: %s (M=%d N=%d K=%d)\n",
-                kd.name.c_str(), n_tiles, OC, IC);
+            const arm_gemm::KernelDescription kd = arm_gemm::get_gemm_method<float, float>(args);
+            fprintf(stderr, "[winograd_gemm] arm_gemm selected: %s (M=%d N=%d K=%d)\n",
+                    kd.name.c_str(), n_tiles, OC, IC);
 #endif
-        printed = true;
+        }
     }
 
     // Pre-transpose B (=V, OCxIC row-major) into the cached per-thread buffer.
@@ -380,6 +406,40 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
                               {0, win.get_size(4)},
                               {0, win.get_size(5)}};
     gemm->execute(coord, arm_gemm::ndcoord_t{}, 0);
+
+    // Optional GEMM-stage self-check: recompute with the naive loop and
+    // report max|arm_gemm - naive| for the first few mismatching calls.
+    // Pure diagnostics (WINO_GEMM_VERIFY_GEMM=1) -- doubles GEMM work.
+    static const bool verify = [] {
+        const char *e = getenv("WINO_GEMM_VERIFY_GEMM");
+        return e != nullptr && e[0] != '\0' && strcmp(e, "0") != 0;
+    }();
+    if (verify)
+    {
+        std::vector<float> ref(static_cast<size_t>(n_tiles) * OC);
+        winograd_gemm_naive(U, V, ref.data(), n_tiles, OC, IC);
+
+        float maxerr = 0.0f;
+        int   bad_i  = -1;
+        bool  nonfinite = false;
+        for (int i = 0; i < n_tiles * OC; i++)
+        {
+            if (!std::isfinite(M[i])) { nonfinite = true; bad_i = i; break; }
+            const float err = std::fabs(M[i] - ref[i]);
+            if (err > maxerr) { maxerr = err; bad_i = i; }
+        }
+        if (nonfinite ||
+            maxerr > 1e-3f * std::max(1.0f, std::fabs(ref[bad_i < 0 ? 0 : bad_i])))
+        {
+            static std::atomic<int> reported{0};
+            if (reported.fetch_add(1) < 10)
+                fprintf(stderr,
+                        "[winograd_gemm VERIFY] MISMATCH M=%d N=%d K=%d: "
+                        "max|diff|=%.6g at flat %d (got=%.6g want=%.6g)\n",
+                        n_tiles, OC, IC, maxerr, bad_i,
+                        M[bad_i], ref[bad_i]);
+        }
+    }
 }
 } // namespace arm_gemm_driver
 #endif // USE_ARM_GEMM
