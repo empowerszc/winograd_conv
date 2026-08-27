@@ -40,7 +40,9 @@ extern "C" void openblas_set_num_threads(int);
 //   For Winograd: each GEMM is (n_tiles × IC) × (OC × IC)^T → (n_tiles × OC),
 //   which is arm_gemm's native A(M×K)·B(N×K)^T layout with A=U, B=V.
 //   Modern API: arm_gemm::gemm<fp32>(GemmArgs) factory + pretranspose_B_array.
+#if defined(ARM_GEMM_NEW_API)
 #include "gemm_implementation.hpp"      // get_compatible_kernels (debug print)
+#endif
 //
 // Diagnostics env vars (all optional, defaults preserve plain behavior):
 //   WINO_GEMM_NAIVE=1     skip arm_gemm, use the scalar triple loop (baseline)
@@ -373,11 +375,43 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
         static std::mutex   print_mu;
         static std::string  last_shape;
         std::lock_guard<std::mutex> lk(print_mu);
+        // First line ever: build/toolchain banner (replaces asking the user
+        // for flags.make / c++ --version when debugging remotely).
+        static const bool banner = [] {
+            int sve = 0, bits = 0, fp16 = 0, bf16 = 0, i8mm = 0, f32mm = 0;
+#if defined(__ARM_FEATURE_SVE)
+            sve = 1;
+#endif
+#ifdef __ARM_FEATURE_SVE_BITS
+            bits = __ARM_FEATURE_SVE_BITS;
+#endif
+#if defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
+            fp16 = 1;
+#endif
+#if defined(__ARM_FEATURE_BF16_VECTOR_ARITHMETIC)
+            bf16 = 1;
+#endif
+#if defined(__ARM_FEATURE_MATMUL_INT8)
+            i8mm = 1;
+#endif
+#if defined(__ARM_FEATURE_MATMUL_FP32)
+            f32mm = 1;
+#endif
+            fprintf(stderr,
+                    "[winograd_gemm] build: %s | SVE=%d SVE_BITS=%d "
+                    "fp16=%d bf16=%d i8mm=%d f32mm=%d\n",
+                    __VERSION__, sve, bits, fp16, bf16, i8mm, f32mm);
+            return true;
+        }();
+        (void)banner;
         const std::string key = std::to_string(n_tiles) + "x" +
                                 std::to_string(OC) + "x" + std::to_string(IC);
         if (key != last_shape)
         {
             last_shape = key;
+#if defined(ARM_GEMM_NEW_API)
+            // 53.1.0 only: get_compatible_kernels(args, Nothing()) doesn't
+            // exist in the 23.11 layout.
             const auto kds = arm_gemm::get_compatible_kernels<float, float, float>(
                 args, arm_gemm::Nothing());
             fprintf(stderr, "[winograd_gemm] filter='%s' shapes M=%d N=%d K=%d -- %zu kernels:\n",
@@ -386,6 +420,10 @@ void run(const float *U, const float *V, float *M, int n_tiles, int OC, int IC)
                 fprintf(stderr, "    %-42s est=%-10llu %s\n", kd.name.c_str(),
                         static_cast<unsigned long long>(kd.cycle_estimate),
                         kd.is_default ? "<== SELECTED" : "");
+#else
+            fprintf(stderr, "[winograd_gemm] filter='%s' shapes M=%d N=%d K=%d (23.11: no kernel list)\n",
+                    cfg.filter.c_str(), n_tiles, OC, IC);
+#endif
         }
     }
 
