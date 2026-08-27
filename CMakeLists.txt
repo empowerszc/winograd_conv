@@ -158,18 +158,28 @@ endif()
 add_executable(test_ref_vs_nchw tests/test_ref_vs_nchw.cpp)
 target_link_libraries(test_ref_vs_nchw winograd_nchw_ref winograd_conv)
 
-# Swish SVE benchmark
-add_executable(swish_sve_bench swish_sve/swish_sve_bench.cpp)
-target_include_directories(swish_sve_bench PRIVATE swish_sve)
-if(ENABLE_OPENMP)
-    target_compile_options(swish_sve_bench PRIVATE ${OpenMP_CXX_FLAGS})
-    target_link_libraries(swish_sve_bench PRIVATE ${OpenMP_CXX_LIBRARIES})
+# Swish SVE benchmark. swish_sve/ is user work that is not in git yet, so only
+# build it when the sources are actually present in this checkout (otherwise the
+# 920F clone without swish_sve/ would fail to configure).
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/swish_sve/swish_sve_bench.cpp)
+    add_executable(swish_sve_bench swish_sve/swish_sve_bench.cpp)
+    target_include_directories(swish_sve_bench PRIVATE swish_sve)
+    if(ENABLE_OPENMP)
+        target_compile_options(swish_sve_bench PRIVATE ${OpenMP_CXX_FLAGS})
+        target_link_libraries(swish_sve_bench PRIVATE ${OpenMP_CXX_LIBRARIES})
+    endif()
 endif()
 
 # Install
-install(TARGETS winograd_conv test_winograd bench_winograd profile_case swish_sve_bench
+set(INSTALL_TARGETS winograd_conv test_winograd bench_winograd profile_case)
+if(TARGET swish_sve_bench)
+    list(APPEND INSTALL_TARGETS swish_sve_bench)
+endif()
+install(TARGETS ${INSTALL_TARGETS}
         RUNTIME DESTINATION bin
         ARCHIVE DESTINATION lib
         LIBRARY DESTINATION lib)
 install(DIRECTORY include/ DESTINATION include)
-install(DIRECTORY swish_sve/ DESTINATION include/swish_sve)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/swish_sve)
+    install(DIRECTORY swish_sve/ DESTINATION include/swish_sve)
+endif()
