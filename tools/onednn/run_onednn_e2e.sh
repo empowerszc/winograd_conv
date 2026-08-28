@@ -64,6 +64,19 @@ $CXX -O3 -std=c++17 -fopenmp -I"$ROOT/include" \
     tools/onednn/onednn_e2e.cpp \
     -L"$LIBS_DIR" -Wl,-rpath,"$LIBS_DIR" -ldnnl -o build/onednn_e2e
 
+# ---- verbose 探针（首个形状，1 轮）：ONEDNN_VERBOSE 输出会混进 stdout，
+#      所以单独起一次进程、单独文件，不污染数据流；用于定位 PD 创建 OOM 时
+#      oneDNN 到底选了哪个实现（brgconv:sve_512？）、失败发生点在哪。
+probe_shp=""
+[ -f "$CSV" ] && probe_shp=$(awk 'NR>1 && $0 !~ /^#/ {print; exit}' "$CSV")
+if [ -n "$probe_shp" ]; then
+    printf 'mb,ic,ih,iw,oc,kh,kw,stride_h,stride_w,pad_h,pad_w,dil_h,dil_w,grp,count\n%s\n' \
+        "$probe_shp" > build/probe_shape.csv
+    echo "[onednn] verbose probe on first shape (1 iter) -> build/probe_verbose.txt"
+    ONEDNN_VERBOSE=all ./build/onednn_e2e build/probe_shape.csv "$THREADS" 1 1 $ALG \
+        > build/probe_verbose.txt 2>&1 || true
+fi
+
 # ---- 运行（与 our 侧同绑核）----
 echo "[onednn] threads=$THREADS warmup=$WARMUP repeats=$REPEATS alg=$ALG csv=$CSV"
 OMP_PROC_BIND=close OMP_PLACES=cores \
@@ -81,4 +94,6 @@ fi
 if [ "$nrows" -lt 10 ]; then
     echo "!!! too few data rows - see stderr above (parsed 0 = CSV parse issue; else primitive threw)"
 fi
+echo "[onednn] via alg histogram (which oneDNN alg actually ran per shape):"
+grep -o 'via alg=[a-z]*' build/onednn_e2e.err 2>/dev/null | sort | uniq -c || true
 echo "[onednn] full result: build/onednn_e2e.csv (stdout is the file)"

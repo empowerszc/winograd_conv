@@ -14,6 +14,14 @@
 // 输出：
 //   # run: threads=16 warmup=3 repeats=20 alg=auto
 //   mb,ic,ih,iw,oc,onednn_ms
+//   （stdout 仅数据行；诊断/进度走 stderr）
+//
+// 算法梯子：oneDNN 3.12.1 原生 AArch64 build 的 conv auto 路径在 PD 创建阶段
+// 系统性返回 out_of_memory（与 shape/布局/prop_kind 无关，见 run 输出）。本程序对
+// 每个 shape 依次试 {auto, gemm, direct, winograd}（--winograd 则把 winograd 放
+// 首位），第一个能建成 PD 的算法获胜；每行数据在 stderr 标注 via alg=X pk=Y
+// layout=Z。若全部算法都失败，stderr 打一行紧凑探针 [PD-ALL]，含每个 alg/pk 的
+// 数值状态码，用于定位是哪个实现族坏。
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -76,6 +84,21 @@ const char* status_name(int st) {
     }
 }
 
+const char* st_short(int st) {   // 紧凑状态缩写，供 [PD-ALL] 探针行（一行放 8 个组合）
+    switch (st) {
+        case 0:  return "ok";
+        case 1:  return "inv";
+        case 2:  return "oom";
+        case 3:  return "uni";
+        case 4:  return "end";
+        case 5:  return "rte";
+        case 6:  return "nreq";
+        case 9:  return "shp";
+        case 10: return "dt";
+        default: return "?";
+    }
+}
+
 // 编码无关的错误 dump：可打印 ASCII 原文 + 权威十六进制字节流。集群终端可能
 // 是 GBK、错误文本可能含非 UTF-8 字节——只打印 what() 会变乱码，hex 永不失真。
 void dump_err(FILE* f, const char* stage, const Shape& s, int status,
@@ -114,14 +137,29 @@ int main(int argc, char** argv) {
 #ifdef _OPENMP
     omp_set_num_threads(threads);
 #endif
-    dnnl::algorithm alg = (alg_s == "winograd")
-        ? dnnl::algorithm::convolution_winograd
-        : dnnl::algorithm::convolution_auto;
+    // 算法梯子：见文件头注释。--auto → {auto, gemm, direct, winograd}；
+    // --winograd → winograd 放首位，其余照旧兜底。第一个能建成 PD 的获胜。
+    std::vector<dnnl::algorithm> ladder;
+    std::vector<const char*> ladder_name;
+    if (alg_s == "winograd") {
+        ladder = { dnnl::algorithm::convolution_winograd,
+                   dnnl::algorithm::convolution_auto,
+                   dnnl::algorithm::convolution_gemm,
+                   dnnl::algorithm::convolution_direct };
+        ladder_name = { "winograd", "auto", "gemm", "direct" };
+    } else {
+        ladder = { dnnl::algorithm::convolution_auto,
+                   dnnl::algorithm::convolution_gemm,
+                   dnnl::algorithm::convolution_direct,
+                   dnnl::algorithm::convolution_winograd };
+        ladder_name = { "auto", "gemm", "direct", "winograd" };
+    }
 
     fprintf(stdout, "# run: threads=%d warmup=%d repeats=%d alg=%s\n",
             threads, warmup, repeats, alg_s.c_str());
     fprintf(stdout, "mb,ic,ih,iw,oc,onednn_ms\n");
 
+    bool first_fail_detail = true;   // 首个 [PD-ALL] 形状额外打一次完整 hex 消息
     for (const auto& s : shapes) {
         dnnl::engine eng(dnnl::engine::kind::cpu, 0);
         dnnl::stream stream(eng);
@@ -154,19 +192,43 @@ int main(int argc, char** argv) {
 
             dnnl::convolution_forward::primitive_desc pd;
             bool have_pd = false;
+            const char* via_alg = "";
+            const char* via_pk = "";
+            std::string combos;         // 失败组合摘要 "alg/pk=st_short "（编码无关探针）
             int last_status = 0;
             std::string last_msg;
-            for (auto pk : { dnnl::prop_kind::forward, dnnl::prop_kind::forward_inference }) {
-                try {
-                    pd = dnnl::convolution_forward::primitive_desc(
-                        eng, pk, alg, s_md, w_md, b_md, d_md, stride, dilate, padl, padr);
-                    have_pd = true;
-                    break;
-                } catch (const dnnl::error& e) {
-                    last_status = (int)e.status; last_msg = e.what();
+            for (size_t ai = 0; ai < ladder.size() && !have_pd; ai++) {
+                for (auto pk : { dnnl::prop_kind::forward, dnnl::prop_kind::forward_inference }) {
+                    const char* pkn = (pk == dnnl::prop_kind::forward) ? "fwd" : "fwdinf";
+                    try {
+                        pd = dnnl::convolution_forward::primitive_desc(
+                            eng, pk, ladder[ai], s_md, w_md, b_md, d_md,
+                            stride, dilate, padl, padr);
+                        have_pd = true; via_alg = ladder_name[ai]; via_pk = pkn;
+                        break;
+                    } catch (const dnnl::error& e) {
+                        char buf[96];
+                        snprintf(buf, sizeof buf, "%s/%s=%d(%s) ",
+                                 ladder_name[ai], pkn, (int)e.status, st_short((int)e.status));
+                        combos += buf;
+                        last_status = (int)e.status; last_msg = e.what();
+                    }
                 }
             }
-            if (!have_pd) { dump_err(stderr, "PD", s, last_status, last_msg); return false; }
+            if (!have_pd) {
+                // 全部算法族都失败：一行紧凑探针给出每个 alg/pk 的数值状态码，
+                // 直接看出是哪个实现族坏（auto/direct 同时 oom ⇒ brgconv 嫌疑；
+                // winograd=uni ⇒ 无 ACL 属预期）。首个形状额外打一次完整 hex。
+                fprintf(stderr, "skip %d,%d,%d,%d,%d [PD-ALL] layout=%s: %s\n",
+                        s.mb, s.ic, s.ih, s.iw, s.oc, layout, combos.c_str());
+                if (first_fail_detail) {
+                    dump_err(stderr, "PD-FIRST", s, last_status, last_msg);
+                    first_fail_detail = false;
+                }
+                return false;
+            }
+            fprintf(stderr, "# %d,%d,%d,%d,%d via alg=%s pk=%s layout=%s\n",
+                    s.mb, s.ic, s.ih, s.iw, s.oc, via_alg, via_pk, layout);
 
             dnnl::memory src_mem, wei_mem, bia_mem, dst_mem;
             try {
