@@ -29,7 +29,8 @@ awk -F, -v bd="/tmp/merge_bd.txt" -v csv="$CSV" -v ours="$OURS" -v e2e="$E2E" '
     BEGIN { row = 0; n = 0 }   # 未初始化变量是空串，与数字 0 是不同的数组键！
     FILENAME == bd { split($0, t, " "); bdms[t[1]] = t[2]; next }
     FILENAME == csv {                       # 源 shape：rN = 数据行号（0 基）
-        if ($0 ~ /^#/ || FNR == 1 || NF == 0) next   # 注释/表头/空行
+        # 跳过 注释/空行/表头（表头可能是 # 注释形式，也可能是裸 mb, 行）
+        if ($0 ~ /^#/ || $0 ~ /^mb,/ || FNR == 1 || NF == 0) next
         row2key[row] = $1","$2","$3","$4","$5; row++
         next
     }
