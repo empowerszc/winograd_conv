@@ -69,4 +69,16 @@ echo "[onednn] threads=$THREADS warmup=$WARMUP repeats=$REPEATS alg=$ALG csv=$CS
 OMP_PROC_BIND=close OMP_PLACES=cores \
     ./build/onednn_e2e "$CSV" "$THREADS" "$WARMUP" "$REPEATS" $ALG 2>build/onednn_e2e.err \
     | tee build/onednn_e2e.csv
+
+# ---- 自查：数据行数应等于形状数；异常时把 stderr 打出来（编译过了也可能 parse 失败
+#      或全部形状抛 dnnl::error）----
+nrows=$(awk '!/^#/ && !/^mb,/ && NF {c++} END {print c+0}' build/onednn_e2e.csv)
+echo "[onednn] 数据行数: $nrows"
+if [ -s build/onednn_e2e.err ]; then
+    echo "!!! onednn_e2e stderr（含 parsed N shapes 与逐个跳过原因）:"
+    cat build/onednn_e2e.err
+fi
+if [ "$nrows" -lt 10 ]; then
+    echo "!!! 数据行数过少 —— 见上 stderr 定位（parsed 0 = CSV 解析问题；否则是 primitive 抛异常）"
+fi
 echo "[onednn] 全量结果: build/onednn_e2e.csv（stdout 即该文件）"

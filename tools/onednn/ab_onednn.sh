@@ -95,8 +95,10 @@ echo
 echo "================ A6: 三列合并（ours / oneDNN e2e / benchdnn） ================"
 if [ -f build/ours_cmp.csv ] && [ -f build/onednn_e2e.csv ]; then
     if [ -f build/benchdnn_auto.txt ]; then
-        bash tools/onednn/merge_onednn.sh build/ours_cmp.csv build/onednn_e2e.csv \
-            build/benchdnn_auto.txt shapes/conv_all.csv
+        if ! bash tools/onednn/merge_onednn.sh build/ours_cmp.csv build/onednn_e2e.csv \
+                build/benchdnn_auto.txt shapes/conv_all.csv 2>&1; then
+            echo "!! merge 异常（退出码 $?），见上 stderr"
+        fi
     else
         echo "（benchdnn_auto.txt 缺失，先只出 ours vs e2e）"
         awk -F, '

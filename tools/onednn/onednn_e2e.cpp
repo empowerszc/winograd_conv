@@ -79,6 +79,7 @@ int main(int argc, char** argv) {
 
     std::vector<Shape> shapes;
     if (!parse_csv(csv_path, shapes)) return 1;
+    fprintf(stderr, "parsed %zu shapes\n", shapes.size());   // 自查：0 => parse 失败
 
     // 线程数交给 omp_set_num_threads + 外层 OMP_PROC_BIND/PLACES。
     // 不用 dnnl::set_max_threads：它随 DNNL_CPU_THREADING_RUNTIME 条件编译，
