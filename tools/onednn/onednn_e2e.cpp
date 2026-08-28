@@ -113,9 +113,24 @@ int main(int argc, char** argv) {
             md dst_md(dst_d, dt::f32, tag::any);
             dnnl::memory::dims stride{ 1, 1 }, dilate{ 1, 1 }, padl{ 1, 1 }, padr{ 1, 1 };
 
-            dnnl::convolution_forward::primitive_desc pd(
-                eng, dnnl::prop_kind::forward_inference, alg,
-                src_md, wei_md, bia_md, dst_md, stride, dilate, padl, padr);
+            // 实测 3.12.1-release（AArch64）对 forward_inference + any 的 conv pd
+            // 创建全部失败，而 forward（training，benchdnn 同款路径）可用。依次尝试。
+            dnnl::convolution_forward::primitive_desc pd;
+            bool have_pd = false;
+            std::string pd_err;
+            for (auto pk : { dnnl::prop_kind::forward, dnnl::prop_kind::forward_inference }) {
+                try {
+                    pd = dnnl::convolution_forward::primitive_desc(
+                        eng, pk, alg, src_md, wei_md, bia_md, dst_md,
+                        stride, dilate, padl, padr);
+                    have_pd = true;
+                    break;
+                } catch (const dnnl::error& e) {
+                    pd_err = e.what();
+                }
+            }
+            if (!have_pd)
+                throw dnnl::error((dnnl_status_t)0, ("no conv pd: " + pd_err).c_str());
 
             dnnl::memory src_mem(pd.src_desc(), eng);
             dnnl::memory wei_mem(pd.weights_desc(), eng);

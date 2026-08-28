@@ -15,15 +15,20 @@ OURS="${1:?ours.csv}"; E2E="${2:?onednn_e2e.csv}"; BD="${3:?benchdnn_raw.txt}"
 CSV="${4:-shapes/conv_all.csv}"
 
 # benchdnn：逐行抓 rN 标签 + ms（容忍格式变化），预解析为 "row ms"
-grep -E '_n"r[0-9]+' "$BD" | awk '{
+# 实测 3.12.1 输出：`0:PASSED (513 ms) __REPRO: --conv ...n"r0"`——时间在括号里、
+# 无小数点、描述符是紧凑 n"r0"（无下划线）。同 rN 可能多行，保留首个带数字的。
+grep -E 'r[0-9]+"' "$BD" | awk '{
     if (match($0, /r[0-9]+"/)) n = substr($0, RSTART+1, RLENGTH-2); else next
     ms = "N/A"
-    if      (match($0, /[0-9]+\.[0-9]+ *ms/))  ms = substr($0, RSTART, RLENGTH)
+    if      (match($0, /\([0-9][0-9.]* *ms\)/))  ms = substr($0, RSTART+1, RLENGTH-2)
+    else if (match($0, /[0-9]+\.[0-9]+ *ms/))    ms = substr($0, RSTART, RLENGTH)
     else if (match($0, /time: *[0-9]+\.[0-9]+/)) ms = substr($0, RSTART+6, RLENGTH-6)
     else if (match($0, /perf: *[0-9]+\.[0-9]+/)) ms = substr($0, RSTART+6, RLENGTH-6)
-    gsub(/ms/, "", ms); gsub(/ /, "", ms)
-    print n, ms
-}' | sort -k1,1n > /tmp/merge_bd.txt
+    gsub(/ms/, "", ms); gsub(/[() ]/, "", ms)
+    if (ms != "N/A") bdms[n] = ms
+    else if (!(n in bdms)) bdms[n] = "N/A"
+}
+END { for (n in bdms) print n, bdms[n] }' | sort -k1,1n > /tmp/merge_bd.txt
 
 awk -F, -v bd="/tmp/merge_bd.txt" -v csv="$CSV" -v ours="$OURS" -v e2e="$E2E" '
     BEGIN { row = 0; n = 0 }   # 未初始化变量是空串，与数字 0 是不同的数组键！
