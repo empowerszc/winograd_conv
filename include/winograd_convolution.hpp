@@ -39,14 +39,16 @@ void winograd_gemm(
     int IC
 );
 
-// K-major ("kt") V variant -- the layout the NHWC pipeline produces and the
-// one modern arm_gemm consumes natively: element (n,k) of B lives at
-// V[k*OC + n], i.e. V is stored IC x OC. Eliminates every per-call B
-// transpose/pack. Other backends adapt trivially (OpenBLAS switches from
-// RowMajor(NoTrans,Trans) to RowMajor(NoTrans,NoTrans)).
+// K-major ("kt") V variant: element (n,k) of B lives at V[k*OC + n], i.e. V
+// is stored IC x OC -- the layout modern arm_gemm consumes natively, so the
+// arm_gemm path binds it with zero per-call staging. Other backends adapt
+// trivially (OpenBLAS switches from RowMajor(NoTrans,Trans) to
+// RowMajor(NoTrans,NoTrans)).
 //
-// Note: only the pipeline is guaranteed to produce/expect kt data. External
-// callers should stick to winograd_gemm() above (row-major V).
+// Note: the PIPELINE no longer produces kt data (its kt scatter cost ~16x
+// write amplification on no-L3 DRAM; see tools/build_arm_gemm.md) -- it
+// scatters row-major and lets the driver pack Bt per call. kt entries remain
+// for callers that already hold B K-major.
 void winograd_gemm_kt(
     const float* U,   // [n_tiles][IC]
     const float* V,   // [IC][OC] k-major
@@ -64,6 +66,19 @@ void winograd_gemm_kt(
 void winograd_gemm_batched_kt(
     const float* U,   // [nmulti][n_tiles][IC]
     const float* V,   // [nmulti][IC][OC] k-major
+    float* M,         // [nmulti][n_tiles][OC]
+    int n_tiles,
+    int OC,
+    int IC,
+    int nmulti
+);
+
+// Batched row-major variant -- what the pipeline itself uses (row-major V
+// panels at stride OC*IC). arm_gemm packs all nmulti panels to Bt in one
+// pass, then folds the slices into one GemmArgs.nmulti call.
+void winograd_gemm_batched(
+    const float* U,   // [nmulti][n_tiles][IC]
+    const float* V,   // [nmulti][OC][IC]
     float* M,         // [nmulti][n_tiles][OC]
     int n_tiles,
     int OC,

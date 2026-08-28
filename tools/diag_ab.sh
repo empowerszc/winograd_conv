@@ -90,15 +90,31 @@ if [ "${SKIP_E5:-0}" = "1" ]; then
 elif [ ! -d "$ACL_DIR" ]; then
   echo "ACL_DIR 不存在：$ACL_DIR —— 跳过（可用 sbatch --wrap=\"ACL_DIR=... bash tools/diag_ab.sh\" 指定）"
 else
-  rm -rf /tmp/wc_old /tmp/wc_old.tar
-  echo "[E5] 提交存在性: $(git log --oneline -1 "$OLD_COMMIT" 2>&1 | head -1)"
-  # v2.1: worktree add 在集群上失败过（错误被吞）；改用 git archive 导出纯源码树
-  if ! git archive "$OLD_COMMIT" > /tmp/wc_old.tar 2>/tmp/e5_archive.err; then
-    echo "git archive 失败（浅克隆可能没有该提交？），错误："
-    cat /tmp/e5_archive.err
+  rm -rf /tmp/wc_old /tmp/wc_old.tar /tmp/wc_tree.tar
+  mkdir -p /tmp/wc_old
+  OLD_SRC="tools/old_src/winograd_conv.cpp"
+  E5_OK=0
+  if [ -f "$OLD_SRC" ]; then
+    # 集群代码多为无 .git 的文件副本：打包当前树（排除构建产物），仅换入旧驱动源码
+    tar -cf /tmp/wc_tree.tar --exclude=./build --exclude=./build_oblas \
+        --exclude=./.git --exclude=./swish_sve . 2>/dev/null
+    if tar -xf /tmp/wc_tree.tar -C /tmp/wc_old 2>/dev/null; then
+      cp "$OLD_SRC" /tmp/wc_old/src/winograd_conv.cpp
+      echo "[E5] 旧驱动源: $OLD_SRC（快照 $OLD_COMMIT，无 git 也可用）"
+      E5_OK=1
+    fi
+  fi
+  if [ "$E5_OK" != "1" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "[E5] 提交存在性: $(git log --oneline -1 "$OLD_COMMIT" 2>&1 | head -1)"
+    if git archive "$OLD_COMMIT" > /tmp/wc_old.tar 2>/tmp/e5_archive.err; then
+      tar -xf /tmp/wc_old.tar -C /tmp/wc_old && E5_OK=1
+    else
+      echo "git archive 失败："; cat /tmp/e5_archive.err
+    fi
+  fi
+  if [ "$E5_OK" != "1" ]; then
+    echo "无法获取旧码源树（缺 $OLD_SRC 且 git 不可用）—— 跳过 E5"
   else
-    mkdir -p /tmp/wc_old
-    tar -xf /tmp/wc_old.tar -C /tmp/wc_old
     cmake -S /tmp/wc_old -B /tmp/wc_old/build -DCMAKE_BUILD_TYPE=Release \
       -DENABLE_SVE=ON -DENABLE_OPENMP=ON -DUSE_ARM_GEMM=ON \
       -DARM_GEMM_ROOT="$ACL_DIR" > /tmp/e5_cmake.log 2>&1
@@ -132,6 +148,6 @@ probe_state
 run_smoke ./build/bench_winograd
 run_smoke ./build_oblas/bench_winograd
 
-rm -rf /tmp/wc_old /tmp/wc_old.tar
+rm -rf /tmp/wc_old /tmp/wc_old.tar /tmp/wc_tree.tar
 echo
 echo "================ 完成：把本作业全部输出贴回 ================"

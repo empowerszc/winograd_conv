@@ -134,6 +134,18 @@ VERBOSE 内核表的 `est=0 ... <== SELECTED` 组合即短路选中的直接证�
 
 ## 结构优化：K 主序 V + nmulti 批量调用（2026-08-27 第二步改造）
 
+> **⚠️ 第三步修正（2026-08-28）**：本节「Phase 1 权重散写改为 K 主序」**已回退**。
+> kt 散写的每条 store 跨 OC×4B，16 条 store 才凑一条 64B 缓存行，在本机（无 L3）
+> 上产生 ~16x 写放大——同作业实测 1,2048,7²,512 从打包路径的 10~12ms 涨到
+> 62~65ms，与 2.4GB 脏行流量模型吻合；对照组 OpenBLAS 后端（行主序跨步读，
+> 同样 16x 但在读侧）同形状 59.8ms，互相印证。**现行架构**：Phase 1 行主序连续
+> 散写（`V[(m*OC+oc)*IC+ic]`，满行写）+ 驱动按 nmulti 一次性把全部面板打包成 Bt
+> （跨步读限制在单个 V 面板 = OC*IC*4B 内，缓存可驻）+ 一次批量 pretranspose/execute。
+> 第二步的 nmulti 批量调用收益保留。`winograd_gemm_batched_kt`/`winograd_gemm_kt`
+> 入口保留（给已持有 K 主序数据的调用方），管线改走新的 `winograd_gemm_batched`
+> （行主序）。旧版驱动源码快照在 `tools/old_src/winograd_conv.cpp`（c48761e，
+> 供 diag_ab.sh E5 做同作业新旧对照）。
+
 ### 背景
 
 全量 A/B 显示 arm_gemm 在中高 IC 输 OpenBLAS 1.2~2.6x，嫌疑之一是 Phase 2 的
