@@ -74,9 +74,11 @@ run_smoke ./build/bench_winograd
 run_smoke ./build_oblas/bench_winograd
 
 echo
-echo "================ E1: arm(新码) mini 5 形状 + auto 选核可视化 ================"
+echo "================ E1: arm mini 5 形状 + auto 选核可视化（kernel 表已去重） ================"
+# kernel 行（est=）跨作业按内容去重，压掉 debug 打印的重复组合；其余行原样透传
 WINO_GEMM_DEBUG=1 env $BIND ./build/bench_winograd --sve --nhwc --threads $T \
-  --warmup 3 --repeats 20 /tmp/mini.csv 2>&1
+  --warmup 3 --repeats 20 /tmp/mini.csv 2>&1 \
+  | awk '/est=/{ if (!seen[$0]++) print; next } {print}'
 
 echo
 echo "================ E2: OB mini 同作业对照（与 E1 同 CSV 同绑核） ================"
