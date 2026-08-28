@@ -61,6 +61,33 @@ void fill(float* p, size_t n) {   // 小幅度伪随机，避免 inf/nan
         p[i] = float(int((i * 2654435761u) % 17u) - 8) * 0.01f;
 }
 
+const char* status_name(int st) {
+    switch (st) {
+        case 0:  return "success";
+        case 1:  return "invalid_arguments";
+        case 2:  return "out_of_memory";
+        case 3:  return "unimplemented";
+        case 4:  return "iterator_ends";
+        case 5:  return "runtime_error";
+        case 6:  return "not_required";
+        case 9:  return "invalid_shape";
+        case 10: return "invalid_data_type";
+        default: return "unknown";
+    }
+}
+
+// 编码无关的错误 dump：可打印 ASCII 原文 + 权威十六进制字节流。集群终端可能
+// 是 GBK、错误文本可能含非 UTF-8 字节——只打印 what() 会变乱码，hex 永不失真。
+void dump_err(FILE* f, const char* stage, const Shape& s, int status,
+              const std::string& msg) {
+    fprintf(f, "skip %d,%d,%d,%d,%d [%s]: status=%d(%s) what=",
+            s.mb, s.ic, s.ih, s.iw, s.oc, stage, status, status_name(status));
+    for (unsigned char c : msg) fprintf(f, "%c", (c >= 32 && c < 127) ? (char)c : '.');
+    fprintf(f, " hex=");
+    for (unsigned char c : msg) fprintf(f, "%02x", (unsigned)c);
+    fprintf(f, "\n");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -96,76 +123,99 @@ int main(int argc, char** argv) {
     fprintf(stdout, "mb,ic,ih,iw,oc,onednn_ms\n");
 
     for (const auto& s : shapes) {
-        try {
-            dnnl::engine eng(dnnl::engine::kind::cpu, 0);
-            dnnl::stream stream(eng);
+        dnnl::engine eng(dnnl::engine::kind::cpu, 0);
+        dnnl::stream stream(eng);
 
-            using md = dnnl::memory::desc;
-            using dt = dnnl::memory::data_type;
-            using tag = dnnl::memory::format_tag;
-            dnnl::memory::dims src_d{ s.mb, s.ic, s.ih, s.iw };
-            dnnl::memory::dims wei_d{ s.oc, s.ic, 3, 3 };
-            dnnl::memory::dims bia_d{ s.oc };
-            dnnl::memory::dims dst_d{ s.mb, s.oc, s.ih, s.iw };
-            md src_md(src_d, dt::f32, tag::any);
-            md wei_md(wei_d, dt::f32, tag::any);
-            md bia_md(bia_d, dt::f32, tag::any);
-            md dst_md(dst_d, dt::f32, tag::any);
-            dnnl::memory::dims stride{ 1, 1 }, dilate{ 1, 1 }, padl{ 1, 1 }, padr{ 1, 1 };
+        using md = dnnl::memory::desc;
+        using dt = dnnl::memory::data_type;
+        using tag = dnnl::memory::format_tag;
+        dnnl::memory::dims src_d{ s.mb, s.ic, s.ih, s.iw };
+        dnnl::memory::dims wei_d{ s.oc, s.ic, 3, 3 };
+        dnnl::memory::dims bia_d{ s.oc };
+        dnnl::memory::dims dst_d{ s.mb, s.oc, s.ih, s.iw };
+        dnnl::memory::dims stride{ 1, 1 }, dilate{ 1, 1 }, padl{ 1, 1 }, padr{ 1, 1 };
 
-            // 实测 3.12.1-release（AArch64）对 forward_inference + any 的 conv pd
-            // 创建全部失败，而 forward（training，benchdnn 同款路径）可用。依次尝试。
+        // 单形状完整跑一遍（可指定布局）。任一步失败 → dump【阶段 + 数值状态码 +
+        // hex 字节】并返回 false（不依赖终端编码即可定位；之前只打 e.what() 在 GBK
+        // 终端是乱码）。成功打印一行数据并返回 true。
+        auto run_one = [&](const char* layout) -> bool {
+            md s_md, w_md, b_md, d_md;
+            if (std::strcmp(layout, "nchw") == 0) {   // 显式布局：强制 ref/gemm 路径
+                s_md = md(src_d, dt::f32, tag::nchw);
+                w_md = md(wei_d, dt::f32, tag::oihw);
+                b_md = md(bia_d, dt::f32, tag::x);
+                d_md = md(dst_d, dt::f32, tag::nchw);
+            } else {                                  // format_tag::any：oneDNN 自选
+                s_md = md(src_d, dt::f32, tag::any);
+                w_md = md(wei_d, dt::f32, tag::any);
+                b_md = md(bia_d, dt::f32, tag::any);
+                d_md = md(dst_d, dt::f32, tag::any);
+            }
+
             dnnl::convolution_forward::primitive_desc pd;
             bool have_pd = false;
-            std::string pd_err;
+            int last_status = 0;
+            std::string last_msg;
             for (auto pk : { dnnl::prop_kind::forward, dnnl::prop_kind::forward_inference }) {
                 try {
                     pd = dnnl::convolution_forward::primitive_desc(
-                        eng, pk, alg, src_md, wei_md, bia_md, dst_md,
-                        stride, dilate, padl, padr);
+                        eng, pk, alg, s_md, w_md, b_md, d_md, stride, dilate, padl, padr);
                     have_pd = true;
                     break;
                 } catch (const dnnl::error& e) {
-                    pd_err = e.what();
+                    last_status = (int)e.status; last_msg = e.what();
                 }
             }
-            if (!have_pd)
-                throw dnnl::error((dnnl_status_t)0, ("no conv pd: " + pd_err).c_str());
+            if (!have_pd) { dump_err(stderr, "PD", s, last_status, last_msg); return false; }
 
-            dnnl::memory src_mem(pd.src_desc(), eng);
-            dnnl::memory wei_mem(pd.weights_desc(), eng);
-            dnnl::memory bia_mem(pd.bias_desc(), eng);
-            dnnl::memory dst_mem(pd.dst_desc(), eng);
+            dnnl::memory src_mem, wei_mem, bia_mem, dst_mem;
+            try {
+                src_mem = dnnl::memory(pd.src_desc(), eng);
+                wei_mem = dnnl::memory(pd.weights_desc(), eng);
+                bia_mem = dnnl::memory(pd.bias_desc(), eng);
+                dst_mem = dnnl::memory(pd.dst_desc(), eng);
+            } catch (const dnnl::error& e) { dump_err(stderr, "MEM", s, (int)e.status, e.what()); return false; }
             fill((float*)src_mem.get_data_handle(), src_mem.get_desc().get_size() / 4);
             fill((float*)wei_mem.get_data_handle(), wei_mem.get_desc().get_size() / 4);
             fill((float*)bia_mem.get_data_handle(), bia_mem.get_desc().get_size() / 4);
 
-            dnnl::convolution_forward conv(pd);
+            dnnl::convolution_forward conv;
+            try { conv = dnnl::convolution_forward(pd); }
+            catch (const dnnl::error& e) { dump_err(stderr, "PRIM", s, (int)e.status, e.what()); return false; }
+
             // execute 的签名就是 std::unordered_map<int, memory>；oneDNN 没有
             // dnnl::execution_args 这个别名，直接写裸类型更稳。
             std::unordered_map<int, dnnl::memory> args{
                 { DNNL_ARG_SRC, src_mem }, { DNNL_ARG_WEIGHTS, wei_mem },
                 { DNNL_ARG_BIAS, bia_mem }, { DNNL_ARG_DST, dst_mem } };
+            auto run_once = [&]() { conv.execute(stream, args); stream.wait(); };
 
-            auto run_once = [&]() {
-                conv.execute(stream, args);
-                stream.wait();
-            };
-            for (int i = 0; i < warmup; i++) run_once();
+            try { for (int i = 0; i < warmup; i++) run_once(); }
+            catch (const dnnl::error& e) { dump_err(stderr, "EXEC_WARMUP", s, (int)e.status, e.what()); return false; }
 
             double best = 1e30;
-            for (int i = 0; i < repeats; i++) {
-                auto t0 = std::chrono::steady_clock::now();
-                run_once();
-                double ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - t0).count();
-                best = std::min(best, ms);
+            try {
+                for (int i = 0; i < repeats; i++) {
+                    auto t0 = std::chrono::steady_clock::now();
+                    run_once();
+                    double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count();
+                    best = std::min(best, ms);
+                }
+            } catch (const dnnl::error& e) {
+                dump_err(stderr, "EXEC_REPEAT", s, (int)e.status, e.what()); return false;
             }
             fprintf(stdout, "%d,%d,%d,%d,%d,%.3f\n",
                     s.mb, s.ic, s.ih, s.iw, s.oc, best);
-        } catch (const dnnl::error& e) {
-            fprintf(stderr, "skip %d,%d,%d,%d,%d: dnnl error: %s\n",
-                    s.mb, s.ic, s.ih, s.iw, s.oc, e.what());
+            return true;
+        };
+
+        // 首选 any 布局（端到端口径）；任何阶段失败 → 整条管线用显式 nchw/oihw
+        // 重试保证出数据，并留 NOTE 说明该形状走的是兜底路径。
+        if (!run_one("any")) {
+            if (run_one("nchw"))
+                fprintf(stderr, "NOTE %d,%d,%d,%d,%d: any-layout pipeline failed; explicit nchw/oihw fallback ok\n",
+                        s.mb, s.ic, s.ih, s.iw, s.oc);
         }
     }
     return 0;

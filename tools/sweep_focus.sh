@@ -23,7 +23,7 @@ THREADS=${THREADS:-16}
 WARMUP=${WARMUP:-3}
 REPEATS=${REPEATS:-10}
 
-[ -x "$BIN" ] || { echo "error: $BIN 不存在，请先构建" >&2; exit 1; }
+[ -x "$BIN" ] || { echo "error: $BIN missing; build it first" >&2; exit 1; }
 
 # A/B 里 arm_gemm 损失最重 + 1 个微输对照的形状（count 仅示意，时间以 repeats 计）
 cat > focus_sweep.csv <<'EOF'
@@ -64,4 +64,4 @@ for eng in sve_hybrid_fp32_mla_6x4VL \
 done
 
 echo
-echo "判读指南见 tools/perf_engine_sweep.md；把全部输出贴回即可。"
+echo "interpretation guide in tools/perf_engine_sweep.md; paste full output back."

@@ -30,7 +30,7 @@ if [ -z "$BIN" ]; then
     done
 fi
 if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
-    echo "error: benchdnn 未找到。设 BENCHDNN=<路径> 或 --bin。" >&2
+    echo "error: benchdnn not found. Set BENCHDNN=<path> or use --bin." >&2
     exit 1
 fi
 echo "[benchdnn] binary: $BIN"
@@ -40,16 +40,16 @@ bash tools/gen_benchdnn_list.sh >/dev/null
 
 if [ ${#ALG[@]} -eq 0 ]; then
     OUT=build/benchdnn_auto.txt
-    echo "[benchdnn] 算法 = auto（oneDNN 自选）"
+    echo "[benchdnn] algo = auto (oneDNN default)"
 else
     OUT=build/benchdnn_wino.txt
-    echo "[benchdnn] 算法 = ${ALG[*]}（oneDNN Winograd）"
+    echo "[benchdnn] algo = ${ALG[*]} (oneDNN Winograd)"
 fi
 
 # 不带 --cfg=f32：oneDNN 3.12.1 的 conv driver 已不认 --cfg（默认 dt=f32 即 fp32）。
 OMP_PROC_BIND=close OMP_PLACES=cores \
     "$BIN" --conv --reset "${ALG[@]}" --batch=shapes/conv_all.list >"$OUT" 2>&1 \
-    || { echo "[benchdnn] 退出码 $?；原始输出见 $OUT" >&2; tail -20 "$OUT" >&2; exit 1; }
+    || { echo "[benchdnn] exit $?; raw output in $OUT" >&2; tail -20 "$OUT" >&2; exit 1; }
 
 echo "[benchdnn] done -> $OUT"
-grep -c 'r[0-9]*"' "$OUT" | xargs echo "[benchdnn] 带 rN 标签的行数:"
+grep -c 'r[0-9]*"' "$OUT" | xargs echo "[benchdnn] lines with rN label:"

@@ -41,7 +41,7 @@ if [ -z "$ROOT" ]; then
                -maxdepth 3 -name dnnl.hpp 2>/dev/null)
 fi
 if [ -z "$ROOT" ] || [ ! -f "$ROOT/include/dnnl.hpp" ]; then
-    echo "error: oneDNN 未找到（需 include/dnnl.hpp + lib/libdnnl.*）。设 ONEDNN_ROOT=<目录> 或用 --root。" >&2
+    echo "error: oneDNN not found (need include/dnnl.hpp + lib/libdnnl.*). Set ONEDNN_ROOT=<dir> or use --root." >&2
     exit 1
 fi
 echo "[onednn] root: $ROOT"
@@ -56,7 +56,7 @@ for ld in "$ROOT/lib64" "$ROOT/lib"; do
     [ -d "$ld" ] && { LIBS_DIR="$ld"; break; }
 done
 if [ -z "$LIBS_DIR" ]; then
-    echo "error: $ROOT 下无 lib/lib64 目录" >&2; exit 1
+    echo "error: no lib/lib64 dir under $ROOT" >&2; exit 1
 fi
 mkdir -p build
 echo "[onednn] compiling with $CXX (libs: $LIBS_DIR) ..."
@@ -73,12 +73,12 @@ OMP_PROC_BIND=close OMP_PLACES=cores \
 # ---- 自查：数据行数应等于形状数；异常时把 stderr 打出来（编译过了也可能 parse 失败
 #      或全部形状抛 dnnl::error）----
 nrows=$(awk '!/^#/ && !/^mb,/ && NF {c++} END {print c+0}' build/onednn_e2e.csv)
-echo "[onednn] 数据行数: $nrows"
+echo "[onednn] data rows: $nrows"
 if [ -s build/onednn_e2e.err ]; then
-    echo "!!! onednn_e2e stderr（含 parsed N shapes 与逐个跳过原因）:"
+    echo "!!! onednn_e2e stderr (parsed N shapes + per-shape skip reason):"
     cat build/onednn_e2e.err
 fi
 if [ "$nrows" -lt 10 ]; then
-    echo "!!! 数据行数过少 —— 见上 stderr 定位（parsed 0 = CSV 解析问题；否则是 primitive 抛异常）"
+    echo "!!! too few data rows - see stderr above (parsed 0 = CSV parse issue; else primitive threw)"
 fi
-echo "[onednn] 全量结果: build/onednn_e2e.csv（stdout 即该文件）"
+echo "[onednn] full result: build/onednn_e2e.csv (stdout is the file)"

@@ -37,7 +37,7 @@ BIND="OMP_PROC_BIND=close OMP_PLACES=cores"
 echo "#### ab_onednn: node=$(hostname) date=$(date) threads=$T ####"
 
 if [ ! -x build/bench_winograd ]; then
-    echo "error: build/bench_winograd 不存在，先构建（见 AGENTS.md）" >&2
+    echo "error: build/bench_winograd missing; build it first (see AGENTS.md)" >&2
     exit 1
 fi
 
@@ -48,9 +48,9 @@ printf '%s\n' \
   '1,2048,7,7,512,3,3,1,1,1,1,0,0,1,10' > /tmp/smoke2.csv
 
 probe_state() {
-  echo "---- 状态探针 $(date +%T) ----"
+  echo "---- state probe $(date +%T) ----"
   if ls /sys/devices/system/cpu/cpu0/cpufreq >/dev/null 2>&1; then
-    echo "scaling_cur_freq (MHz) 分布:"
+    echo "scaling_cur_freq (MHz) distribution:"
     cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq 2>/dev/null \
       | awk '{printf "%d\n", $1/1000}' | sort -n | uniq -c | tail -6
   else
@@ -66,49 +66,49 @@ run_smoke() {
 }
 
 echo
-echo "================ P0: 作业起始状态探针 ================"
+echo "================ P0: job-start state probe ================"
 probe_state
 run_smoke ./build/bench_winograd
 
 echo
-echo "================ A1: ours 全量 59 形状（绑定对比基线） ================"
+echo "================ A1: ours full 59 shapes (pinned baseline) ================"
 env $BIND bash tools/compare.sh shapes/conv_all.csv | tee build/ours_cmp.csv
 
 echo
-echo "================ A2: oneDNN 端到端（同形状同绑核，primitive 复用） ================"
+echo "================ A2: oneDNN e2e (same shapes, pinned, primitive reused) ================"
 env $BIND bash tools/onednn/run_onednn_e2e.sh
 
 echo
-echo "================ A3: benchdnn conv（--alg=WINO，与我们同为 Winograd，算法对齐） ================"
+echo "================ A3: benchdnn conv (--alg=WINO, same Winograd family as ours) ================"
 env $BIND bash tools/onednn/run_benchdnn.sh --winograd
 
 if [ "${SKIP_AUTO:-0}" != "1" ]; then
     echo
-    echo "================ A4: benchdnn conv auto（oneDNN 自选，兜底对照） ================"
+    echo "================ A4: benchdnn conv auto (oneDNN default, fallback) ================"
     env $BIND bash tools/onednn/run_benchdnn.sh
 fi
 
 if [ "${SKIP_FILTER:-0}" != "1" ]; then
     echo
-    echo "================ A5: M=25 选核 filter_sweep（auto/6x4VL/8x1VL/inter） ================"
+    echo "================ A5: M=25 filter_sweep (auto/6x4VL/8x1VL/inter) ================"
     env $BIND bash tools/filter_sweep.sh
 fi
 
 echo
-echo "================ A6: 合并表（ours / oneDNN e2e / benchdnn_wino / benchdnn_auto） ================"
+echo "================ A6: merge table (ours / e2e / benchdnn_wino / benchdnn_auto) ================"
 if [ -f build/ours_cmp.csv ] && [ -f build/onednn_e2e.csv ]; then
     BD1=build/benchdnn_wino.txt; BD2=build/benchdnn_auto.txt
     [ -f "$BD1" ] || { BD1="$BD2"; BD2=""; }   # WINO 缺失（如未实现）则主列退 auto
     [ -f "$BD1" ] || BD1=""
     [ -f "$BD2" ] || BD2=""
     if [ -n "$BD1" ]; then
-        echo "[A6] benchdnn 主列 = $BD1${BD2:+（副列 $BD2）}"
+        echo "[A6] benchdnn primary col = $BD1${BD2:+ (secondary $BD2)}"
         if ! bash tools/onednn/merge_onednn.sh build/ours_cmp.csv build/onednn_e2e.csv \
                 "$BD1" "$BD2" shapes/conv_all.csv 2>&1; then
-            echo "!! merge 异常（退出码 $?），见上 stderr"
+            echo "!! merge error (exit $?), see stderr above"
         fi
     else
-        echo "（无 benchdnn 结果文件，先只出 ours vs e2e）"
+        echo "(no benchdnn result files; ours vs e2e only)"
         awk -F, '
           /^#/ || /^mb,/ { next }
           NR==FNR { a[$1","$2","$3","$4","$5]=$6; next }
@@ -117,13 +117,13 @@ if [ -f build/ours_cmp.csv ] && [ -f build/onednn_e2e.csv ]; then
         ' build/ours_cmp.csv build/onednn_e2e.csv
     fi
 else
-    echo "缺 ours_cmp.csv 或 onednn_e2e.csv，跳过合并"
+    echo "missing ours_cmp.csv or onednn_e2e.csv; skipping merge"
 fi
 
 echo
-echo "================ P1: 作业收尾状态探针（与 P0 对比判漂移） ================"
+echo "================ P1: job-end state probe (compare with P0) ================"
 probe_state
 run_smoke ./build/bench_winograd
 
 echo
-echo "================ 完成：把本作业全部输出贴回 ================"
+echo "================ done: paste full job output back ================"

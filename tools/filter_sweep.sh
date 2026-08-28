@@ -28,7 +28,7 @@ if [ ! -f "$CSV" ]; then
 1,512,7,7,512,3,3,1,1,1,1,0,0,1,100
 1,2048,7,7,512,3,3,1,1,1,1,0,0,1,100
 EOF
-    echo "[filter] 生成默认 focus CSV: $CSV"
+    echo "[filter] writing default focus CSV: $CSV"
 fi
 
 declare -A TAG=( [auto]="auto" [6x4VL]="sve_hybrid_fp32_mla_6x4VL" \
@@ -50,7 +50,7 @@ for tag in auto 6x4VL 8x1VL inter; do
 done
 
 echo
-echo "===== [filter] 合并对比（* = 该行最优）====="
+echo "===== [filter] merged comparison (* = best per row) ====="
 awk -F, '
     /^# run:/ || $1 ~ /^#/ || $1 == "mb" { next }
     FILENAME ~ /filter_sweep_auto/  { a[$1","$2","$3","$4","$5] = $6; order[++n] = $1","$2","$3","$4","$5; next }
