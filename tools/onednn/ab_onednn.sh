@@ -8,19 +8,22 @@
 # 可选环境变量（--wrap 内可带）：
 #   ONEDNN_ROOT=<含 include/dnnl.hpp 的目录>   默认探测 /workspace/z00889957/000Libs
 #   BENCHDNN=<benchdnn 可执行路径>             默认按 ONEDNN_ROOT 常见路径探测
-#   FORCE_WINO=1   追加跑 benchdnn --alg=WINO（较慢，默认不跑）
-#   SKIP_FILTER=1  跳过 M=25 选核 filter_sweep
+#   SKIP_AUTO=1   跳过 A4 benchdnn auto（默认 auto 与 WINO 都跑）
+#   SKIP_FILTER=1 跳过 M=25 选核 filter_sweep
 #   T=<线程数>     默认 16
 #
 # 产物（build/ 下）：
 #   ours_cmp.csv            ours 全量 59 形状紧凑表（mb,ic,ih,iw,oc,ours_ms）
 #   onednn_e2e.csv          oneDNN 端到端同口径计时
-#   benchdnn_auto.txt       benchdnn raw（auto 算法）
-#   benchdnn_wino.txt       （FORCE_WINO=1 时）benchdnn raw（WINO 算法）
+#   benchdnn_wino.txt       benchdnn raw（--alg=WINO，与我们同为 Winograd 算法族）
+#   benchdnn_auto.txt       benchdnn raw（auto 算法，oneDNN 自选，兜底对照）
 #   filter_sweep_{auto,6x4VL,8x1VL,inter}.csv   M=25 选核实验
-# 末尾打印：三列合并表（ours/onednn_e2e/benchdnn 比率）+ filter_sweep 合并表。
+# 末尾打印：合并表（ours/onednn_e2e/benchdnn_wino/benchdnn_auto 比率）+ filter_sweep 合并表。
 #
-# 判读：ours_ms 越小越好；onednn/ours、benchdnn/ours > 1 即我们快。
+# 判读：ours_ms 越小越好；onednn/ours、benchdnn_*/ours > 1 即我们快。
+# 注意：oneDNN 的 --alg=WINO 依赖 ACL；本原生 build（无 ACL）可能全部 SKIP
+#       （unimplemented）或退 ref，届时 benchdnn_wino 列为 N/A，以 auto 列为准。
+#       oneDNN WINO 是 F(2,2) 族，我们 F(4,4,3,3)——仅"同为 Winograd 算法族"。
 
 set +e
 cd "$(dirname "$0")/../.."   # repo root
@@ -76,13 +79,13 @@ echo "================ A2: oneDNN 端到端（同形状同绑核，primitive 复
 env $BIND bash tools/onednn/run_onednn_e2e.sh
 
 echo
-echo "================ A3: benchdnn conv（auto 算法，oneDNN 自选） ================"
-env $BIND bash tools/onednn/run_benchdnn.sh
+echo "================ A3: benchdnn conv（--alg=WINO，与我们同为 Winograd，算法对齐） ================"
+env $BIND bash tools/onednn/run_benchdnn.sh --winograd
 
-if [ "${FORCE_WINO:-0}" = "1" ]; then
+if [ "${SKIP_AUTO:-0}" != "1" ]; then
     echo
-    echo "================ A4: benchdnn conv（--alg=WINO 强制 ACL Winograd） ================"
-    env $BIND bash tools/onednn/run_benchdnn.sh --winograd
+    echo "================ A4: benchdnn conv auto（oneDNN 自选，兜底对照） ================"
+    env $BIND bash tools/onednn/run_benchdnn.sh
 fi
 
 if [ "${SKIP_FILTER:-0}" != "1" ]; then
@@ -92,15 +95,20 @@ if [ "${SKIP_FILTER:-0}" != "1" ]; then
 fi
 
 echo
-echo "================ A6: 三列合并（ours / oneDNN e2e / benchdnn） ================"
+echo "================ A6: 合并表（ours / oneDNN e2e / benchdnn_wino / benchdnn_auto） ================"
 if [ -f build/ours_cmp.csv ] && [ -f build/onednn_e2e.csv ]; then
-    if [ -f build/benchdnn_auto.txt ]; then
+    BD1=build/benchdnn_wino.txt; BD2=build/benchdnn_auto.txt
+    [ -f "$BD1" ] || { BD1="$BD2"; BD2=""; }   # WINO 缺失（如未实现）则主列退 auto
+    [ -f "$BD1" ] || BD1=""
+    [ -f "$BD2" ] || BD2=""
+    if [ -n "$BD1" ]; then
+        echo "[A6] benchdnn 主列 = $BD1${BD2:+（副列 $BD2）}"
         if ! bash tools/onednn/merge_onednn.sh build/ours_cmp.csv build/onednn_e2e.csv \
-                build/benchdnn_auto.txt shapes/conv_all.csv 2>&1; then
+                "$BD1" "$BD2" shapes/conv_all.csv 2>&1; then
             echo "!! merge 异常（退出码 $?），见上 stderr"
         fi
     else
-        echo "（benchdnn_auto.txt 缺失，先只出 ours vs e2e）"
+        echo "（无 benchdnn 结果文件，先只出 ours vs e2e）"
         awk -F, '
           /^#/ || /^mb,/ { next }
           NR==FNR { a[$1","$2","$3","$4","$5]=$6; next }

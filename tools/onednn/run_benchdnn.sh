@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # oneDNN benchdnn conv 基准：对 shapes/conv_all.list（与 conv_all.csv 同 shape）
-# 跑 --conv --cfg=f32，绑核 16 线程。默认 auto 算法（oneDNN 自选，端到端口径），
-# 可选 --winograd 强制 ACL Winograd 路径。
+# 跑 --conv（fp32 即默认，3.12.1 已不认 --cfg），绑核 16 线程。默认 auto 算法
+# （oneDNN 自选，端到端口径），可选 --winograd 强制 oneDNN Winograd 路径
+# （AArch64 原生 build 无 ACL 时可能全部 unimplemented，见 ab_onednn.sh 说明）。
 #
 # 用法：
 #   bash tools/onednn/run_benchdnn.sh [--bin BENCHDNN] [--winograd]
@@ -42,7 +43,7 @@ if [ ${#ALG[@]} -eq 0 ]; then
     echo "[benchdnn] 算法 = auto（oneDNN 自选）"
 else
     OUT=build/benchdnn_wino.txt
-    echo "[benchdnn] 算法 = ${ALG[*]}（强制 ACL Winograd）"
+    echo "[benchdnn] 算法 = ${ALG[*]}（oneDNN Winograd）"
 fi
 
 # 不带 --cfg=f32：oneDNN 3.12.1 的 conv driver 已不认 --cfg（默认 dt=f32 即 fp32）。
