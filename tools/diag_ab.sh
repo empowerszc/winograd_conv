@@ -17,8 +17,8 @@
 # 判读（v2）：
 #   P0 vs P1  首尾 smoke 漂移 >20% => 本作业自身不稳，其余数字全部存疑
 #   E1 vs E2  同作业 arm(新码) vs OB —— 5 个关键形状的**可信** A/B（含大形状）
-#   E1 vs E5  同作业 新码 vs 旧码(c48761e) —— 裁决「MB=1 回归」是真代码回归
-#             还是 v1 全量作业的节点状态假象；顺带量化 nmulti 批量的收益
+#   E1 vs E5  同作业 新码 vs 旧码(c48761e) —— 裁决「深层 7x7 形状 62ms vs 旧读数
+#             10~11ms」是真代码回归还是历史表配置差异；顺带量化 nmulti 批量的收益
 #   E3 vs E4  同作业全量 59 形状 arm vs OB —— 新基线表
 #   状态探针  若 scaling_cur_freq 明显低于标称，说明节点被降频/受扰，数字另说
 
@@ -64,7 +64,7 @@ probe_state() {
 run_smoke() {
   echo "[smoke] $1"
   env $BIND "$1" --sve --nhwc --threads $T --warmup 2 --repeats 10 /tmp/smoke.csv 2>/dev/null \
-    | grep -E '^[0-9]+,'
+    | grep -E '^#|^[0-9]'
 }
 
 echo
@@ -90,12 +90,15 @@ if [ "${SKIP_E5:-0}" = "1" ]; then
 elif [ ! -d "$ACL_DIR" ]; then
   echo "ACL_DIR 不存在：$ACL_DIR —— 跳过（可用 sbatch --wrap=\"ACL_DIR=... bash tools/diag_ab.sh\" 指定）"
 else
-  git worktree remove --force /tmp/wc_old >/dev/null 2>&1
-  git worktree prune >/dev/null 2>&1
-  git worktree add --detach /tmp/wc_old "$OLD_COMMIT" >/dev/null 2>&1
-  if [ ! -d /tmp/wc_old ]; then
-    echo "worktree 创建失败（$OLD_COMMIT），跳过 E5"
+  rm -rf /tmp/wc_old /tmp/wc_old.tar
+  echo "[E5] 提交存在性: $(git log --oneline -1 "$OLD_COMMIT" 2>&1 | head -1)"
+  # v2.1: worktree add 在集群上失败过（错误被吞）；改用 git archive 导出纯源码树
+  if ! git archive "$OLD_COMMIT" > /tmp/wc_old.tar 2>/tmp/e5_archive.err; then
+    echo "git archive 失败（浅克隆可能没有该提交？），错误："
+    cat /tmp/e5_archive.err
   else
+    mkdir -p /tmp/wc_old
+    tar -xf /tmp/wc_old.tar -C /tmp/wc_old
     cmake -S /tmp/wc_old -B /tmp/wc_old/build -DCMAKE_BUILD_TYPE=Release \
       -DENABLE_SVE=ON -DENABLE_OPENMP=ON -DUSE_ARM_GEMM=ON \
       -DARM_GEMM_ROOT="$ACL_DIR" > /tmp/e5_cmake.log 2>&1
@@ -129,6 +132,6 @@ probe_state
 run_smoke ./build/bench_winograd
 run_smoke ./build_oblas/bench_winograd
 
-git worktree remove --force /tmp/wc_old >/dev/null 2>&1
+rm -rf /tmp/wc_old /tmp/wc_old.tar
 echo
 echo "================ 完成：把本作业全部输出贴回 ================"
