@@ -45,8 +45,9 @@ else
     echo "[benchdnn] 算法 = ${ALG[*]}（强制 ACL Winograd）"
 fi
 
+# 不带 --cfg=f32：oneDNN 3.12.1 的 conv driver 已不认 --cfg（默认 dt=f32 即 fp32）。
 OMP_PROC_BIND=close OMP_PLACES=cores \
-    "$BIN" --conv --cfg=f32 --reset "${ALG[@]}" --batch=shapes/conv_all.list >"$OUT" 2>&1 \
+    "$BIN" --conv --reset "${ALG[@]}" --batch=shapes/conv_all.list >"$OUT" 2>&1 \
     || { echo "[benchdnn] 退出码 $?；原始输出见 $OUT" >&2; tail -20 "$OUT" >&2; exit 1; }
 
 echo "[benchdnn] done -> $OUT"

@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <dnnl.hpp>
@@ -79,7 +80,9 @@ int main(int argc, char** argv) {
     std::vector<Shape> shapes;
     if (!parse_csv(csv_path, shapes)) return 1;
 
-    dnnl::set_max_threads(threads);
+    // 线程数交给 omp_set_num_threads + 外层 OMP_PROC_BIND/PLACES。
+    // 不用 dnnl::set_max_threads：它随 DNNL_CPU_THREADING_RUNTIME 条件编译，
+    // 部分发行包（如 3.12.1-release）里根本不存在。
 #ifdef _OPENMP
     omp_set_num_threads(threads);
 #endif
@@ -122,7 +125,9 @@ int main(int argc, char** argv) {
             fill((float*)bia_mem.get_data_handle(), bia_mem.get_desc().get_size() / 4);
 
             dnnl::convolution_forward conv(pd);
-            auto args = dnnl::execution_args{
+            // execute 的签名就是 std::unordered_map<int, memory>；oneDNN 没有
+            // dnnl::execution_args 这个别名，直接写裸类型更稳。
+            std::unordered_map<int, dnnl::memory> args{
                 { DNNL_ARG_SRC, src_mem }, { DNNL_ARG_WEIGHTS, wei_mem },
                 { DNNL_ARG_BIAS, bia_mem }, { DNNL_ARG_DST, dst_mem } };
 

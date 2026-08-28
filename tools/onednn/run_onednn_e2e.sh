@@ -25,16 +25,23 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# ---- 定位 oneDNN ----
+# ---- 定位 oneDNN（必须同时有 include/dnnl.hpp 和 lib/libdnnl.*） ----
 if [ -z "$ROOT" ] && [ -n "${ONEDNN_ROOT:-}" ]; then ROOT="$ONEDNN_ROOT"; fi
 if [ -z "$ROOT" ]; then
-    for cand in /usr/local /opt /workspace/z00889957/000Libs /workspace; do
-        hit=$(find "$cand" -maxdepth 3 -name dnnl.hpp 2>/dev/null | head -1 || true)
-        if [ -n "$hit" ]; then ROOT="${hit%/include/dnnl.hpp}"; break; fi
-    done
+    # 遍历所有命中，优先挑带 lib 的完整安装（避免挑到只有头文件的空壳目录）
+    while IFS= read -r h; do
+        r="${h%/include/dnnl.hpp}"
+        for ld in "$r/lib64" "$r/lib"; do
+            if [ -f "$ld/libdnnl.so" ] || ls "$ld"/libdnnl.so.* >/dev/null 2>&1 \
+               || [ -f "$ld/libdnnl.a" ]; then
+                ROOT="$r"; break 2
+            fi
+        done
+    done < <(find /usr/local /opt /workspace/z00889957/000Libs /workspace \
+               -maxdepth 3 -name dnnl.hpp 2>/dev/null)
 fi
 if [ -z "$ROOT" ] || [ ! -f "$ROOT/include/dnnl.hpp" ]; then
-    echo "error: oneDNN 未找到。设 ONEDNN_ROOT=<含 include/dnnl.hpp 的目录> 或用 --root。" >&2
+    echo "error: oneDNN 未找到（需 include/dnnl.hpp + lib/libdnnl.*）。设 ONEDNN_ROOT=<目录> 或用 --root。" >&2
     exit 1
 fi
 echo "[onednn] root: $ROOT"
@@ -44,11 +51,18 @@ CXX="${CXX:-}"
 if [ -z "$CXX" ]; then
     for c in g++ clang++ armclang++; do command -v "$c" >/dev/null && { CXX="$c"; break; }; done
 fi
+LIBS_DIR=""
+for ld in "$ROOT/lib64" "$ROOT/lib"; do
+    [ -d "$ld" ] && { LIBS_DIR="$ld"; break; }
+done
+if [ -z "$LIBS_DIR" ]; then
+    echo "error: $ROOT 下无 lib/lib64 目录" >&2; exit 1
+fi
 mkdir -p build
-echo "[onednn] compiling with $CXX ..."
+echo "[onednn] compiling with $CXX (libs: $LIBS_DIR) ..."
 $CXX -O3 -std=c++17 -fopenmp -I"$ROOT/include" \
     tools/onednn/onednn_e2e.cpp \
-    -L"$ROOT/lib" -Wl,-rpath,"$ROOT/lib" -ldnnl -o build/onednn_e2e
+    -L"$LIBS_DIR" -Wl,-rpath,"$LIBS_DIR" -ldnnl -o build/onednn_e2e
 
 # ---- 运行（与 our 侧同绑核）----
 echo "[onednn] threads=$THREADS warmup=$WARMUP repeats=$REPEATS alg=$ALG csv=$CSV"
