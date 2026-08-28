@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# oneDNN 端到端 conv 基准：编译 tools/onednn/onednn_e2e.cpp 并对 shapes CSV 计时。
+# 与 tools/compare.sh 同口径（best-of-repeats、16 线程、绑核），产出
+#   mb,ic,ih,iw,oc,onednn_ms
+# 供 tools/onednn/merge_onednn.sh 与我们的 ours_ms 合并。
+#
+# 用法：
+#   bash tools/onednn/run_onednn_e2e.sh [--root ONEDNN_ROOT] [--threads T]
+#            [--warmup N] [--repeats M] [--winograd] [shapes.csv]
+#   ONEDNN_ROOT 默认：$ONEDNN_ROOT 环境变量 → 常见路径探测。
+set -euo pipefail
+cd "$(dirname "$0")/../.."   # repo root
+
+THREADS=16; WARMUP=3; REPEATS=20; ALG="--auto"; CSV="shapes/conv_all.csv"; ROOT=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root)     ROOT="$2";   shift 2 ;;
+        --threads)  THREADS="$2"; shift 2 ;;
+        --warmup)   WARMUP="$2"; shift 2 ;;
+        --repeats)  REPEATS="$2"; shift 2 ;;
+        --winograd) ALG="--winograd"; shift ;;
+        -h|--help)  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *)          CSV="$1"; shift ;;
+    esac
+done
+
+# ---- 定位 oneDNN ----
+if [ -z "$ROOT" ] && [ -n "${ONEDNN_ROOT:-}" ]; then ROOT="$ONEDNN_ROOT"; fi
+if [ -z "$ROOT" ]; then
+    for cand in /usr/local /opt /workspace/z00889957/000Libs /workspace; do
+        hit=$(find "$cand" -maxdepth 3 -name dnnl.hpp 2>/dev/null | head -1 || true)
+        if [ -n "$hit" ]; then ROOT="${hit%/include/dnnl.hpp}"; break; fi
+    done
+fi
+if [ -z "$ROOT" ] || [ ! -f "$ROOT/include/dnnl.hpp" ]; then
+    echo "error: oneDNN 未找到。设 ONEDNN_ROOT=<含 include/dnnl.hpp 的目录> 或用 --root。" >&2
+    exit 1
+fi
+echo "[onednn] root: $ROOT"
+
+# ---- 编译 ----
+CXX="${CXX:-}"
+if [ -z "$CXX" ]; then
+    for c in g++ clang++ armclang++; do command -v "$c" >/dev/null && { CXX="$c"; break; }; done
+fi
+mkdir -p build
+echo "[onednn] compiling with $CXX ..."
+$CXX -O3 -std=c++17 -fopenmp -I"$ROOT/include" \
+    tools/onednn/onednn_e2e.cpp \
+    -L"$ROOT/lib" -Wl,-rpath,"$ROOT/lib" -ldnnl -o build/onednn_e2e
+
+# ---- 运行（与 our 侧同绑核）----
+echo "[onednn] threads=$THREADS warmup=$WARMUP repeats=$REPEATS alg=$ALG csv=$CSV"
+OMP_PROC_BIND=close OMP_PLACES=cores \
+    ./build/onednn_e2e "$CSV" "$THREADS" "$WARMUP" "$REPEATS" $ALG 2>build/onednn_e2e.err \
+    | tee build/onednn_e2e.csv
+echo "[onednn] 全量结果: build/onednn_e2e.csv（stdout 即该文件）"
