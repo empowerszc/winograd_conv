@@ -18,10 +18,15 @@
 //
 // 算法梯子：oneDNN 3.12.1 原生 AArch64 build 的 conv auto 路径在 PD 创建阶段
 // 系统性返回 out_of_memory（与 shape/布局/prop_kind 无关，见 run 输出）。本程序对
-// 每个 shape 依次试 {auto, gemm, direct, winograd}（--winograd 则把 winograd 放
-// 首位），第一个能建成 PD 的算法获胜；每行数据在 stderr 标注 via alg=X pk=Y
-// layout=Z。若全部算法都失败，stderr 打一行紧凑探针 [PD-ALL]，含每个 alg/pk 的
-// 数值状态码，用于定位是哪个实现族坏。
+// 每个 shape 依次试 {auto, direct, winograd}（--winograd 则 winograd 放首位），
+// 第一个能建成 PD 的算法获胜；每行数据在 stderr 标注 via alg=X pk=Y impl=Z layout=W，
+// 其中 impl=Z 来自 pd.impl_info_str()（dnnl::primitive_desc 基类成员，3.12.1 存在）
+// ——直接显示实际选中的实现名（如 brgconv:sve_512 / gemm:f32），是 OOM 定位的关键
+// 证据。若全部算法都失败，stderr 打一行紧凑探针 [PD-ALL]，含每个 alg/pk 的数值状态码，
+// 用于定位是哪个实现族坏。注意 dnnl::algorithm 只暴露这三个成员（无
+// convolution_gemm，3.12.1 C++ 包装收敛过）；2.x 时代的
+// convolution_forward::desc + primitive_desc(desc, eng) 构造形式在 3.0 已移除，
+// 3.x 只有 engine 开头的一串直接构造，本文件用的正是该形式。
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -137,22 +142,21 @@ int main(int argc, char** argv) {
 #ifdef _OPENMP
     omp_set_num_threads(threads);
 #endif
-    // 算法梯子：见文件头注释。--auto → {auto, gemm, direct, winograd}；
-    // --winograd → winograd 放首位，其余照旧兜底。第一个能建成 PD 的获胜。
+    // 算法梯子：oneDNN 3.12.1 的 C++ 枚举只暴露 {auto, direct, winograd}
+    // （dnnl::algorithm 无 convolution_gemm——该实现族由 direct 覆盖）。
+    // 首个能建成 PD 的获胜；本 build 无 ACL 故 winograd 大概率 unimplemented。
     std::vector<dnnl::algorithm> ladder;
     std::vector<const char*> ladder_name;
     if (alg_s == "winograd") {
         ladder = { dnnl::algorithm::convolution_winograd,
-                   dnnl::algorithm::convolution_auto,
-                   dnnl::algorithm::convolution_gemm,
-                   dnnl::algorithm::convolution_direct };
-        ladder_name = { "winograd", "auto", "gemm", "direct" };
+                   dnnl::algorithm::convolution_direct,
+                   dnnl::algorithm::convolution_auto };
+        ladder_name = { "winograd", "direct", "auto" };
     } else {
         ladder = { dnnl::algorithm::convolution_auto,
-                   dnnl::algorithm::convolution_gemm,
                    dnnl::algorithm::convolution_direct,
                    dnnl::algorithm::convolution_winograd };
-        ladder_name = { "auto", "gemm", "direct", "winograd" };
+        ladder_name = { "auto", "direct", "winograd" };
     }
 
     fprintf(stdout, "# run: threads=%d warmup=%d repeats=%d alg=%s\n",
@@ -227,8 +231,9 @@ int main(int argc, char** argv) {
                 }
                 return false;
             }
-            fprintf(stderr, "# %d,%d,%d,%d,%d via alg=%s pk=%s layout=%s\n",
-                    s.mb, s.ic, s.ih, s.iw, s.oc, via_alg, via_pk, layout);
+            const char* impl = pd.impl_info_str();   // 实际选中的实现名（关键诊断）
+            fprintf(stderr, "# %d,%d,%d,%d,%d via alg=%s pk=%s impl=%s layout=%s\n",
+                    s.mb, s.ic, s.ih, s.iw, s.oc, via_alg, via_pk, impl, layout);
 
             dnnl::memory src_mem, wei_mem, bia_mem, dst_mem;
             try {

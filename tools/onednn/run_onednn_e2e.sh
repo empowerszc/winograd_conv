@@ -87,6 +87,28 @@ OMP_PROC_BIND=close OMP_PLACES=cores \
 #      或全部形状抛 dnnl::error）----
 nrows=$(awk '!/^#/ && !/^mb,/ && NF {c++} END {print c+0}' build/onednn_e2e.csv)
 echo "[onednn] data rows: $nrows"
+
+# ---- SVE 兜底：默认 ISA 下 PD 创建系统性 OOM（疑 brgconv:sve_512 的 pd
+#      is_initialized 失败 → primitive_desc_t::create 返回 out_of_memory）→ 关 SVE
+#      重试。3.12.1 AArch64 的 ONEDNN_MAX_CPU_ISA 合法值：
+#      default / advanced_simd(纯 NEON，无 SVE) / sve_128 / sve_256 / sve_512。
+if [ "$nrows" -lt 10 ]; then
+    echo "[onednn] default ISA gave only $nrows rows; retrying with ONEDNN_MAX_CPU_ISA=advanced_simd (SVE off) ..."
+    OMP_PROC_BIND=close OMP_PLACES=cores \
+        ONEDNN_MAX_CPU_ISA=advanced_simd \
+        ./build/onednn_e2e "$CSV" "$THREADS" "$WARMUP" "$REPEATS" $ALG \
+        2>build/onednn_e2e_nosve.err | tee build/onednn_e2e_nosve.csv
+    nrows_ns=$(awk '!/^#/ && !/^mb,/ && NF {c++} END {print c+0}' build/onednn_e2e_nosve.csv)
+    if [ "$nrows_ns" -ge 10 ]; then
+        cp build/onednn_e2e_nosve.csv build/onednn_e2e.csv
+        cp build/onednn_e2e_nosve.err build/onednn_e2e.err
+        nrows=$nrows_ns
+        echo "[onednn] SVE-off retry produced $nrows rows -> promoted to build/onednn_e2e.csv"
+    else
+        echo "[onednn] SVE-off retry also insufficient ($nrows_ns rows); see build/onednn_e2e_nosve.err"
+    fi
+fi
+
 if [ -s build/onednn_e2e.err ]; then
     echo "!!! onednn_e2e stderr (parsed N shapes + per-shape skip reason):"
     cat build/onednn_e2e.err
@@ -96,4 +118,6 @@ if [ "$nrows" -lt 10 ]; then
 fi
 echo "[onednn] via alg histogram (which oneDNN alg actually ran per shape):"
 grep -o 'via alg=[a-z]*' build/onednn_e2e.err 2>/dev/null | sort | uniq -c || true
+echo "[onednn] impl histogram (pd.impl_info_str(): which impl actually ran - OOM 定位关键):"
+grep -o 'impl=[^ ]*' build/onednn_e2e.err 2>/dev/null | sort | uniq -c || true
 echo "[onednn] full result: build/onednn_e2e.csv (stdout is the file)"
