@@ -22,7 +22,10 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
   ours / e2e / benchdnn WINO+auto / filter_sweep / 合并表）。e2e 此前系统性 OOM 的
   **根因 = conv PD 误传 dilates={1,1}**（不是 omp_set_num_threads——8244944 是错修），
   已按用户参考格式修复（4bdc3ee）。判读矩阵、探针、坑：**`docs/onednn_comparison.md`**。
-  ⚠️ **benchdnn 数字疑似近单线程**（比 ours 慢 22~164x），与 16T ours 比加速比前先核实。
+  ⚠️ benchdnn 计时虚高根因已实锤并修复（29ffb97）：`run_benchdnn.sh` 漏设
+  `OMP_NUM_THREADS`，sbatch --exclusive 下默认 608 线程超订 → 小形状慢 100~900x
+  （曾误判「疑似近单线程」）。已改 `OMP_NUM_THREADS=16` + `ONEDNN_VERBOSE=exec`，
+  merge 优先解析 exec 单次行。**重跑后 wino/auto 列应与 e2e 列同量级**。
 - **M=25 选核**：已闭环（`tools/filter_sweep.sh`），**auto 保持最优**，不改选核。
 - **运行协议**：所有性能对比必须**单 sbatch 作业内 A/B**
   （`sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"`）——node03

@@ -102,8 +102,13 @@ dilates 旧 bug，修复生效**，e2e 应出全量 59 行数据。
 | A6 合并表 | 待 A2 出数 | 作业 stdout |
 
 已观察到的两点（**均待本轮重跑核实**）：
-1. **benchdnn 数字疑似近单线程**：此前 benchdnn 比 ours 慢 22~164x，远超任何合理差距
-   ——benchdnn 列在核实其线程数前**不能**直接与 16 线程 ours 比加速比。
+1. **benchdnn 数字虚高的根因已实锤（29ffb97 修复）**：此前 benchdnn 比 ours 慢 22~164x
+   不是解析问题——`run_benchdnn.sh` 漏设 `OMP_NUM_THREADS`，`sbatch --exclusive` 下
+   oneDNN 默认取全部 608 CPU，每个 primitive 起 608 线程 → 小形状被超订放大 100~900x。
+   佐证：同一形状用户贴的 verbose exec 行 12.4548ms ≈ e2e 16 线程 12.609ms，且小形状
+   劣化比大形状严重得多（896x vs 18x）——正是超订特征。已修：`OMP_NUM_THREADS=$THREADS`
+   + `ONEDNN_VERBOSE=exec`；merge 改优先解析 exec 行末字段（=单次执行 ms，每 shape 取
+   min，与 ours/e2e 同口径），无 exec 行才退 PASSED 的 `(N ms)` 兜底。
 2. A2 e2e 此前全 oom，4bdc3ee 修复后还没在集群跑过 —— 本次作业核心产出。
 
 ### filter_sweep（M=25 选核）—— 已闭环 ✅
@@ -153,8 +158,9 @@ dilates 旧 bug，修复生效**，e2e 应出全量 59 行数据。
    - **e2e 数据行数 = 59** ⇒ 修复生效，e2e 不再 oom。
    - **impl 直方图**：`jit:sve`/`brgconv:sve_512` 为主 ⇒ oneDNN 走了 SVE 路径；出现
      `jit:asimd` ⇒ SVE 未生效（检查 ONEDNN_MAX_CPU_ISA / 编译）。
-   - **合并表加速比**：`onednn/ours`、`benchdnn_*/ours` >1 即我们快；benchdnn 列在核实
-     其线程数前仅作参考（曾见 22~164x 疑似近单线程假象）。
+   - **合并表加速比**：`onednn/ours`、`benchdnn_*/ours` >1 即我们快；benchdnn 列**已**修
+     线程数（OMP_NUM_THREADS=16）并改解析 exec 单次行，应与 e2e 列同量级（曾见
+     22~164x 是 608 线程超订假象，29ffb97 已修）。
    - **P0/P1 频探**：主频应稳定 2.0GHz（606/608 核），漂移说明节点状态异常。
 
 1. **同作业才可比**：任何跨作业数字（含本文历史数字）只作定性参考，性能结论必须
