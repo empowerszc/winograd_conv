@@ -116,10 +116,12 @@ dilates 旧 bug，修复生效**，e2e 应出全量 59 行数据。
      整列 N/A（彻底不用 PASSED 聚合时间），merge_summary 标 `[NO-SRC]`。
      ⚠️ benchdnn 的 perf `%prb%` 字段是**缩写描述符**（相邻相等对省略后者：
      ih==iw 时打印 `mb4ic192ih40oc192oh40kh3ph1...`，无 `iw`/`ow`/`kw`）。
-     merge 必须对 `iw` 缺失回退 `iw=ih`，否则 59 个正方形状全部被静默丢弃 →
-     误报 `[NO-SRC]`。**2026-08-29 首跑的 [NO-SRC] 实为此 bug**（perf 行其实
-     全在），非「无 perf 行」；另一个配套 bug：BD_B 嗅探用 `r[0-9]+"` 匹配
-     PASSED 行，但 `--mode=p` 不打印 PASSED 行，已改为 `^perf,|r[0-9]+"`。
+     merge 须对 `iw` 缺失回退 `iw=ih`（已修，本地合成 perf 行 + 集群实测
+     batch perf 输出验证）。配套 bug：BD_B 嗅探原用 `r[0-9]+"` 匹配 PASSED
+     行，但 `--mode=p` 不打印 PASSED 行，已改为 `^perf,|r[0-9]+"`。
+     （注：2026-08-29 首跑 [NO-SRC] 的真因是**该作业跑了旧脚本**——build 文件
+     是 corr 模式 `0:PASSED (613 ms)`，根本没 perf 行；手动 `--mode=p` batch
+     实测 perf 行正常。）
 2. **e2e 列 = 最终对照**（同库 onednn-3.12.1-release、同 16 线程绑核、单次执行）：
    初步趋势——oneDNN brgconv:sve_512（GEMM 卷积）小形状更快（0.35~0.87x），
    我们 F(4,4,3,3) 在大而深形状反超（4,384,80²,96 1.49x / 4,768,40²,96 1.78x）。
