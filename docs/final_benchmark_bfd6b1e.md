@@ -126,9 +126,10 @@ OMP_PROC_BIND=close OMP_PLACES=cores bash tools/compare.sh --threads 16 shapes/c
 ## 遗留项
 
 1. **oneDNN 端到端 + benchdnn 对照**（进行中）：`sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"`，
-   贴回输出 → `docs/onednn_comparison.md` 判读。e2e OOM 已修（4bdc3ee），**待集群重跑出 59 行数据**；
-   benchdnn 计时虚高已实锤修复（29ffb97：漏设 OMP_NUM_THREADS → 608 线程超订 100~900x；
-   已改 OMP_NUM_THREADS=16 + 解析 exec 单次行），重跑后 wino/auto 列应与 e2e 列同量级。
+   贴回输出 → `docs/onednn_comparison.md` 判读。e2e OOM 已修（4bdc3ee）且已出 59 行；
+   benchdnn 计时虚高三修终版（50f9f2a：608 线程超订 + TBB 忽略 OMP_NUM_THREADS →
+   numactl -C 绑核；corr 模式 PASSED 聚合 → --mode=p 出 perf 单次行；merge 解析
+   perf/exec），重跑后 wino/auto 列应与 e2e 列同量级。
 2. ✅ **内核 filter 实验**（已闭环，2026-08-28，8f6b5ab）：`tools/filter_sweep.sh` 同作业复测
    auto / 6x4VL / 8x1VL / inter。结论：**auto 保持最优**（大形状 160² 强选 8x1VL 1.45x 慢、inter 1.23x 慢，
    6x4VL 最优且 auto 已选）。唯一可挖点 4,96,80²,96 上 8x1VL 快 ~19%，全局强改打崩 160²，不值得。
