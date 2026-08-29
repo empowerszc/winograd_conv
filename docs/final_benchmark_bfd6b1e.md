@@ -116,14 +116,21 @@ OMP_PROC_BIND=close OMP_PLACES=cores bash tools/compare.sh --threads 16 shapes/c
 # oneDNN benchdnn（同一描述符清单）—— tools/onednn/run_benchdnn.sh
 ```
 
-工具链：`tools/onednn/`（onednn_e2e.cpp + 3 个 shell），描述符清单 `shapes/conv_all.list` 已就绪。
-产出三列合并表 `mb,ic,ih,iw,oc,ours_ms,onednn_e2e_ms,benchdnn_ms`（`tools/onednn/merge_onednn.sh`）。
-把集群输出贴回来即可在会话内合并判读。
+工具链：`tools/onednn/`（onednn_e2e.cpp + 4 个 shell），描述符清单 `shapes/conv_all.list` 已就绪。
+一条命令跑全套：`sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"`
+（单作业 A/B：ours / e2e / benchdnn WINO+auto / filter_sweep / 合并表）。
+产出四列合并表 `mb,ic,ih,iw,oc,ours_ms,onednn_e2e_ms,benchdnn_wino_ms[,benchdnn_auto_ms]`
+（`tools/onednn/merge_onednn.sh`）。**数据/工具/判读（含 e2e OOM 根因）的权威文档 =
+`docs/onednn_comparison.md`**。把集群输出贴回来即可合并判读。
 
 ## 遗留项
 
-1. **oneDNN 端到端 + benchdnn 对照**：跑 `tools/onednn/` 三个脚本，贴回输出（见上）。
-2. **内核 filter 实验**（唯一剩余的 kernel 级杠杆，零改代码）：20² 族（M=25）auto 选中 `sve_interleaved_fp32_mla_8x3VL`，而旧 sweep 曾认为 interleaved 垫底——用 `tools/filter_sweep.sh` 同作业复测 auto / 6x4VL / 8x1VL。预期收益 ≤ 个位 %，仅影响 20² 族 ~9 形状。
-3. **删除临时诊断脚本** `tools/diag_ab.sh`（本轮诊断已闭环）。
+1. **oneDNN 端到端 + benchdnn 对照**（进行中）：`sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"`，
+   贴回输出 → `docs/onednn_comparison.md` 判读。e2e OOM 已修（4bdc3ee），**待集群重跑出 59 行数据**；
+   benchdnn 列疑似近单线程，比加速比前先核实其线程数。
+2. ✅ **内核 filter 实验**（已闭环，2026-08-28，8f6b5ab）：`tools/filter_sweep.sh` 同作业复测
+   auto / 6x4VL / 8x1VL / inter。结论：**auto 保持最优**（大形状 160² 强选 8x1VL 1.45x 慢、inter 1.23x 慢，
+   6x4VL 最优且 auto 已选）。唯一可挖点 4,96,80²,96 上 8x1VL 快 ~19%，全局强改打崩 160²，不值得。
+3. **删除临时诊断脚本** `tools/diag_ab.sh`（诊断已闭环，待最后确认后删）。
 4. **存档 OB 表 provenance**：历史 47.3ms（大形状）需确认所用 `--threads`（约需 147% 峰值，物理不可能，疑似非 16T 跑的）。
-5. 微负载 1.1~1.3x 窄幅（1,16,224²,16 等）绝对差 <0.2ms，不再追。
+5. ✅ 微负载 1.1~1.3x 窄幅（1,16,224²,16 等）绝对差 <0.2ms，不再追。

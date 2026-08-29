@@ -78,6 +78,17 @@ echo
 echo "================ A2: oneDNN e2e (same shapes, pinned, primitive reused) ================"
 env $BIND bash tools/onednn/run_onednn_e2e.sh
 
+# ---- 库级链接核查：e2e 与 benchdnn 各链接哪个 libdnnl（若不同，OOM 时先查这个）----
+echo "[onednn] e2e libdnnl linkage (build/onednn_e2e):"
+ldd build/onednn_e2e 2>/dev/null | grep -i dnnl || echo "  (ldd unavailable or no dnnl line)"
+bdnn=$(find /workspace/z00889957/000Libs -maxdepth 6 -type f -name benchdnn 2>/dev/null | head -1)
+if [ -n "$bdnn" ]; then
+    echo "[onednn] benchdnn libdnnl linkage ($bdnn):"
+    ldd "$bdnn" 2>/dev/null | grep -i dnnl || echo "  (ldd unavailable or no dnnl line)"
+else
+    echo "[onednn] benchdnn not found under /workspace/z00889957/000Libs"
+fi
+
 echo
 echo "================ A3: benchdnn conv (--alg=WINO, same Winograd family as ours) ================"
 env $BIND bash tools/onednn/run_benchdnn.sh --winograd
@@ -104,8 +115,10 @@ if [ -f build/ours_cmp.csv ] && [ -f build/onednn_e2e.csv ]; then
     if [ -n "$BD1" ]; then
         echo "[A6] benchdnn primary col = $BD1${BD2:+ (secondary $BD2)}"
         if ! bash tools/onednn/merge_onednn.sh build/ours_cmp.csv build/onednn_e2e.csv \
-                "$BD1" "$BD2" shapes/conv_all.csv 2>&1; then
-            echo "!! merge error (exit $?), see stderr above"
+                "$BD1" "$BD2" shapes/conv_all.csv > build/merged.csv 2>&1; then
+            echo "!! merge error (exit $?), see build/merged.csv"
+        else
+            cat build/merged.csv
         fi
     else
         echo "(no benchdnn result files; ours vs e2e only)"
@@ -114,11 +127,34 @@ if [ -f build/ours_cmp.csv ] && [ -f build/onednn_e2e.csv ]; then
           NR==FNR { a[$1","$2","$3","$4","$5]=$6; next }
           { k=$1","$2","$3","$4","$5; r=(a[k]+0>0) ? sprintf("%.2fx", $6/a[k]) : "N/A";
             printf "%s, %s, %s, %s\n", k, a[k], $6, r }
-        ' build/ours_cmp.csv build/onednn_e2e.csv
+        ' build/ours_cmp.csv build/onednn_e2e.csv | tee build/merged.csv
     fi
 else
     echo "missing ours_cmp.csv or onednn_e2e.csv; skipping merge"
 fi
+
+echo
+echo "================ 结果归档（判读/交接只需这一份 build/SUMMARY.txt） ================"
+{
+    echo "ab_onednn SUMMARY  node=$(hostname) date=$(date) threads=$T"
+    echo
+    echo "== 数据行数（应均为 59；e2e 曾全 oom 现在应满） =="
+    echo "ours_cmp.csv      : $(awk '!/^#/ && !/^mb,/ && NF {c++} END {print c+0}' build/ours_cmp.csv) rows"
+    echo "onednn_e2e.csv    : $(awk '!/^#/ && !/^mb,/ && NF {c++} END {print c+0}' build/onednn_e2e.csv) rows"
+    echo "benchdnn_wino.txt : $(grep -c 'r[0-9]*"' build/benchdnn_wino.txt 2>/dev/null || echo 0) rows"
+    echo "benchdnn_auto.txt : $(grep -c 'r[0-9]*"' build/benchdnn_auto.txt 2>/dev/null || echo 0) rows"
+    echo
+    echo "== e2e impl 直方图（build/onednn_e2e.err；OOM 定位关键） =="
+    grep -o 'impl=[^ ]*' build/onednn_e2e.err 2>/dev/null | sort | uniq -c || true
+    echo
+    echo "== 诊断矩阵（build/diag.txt）=="
+    cat build/diag.txt 2>/dev/null || echo "(no diag.txt)"
+    echo
+    echo "== 合并表（build/merged.csv）=="
+    cat build/merged.csv 2>/dev/null || echo "(no merged.csv)"
+} > build/SUMMARY.txt
+echo "[archive] 判读只需一份：build/SUMMARY.txt"
+echo "         或三份：build/merged.csv + build/diag.txt + build/onednn_e2e.csv"
 
 echo
 echo "================ P1: job-end state probe (compare with P0) ================"
@@ -126,4 +162,4 @@ probe_state
 run_smoke ./build/bench_winograd
 
 echo
-echo "================ done: paste full job output back ================"
+echo "================ done: 结果已归档到 build/SUMMARY.txt（贴回会话即可判读） ================"

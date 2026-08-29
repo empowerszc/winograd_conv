@@ -69,13 +69,19 @@ mb,ic,ih,iw,oc,kh,kw,stride_h,stride_w,pad_h,pad_w,dil_h,dil_w,grp,count
 CSV 行  4,192,40,40,192 → 描述符  mb4_ic192_ih40iw40_oc192_oh40ow40_kh3kw3_sh1sw1_ph1pw1
 ```
 
-即 `mb<mb>_ic<ic>_ih<ih>iw<iw>_oc<oc>_oh<oh>ow<ow>_kh3kw3_sh1sw1_ph1pw1`。例子：
+即 `mb<mb>_ic<ic>_ih<ih>iw<iw>_oc<oc>_oh<oh>ow<ow>_kh3kw3_sh1sw1_ph1pw1`。清单由
+`tools/gen_benchdnn_list.sh` 生成到 `shapes/conv_all.list`。跑法直接用仓库脚本
+（自动定位 benchdnn、绑核 16 线程）：
 
 ```bash
-./benchdnn --conv --cfg=f32 --reset --alg=WINO --batch=conv_all.list
-# conv_all.list 每行：
-#   mb4_ic192_ih40iw40_oc192_oh40ow40_kh3kw3_sh1sw1_ph1pw1_n"case0"
+bash tools/onednn/run_benchdnn.sh --winograd   # --alg=WINO（oneDNN Winograd 路径）
+bash tools/onednn/run_benchdnn.sh              # auto（oneDNN 自选算法）
+# 产物：build/benchdnn_wino.txt / build/benchdnn_auto.txt
 ```
+
+> ⚠️ **不要传 `--cfg=f32`**：oneDNN 3.12.1 的 conv driver 已不认该参数（默认 dt=f32）。
+> ⚠️ **AArch64 原生 build（无 ACL）下 `--alg=WINO` 可能全部 unimplemented**（退 ref 或
+> 报错），届时 wino 列为 N/A，以 auto 列为主。
 
 ## profiling 对照（两边跑同一批计数器）
 

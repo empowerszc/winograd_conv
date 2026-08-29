@@ -6,6 +6,11 @@
 > 
 > 在鲲鹏 920F（Armv9 + SVE-512 + SME, 16 NUMA × 38 核）上，**8/9 测试 case 的 16 线程性能超越 oneDNN**（快 1.68~3.54x，A1/A2/A3 落地后复测）。
 >
+> **最新（2026-08-29）**：GEMM 后端切换 **arm_gemm 53.1.0** 后（不再用 OpenBLAS），
+> 59/59 形状**全胜 OpenBLAS**（geomean 1.99x，合计 2.50x；大形状 ≈94% SVE-512 峰值）——
+> 全量逐形状表见 `docs/final_benchmark_bfd6b1e.md`。与 **oneDNN** 的对照（e2e + benchdnn）
+> 进行中，工具、OOM 根因、判读矩阵见 `docs/onednn_comparison.md`。
+>
 > 逐 case 正确性经 **fp64 直接卷积参考**验证：fp32 舍入误差相对 ~2-6e-6（随 IC 增长的是绝对误差，相对误差恒定），符合 fp32 精度预期。
 
 ## 目录结构
@@ -33,15 +38,30 @@ winograd_conv/
 │   ├── test_ref_vs_nchw.cpp               ← NCHW 包装 vs 原生 ref 必须 bit-exact
 │   ├── bench_winograd.cpp                 ← 性能基准（读 CSV，测 GFLOPS）
 │   └── profile_case.cpp                   ← 单 case profiling（perf 友好，含 --timing）
+├── swish_sve/
+│   ├── swish_sve.h                        ← SVE 高性能 Swish/SiLU 实现（ACLE intrinsics + fexpa/fscale）
+│   └── swish_sve_bench.cpp                ← 正确性验证 + 性能基准（对比标量 ref）
 ├── shapes/
 │   ├── conv_all.csv                       ← 与 benchdnn 可对照的基准用例集（59 行，`#` 分节）
 │   └── README.md                          ← 各节测哪个假设 + 运行/对比/profiling 指南
 ├── tools/
-│   └── compare.sh                         ← 极简对比脚本（输出 mb,ic,ih,iw,oc,ours_ms）
+│   ├── compare.sh                         ← 极简对比脚本（输出 mb,ic,ih,iw,oc,ours_ms）
+│   ├── filter_sweep.sh                    ← M=25 选核实验（auto/6x4VL/8x1VL/inter）
+│   ├── gen_benchdnn_list.sh               ← 生成 benchdnn 描述符清单 shapes/conv_all.list
+│   ├── arm_gemm_repro.cpp                 ← arm_gemm 布局契约最小复现（--dump 诊断）
+│   ├── onednn/
+│   │   ├── ab_onednn.sh                   ← 单 sbatch 作业 A/B（ours/e2e/benchdnn/filter+merge）
+│   │   ├── run_onednn_e2e.sh              ← oneDNN 端到端计时（primitive 复用 + 诊断矩阵）
+│   │   ├── run_benchdnn.sh                ← benchdnn conv（--alg=WINO / auto）
+│   │   ├── onednn_e2e.cpp                 ← e2e 源码（CSV / --shape / --diag 三种模式）
+│   │   └── merge_onednn.sh                ← 三列合并（ours/e2e/benchdnn）
+│   └── diag_ab.sh                         ← ⚠️ 临时诊断脚本，闭环后删除
 └── docs/
     ├── algorithm.md                       ← 算法详解（数学、布局、缓冲、并行、ISA 内核、精度）
     ├── why_faster_than_acl_23.11.md       ← 为什么比 ACL 23.11 快（独立分析，含例子）
     ├── timing_breakdown_920f.md           ← 920F 步耗时拆解与并行效率（--timing + 线程扩展实测）
+    ├── final_benchmark_bfd6b1e.md         ← 终局基准：arm_gemm vs OpenBLAS（59 形状全表）
+    ├── onednn_comparison.md               ← oneDNN 对照数据/工具/判读（含 e2e OOM 根因）★
     └── acl_reference/                     ← ACL 参考文档（从 oneDNN 源码树复制）
         ├── README.md                      ← 文档索引与使用场景
         ├── acl_wino_neon_intrinsics_annotated.md
@@ -134,6 +154,16 @@ numactl --interleave=all ./bench_winograd --sve --nhwc --threads 32 shapes.csv
 > `./tools/compare.sh --threads 16 --isa sve shapes/conv_all.csv` 直接输出 `mb,ic,ih,iw,oc,ours_ms` 表。
 > 该 README 同时给出 CSV 行 → benchdnn 描述符的规则（`mb4_ic192_ih40iw40_oc192_oh40ow40_kh3kw3_sh1sw1_ph1pw1`）与 profiling 对照计数器。
 
+### 与 oneDNN 对照（e2e + benchdnn）
+
+工具、OOM 根因与判读矩阵见 **`docs/onednn_comparison.md`**。一条命令跑全套
+（ours 59 形状 / oneDNN e2e / benchdnn WINO+auto / filter_sweep / 合并表）：
+
+```bash
+# 920F 集群：单作业内 A/B（node03 跨作业有 3~7x 性能态，跨作业对比一律作废）
+sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"
+```
+
 ### 单 case profiling（perf 友好）
 
 ```bash
@@ -176,6 +206,32 @@ Tiles: 100 (10x10) | Winograd: F(4,4,3,3) | GEMMs: 36
   Tile extract          1.08 ms  ( 6.8%)
   Input transform       2.78 ms  (17.6%)
   ...
+```
+
+### Swish/SiLU SVE 性能基准
+
+```bash
+# 需要 SVE 编译
+cmake .. -DENABLE_SVE=ON
+make swish_sve_bench
+
+# 运行（正确性 + 性能）
+./swish_sve_bench
+```
+
+输出示例：
+```
+=== Swish SVE Benchmark ===
+SVE vector length: 512 bits (16 floats/vec)
+
+--- Correctness ---
+  fwd: max_abs_err=1.2e-06  max_rel_err=2.3e-06  (1048576 samples, alpha=1.0000, range=[-10.0,10.0])
+  bwd: max_abs_err=8.5e-07  max_rel_err=1.8e-06  (1048576 samples, alpha=1.0000)
+
+--- Performance (1M elements) ---
+  scalar_ref: 1048576 x 100 elems | 15.2 ns/elem | 0.53 GB/s | alpha=1.0000
+  silu(alpha=1): 1048576 x 100 elems | 0.31 ns/elem | 25.8 GB/s
+  fwd: 1048576 x 100 elems | 0.33 ns/elem | 24.2 GB/s | alpha=1.0000
 ```
 
 ## 算法概述
@@ -383,18 +439,21 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 ### GEMM 内核切换
 
 3 种 GEMM 内核编译期选择（互斥）：
-- `USE_ARM_GEMM`：ACL JIT SVE 内核（与 oneDNN 相同），`-DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=...`
-- `USE_OPENBLAS`：`cblas_sgemm`，`-DUSE_OPENBLAS=ON`（当前使用）
-- 默认：naive 三重循环
+- `USE_ARM_GEMM`：ACL arm_gemm JIT SVE 内核（与 oneDNN 相同），`-DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=...` —— **✅ 生产后端，已在 920F 验证 59/59 全胜 OpenBLAS**（构建见 `tools/build_arm_gemm.md`）
+- `USE_OPENBLAS`：`cblas_sgemm`，`-DUSE_OPENBLAS=ON`（历史后端，已被 arm_gemm 取代）
+- 默认：naive 三重循环（开发/验证用）
 
 ### 下一步优化方向
 
 详见 `AGENTS.md` 的"下一步优化方向"和 `PERFORMANCE_ANALYSIS.md` 的"新增优化思路"。
 
-主要方向（针对慢 case 0/1/2）：
-1. **Tile 分块处理**：8 tile/组，数据放 L2（768KB）（注意：分块会放大 V 的重复读取，只在 V 小时有效，详见 AGENTS.md）
-2. **变换函数专用化**：F(4,4) B^T 有 50% 零元素可跳过
-3. **arm_gemm 替换 OpenBLAS**：JIT 针对小矩阵优化
+- ✅ **arm_gemm 替换 OpenBLAS** 已完成（59/59 全胜，见 `docs/final_benchmark_bfd6b1e.md`）。
+- ✅ **M=25 选核实验** 已闭环（`tools/filter_sweep.sh`）：auto 保持最优，不改选核。
+- 🔄 **与 oneDNN 对照** 进行中（`docs/onednn_comparison.md`，等集群重跑出 e2e 数据）。
+- 剩余方向（针对大形状 / 深层瘦条之外的优化空间，按需取舍）：
+  1. **Tile 分块处理**：8 tile/组，数据放 L2（768KB）（注意：分块会放大 V 的重复读取，只在 V 小时有效，详见 AGENTS.md）
+  2. **变换函数专用化**：F(4,4) B^T 有 50% 零元素可跳过
+  3. **V 跨调用缓存**：权重变换在 benchmark/推理循环中跨调用复用（key = 权重指针 + shape）
 
 ### 添加新配置（如 F(6,6,3,3)）
 

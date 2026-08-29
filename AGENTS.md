@@ -11,6 +11,30 @@ Winograd 卷积复刻项目：基于 ACL（Arm Compute Library）的算法思路
 **目标平台**：AArch64（华为鲲鹏 920F / Armv9 + SVE-512 + SME）。
 L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
 
+## 当前状态（2026-08-29）— 新 agent 先读这里
+
+- **正确性**：`--verify`（fp64 直接卷积参考 + 相对容差 1e-4）全过。arm_gemm 后端布局契约
+  已修复（V 按 K 主序散写，`WINO_GEMM_BTRANS=0` 可回退对照），详见「历史修复记录」末尾。
+- **性能终局（arm_gemm vs OpenBLAS，同作业）**：**59/59 形状全胜**，geomean **1.99x**，
+  合计 321.9 vs 804.9ms = **2.50x**；大形状 4,384,160²,384 3.02x ≈94% SVE-512 峰值。
+  全量逐形状表：`docs/final_benchmark_bfd6b1e.md`。
+- **与 oneDNN 对照（进行中）**：工具 `tools/onednn/`（ab_onednn.sh = 单作业 A/B：
+  ours / e2e / benchdnn WINO+auto / filter_sweep / 合并表）。e2e 此前系统性 OOM 的
+  **根因 = conv PD 误传 dilates={1,1}**（不是 omp_set_num_threads——8244944 是错修），
+  已按用户参考格式修复（4bdc3ee）。判读矩阵、探针、坑：**`docs/onednn_comparison.md`**。
+  ⚠️ **benchdnn 数字疑似近单线程**（比 ours 慢 22~164x），与 16T ours 比加速比前先核实。
+- **M=25 选核**：已闭环（`tools/filter_sweep.sh`），**auto 保持最优**，不改选核。
+- **运行协议**：所有性能对比必须**单 sbatch 作业内 A/B**
+  （`sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"`）——node03
+  跨作业有 3~7x 性能态，跨作业数字一律作废。ours 侧计时只信**无 debug**（E3/E5）读数，
+  `WINO_GEMM_DEBUG=1`（E1）会放大小形状。
+- **判读/交接**：完整作业日志可能过长——`ab_onednn.sh` 末尾自动生成
+  **`build/SUMMARY.txt`**（数据行数 / impl 直方图 / 诊断矩阵 / 合并表），判读与交给
+  其他机器上的 agent 只取这一份即可；判读清单见 `docs/onednn_comparison.md` §七。
+- **git 边界**：集群代码是 scp 文件副本（**无 .git**，CRLF 由脚本 `sed` 自愈）。
+  本地仓库 `README.md` 与 `swish_sve/` 是用户未提交改动——**绝不 stage**（只 `git add`
+  具名文件）；`tools/diag_ab.sh` 是临时诊断脚本，闭环后删除。
+
 ## 架构
 
 ### 数据流
@@ -207,7 +231,7 @@ numactl --interleave=all env OMP_PROC_BIND=spread OMP_PLACES=cores \
 
 ## 已知限制
 
-1. **GEMM 内核**：3 种可选（arm_gemm JIT SVE > OpenBLAS > naive）。默认 naive，生产环境推荐 arm_gemm（代码就绪、920F 构建指南见 `tools/build_arm_gemm.md`，待 920F 实测验证）
+1. **GEMM 内核**：3 种可选（arm_gemm JIT SVE > OpenBLAS > naive）。**生产后端 = arm_gemm**（已在 920F 验证：59/59 全胜 OpenBLAS，见 `docs/final_benchmark_bfd6b1e.md`；构建指南 `tools/build_arm_gemm.md`）。OpenBLAS/naive 保留作对照与开发
 2. **NCHW 包装 vs 原生**：NCHW 现在是「转换 + NHWC 计算」包装。计算是共享的，NCHW 输入的实际开销 = 转换（整图两遍全量数据搬运）vs 旧内核的跨步提取/写回。2026-08-20 在 920F（9T NCHW 端到端）实测**转换开销较小**，后续性能比较统一用 NCHW 端到端口径。若某些 shape 转换反而更慢，可回退用 `ref/winograd_conv_nchw_ref.cpp` 里的原生内核（`Layout::NCHW` 换成 `winograd_convolution_nchw_ref`）
 3. **OpenMP 并行**：权重变换 + 输入/输出变换 + GEMM 均已并行。Phase 1-3 合并 1 区域，2 barrier（输入→GEMM, GEMM→输出），输出 `nowait`。权重变换独立并行区域
 4. **多线程扩展性受限**：8 线程后加速停滞，剩余瓶颈：OpenMP barrier 开销、GEMM 内核质量（OpenBLAS vs arm_gemm JIT）、NUMA 远程访问（920F 16 NUMA）
@@ -431,9 +455,10 @@ onednn 的 32/38 行为反常：row 8/9 塌缩 4-6x（0.514→0.087ms）、row 5
 
 **针对慢 case（0/1/2）的优化**：
 
-1. **arm_gemm 替换 OpenBLAS**（预期 Case 0/1/2 各 -1~2ms）✅ 代码就绪，待 920F 实测
-   - OpenBLAS 对小 K（48-192）矩阵效率不如 arm_gemm JIT
-   - arm_gemm 针对具体矩阵大小自动生成最优 SVE 指令序列
+1. **arm_gemm 替换 OpenBLAS** ✅ **已完成（2026-08-28）**：59/59 全胜 OpenBLAS，
+   geomean 1.99x（见 `docs/final_benchmark_bfd6b1e.md`）；后续小矩阵瓶颈已不在内核选择。
+   - 背景：OpenBLAS 对小 K（48-192）矩阵效率不如 arm_gemm JIT；arm_gemm 针对具体矩阵
+     大小自动生成最优 SVE 指令序列。
    - 使用：`-DUSE_ARM_GEMM=ON -DENABLE_SVE=ON -DARM_GEMM_ROOT=/path/to/ComputeLibrary-23.11/ComputeLibrary-23.11`
    - 构建/验证：`tools/build_arm_gemm.md`；内核选择机制参考 `docs/acl_reference/acl_wino_implementation_details.md`
 
@@ -454,7 +479,7 @@ onednn 的 32/38 行为反常：row 8/9 塌缩 4-6x（0.514→0.087ms）、row 5
    - 当 `NM * n_tiles * IC * 4 < 16MB` 时展平 N 个 batch（9→3 barriers）
    - 当内存大时保持 per-batch（避免 cache thrashing）
 
-**对已超越 oneDNN 的 case（3-8, 16T NHWC）**：⚠️ 该结论仅限 16T NHWC 微基准口径。2026-08-20 NCHW 端到端实测（9T）多数 case 落后 oneDNN——**不再存在「已优无需优化」的 case**，全部优先执行 arm_gemm JIT（见「9 线程 NCHW 端到端实测」）
+**对已超越 oneDNN 的 case（3-8, 16T NHWC）**：⚠️ 该结论仅限 16T NHWC 微基准口径。2026-08-20 NCHW 端到端实测（9T）多数 case 落后 oneDNN——**不再存在「已优无需优化」的 case**，全部优先执行 arm_gemm JIT（**已完成**，59/59 全胜，见「9 线程 NCHW 端到端实测」与 `docs/final_benchmark_bfd6b1e.md`）
 
 ## 扩展指南
 
@@ -517,7 +542,7 @@ CMake 选项：
    - 当 `NM * n_tiles * IC * 4 < 16MB` 时展平 N 个 batch（9→3 barriers）
    - 当内存大时保持 per-batch（避免 cache thrashing）
 
-**对已超越 oneDNN 的 case（3-8, 16T NHWC, 快 43-59%）**：⚠️ 该结论仅限 16T NHWC 微基准口径。2026-08-20 NCHW 端到端实测（9T）多数 case 落后 oneDNN——不再有「已优无需优化」的 case，全部优先 arm_gemm JIT（见「9 线程 NCHW 端到端实测」）
+**对已超越 oneDNN 的 case（3-8, 16T NHWC, 快 43-59%）**：⚠️ 该结论仅限 16T NHWC 微基准口径。2026-08-20 NCHW 端到端实测（9T）多数 case 落后 oneDNN——不再有「已优无需优化」的 case，全部优先 arm_gemm JIT（**已完成**，59/59 全胜，见「9 线程 NCHW 端到端实测」与 `docs/final_benchmark_bfd6b1e.md`）
 
 ### 新增优化思路（基于 920F 硬件特性 + 性能数据）
 
@@ -656,6 +681,10 @@ OMP_PROC_BIND=spread OMP_PLACES=cores ./bench_winograd --sve --nhwc --threads 32
 
 - **算法详解**：`docs/algorithm.md` — 当前实现的分步讲解（Winograd 数学、三步变换、数据/缓冲布局、OpenMP 并行结构、NEON/SVE/SME 内核、GEMM 选择、tile 边界、数值精度）
 - **快于 ACL 23.11 的分析**：`docs/why_faster_than_acl_23.11.md` — 独立分析：双方都是 Winograd+SVE，8/9 赢是固定开销主导的小负载微基准结果（含有效 GFLOPS 证据、3 个具体例子、6 个原因、验证清单）
+- **终局基准（arm_gemm vs OpenBLAS）**：`docs/final_benchmark_bfd6b1e.md` — 59 形状逐行表 + 散写回归验证 + E1 debug 计时陷阱
+- **oneDNN 对照**：`docs/onednn_comparison.md` — e2e/benchdnn 工具链、sbatch 运行协议、**e2e OOM 真根因（dilates 误传）与判读矩阵**、数据现状
+- **排障经验**：`docs/debugging_lessons.md` — 本次 OOM 排障的**弯路与方法论**（错修如何被证伪、红鲱鱼识别、源码≠设备、杀手实验）
+- **用例集与对比指南**：`shapes/README.md` — `conv_all.csv`（59 行）各节测哪个假设、CSV↔benchdnn 描述符规则、profiling 对照计数器
 - **ACL 参考文档**：`docs/acl_reference/` — 从 oneDNN 源码树复制的 ACL Winograd 实现分析文档（8 个文件）。用于指导后续优化（SVE/SME 汇编变换、arm_gemm GEMM 内核、权重变换手写公式等）
 - **性能分析**：`PERFORMANCE_ANALYSIS.md` — 完整优化历程（9 阶段）、9 case 对比数据、细粒度计时、差距分析、新优化思路（A-F）、数值精度分析（第 9 节）
 - **arm_gemm 构建指南**：`tools/build_arm_gemm.md` — 920F 上把 Winograd GEMM 切到 arm_gemm fp32-SVE 的完整步骤（cmake/make/内核名确认/正确性门/与 OpenBLAS A/B）
