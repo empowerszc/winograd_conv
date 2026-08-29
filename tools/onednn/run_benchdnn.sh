@@ -86,3 +86,9 @@ if [ "$N_PERF" -eq 0 ] && [ "$N_EXEC" -eq 0 ] && [ "$N_PASS" -gt 0 ]; then
     echo "!! WARNING: 无 perf/exec 行——merge 将整列置 N/A。"
     echo "   已加 --mode=p；若仍无 perf, 行，贴 head -20 $OUT 回来。"
 fi
+# 把自检写进 OUT 末尾（# 注释行，merge 忽略）——下一轮 SUMMARY 直接可见
+{
+    echo
+    echo "# run_benchdnn self-check: algo=${ALG[*]:-auto} threads=$THREADS numactl=${NUMACTL_ARGS:-none}"
+    echo "# PASSED=$N_PASS perf_lines=$N_PERF exec_lines=$N_EXEC"
+} >> "$OUT"
