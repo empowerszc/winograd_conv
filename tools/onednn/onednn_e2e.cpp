@@ -162,11 +162,17 @@ int main(int argc, char** argv) {
         }
     }
 
-    // 线程数交给 omp_set_num_threads + 外层 OMP_PROC_BIND/PLACES。
-    // 不用 dnnl::set_max_threads：它随 DNNL_CPU_THREADING_RUNTIME 条件编译，
+    // 线程数不调 omp_set_num_threads（2026-08-29 修复）：3.12.1 本 build 在
+    // OMP_PROC_BIND=close OMP_PLACES=cores 下，进程内调用它会让此后所有 oneDNN
+    // PD 创建系统性返回 out_of_memory——[preOMP] 探针在它之前成功（impl=jit:sve），
+    // [smoke] 在它之后 oom，而 benchdnn 同 env 不调该函数则 59 个 conv PD 全过，
+    // ⇒ 触发器就是这次调用。线程数改由外层脚本的 OMP_NUM_THREADS env 提供
+    // （libomp 首次初始化即读取，无 API 调用），与 benchdnn 同口径。
+    // dnnl::set_max_threads 也不可用：它随 DNNL_CPU_THREADING_RUNTIME 条件编译，
     // 部分发行包（如 3.12.1-release）里根本不存在。
 #ifdef _OPENMP
-    omp_set_num_threads(threads);
+    fprintf(stderr, "[thr] omp_get_max_threads=%d omp_get_num_procs=%d\n",
+            omp_get_max_threads(), omp_get_num_procs());
 #endif
     // 算法梯子：oneDNN 3.12.1 的 C++ 枚举只暴露 {auto, direct, winograd}
     // （dnnl::algorithm 无 convolution_gemm——该实现族由 direct 覆盖）。

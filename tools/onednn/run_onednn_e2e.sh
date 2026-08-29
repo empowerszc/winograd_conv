@@ -77,28 +77,50 @@ if [ -n "$probe_shp" ]; then
         > build/probe_verbose.txt 2>&1 || true
 fi
 
-# ---- 运行（与 our 侧同绑核）----
+# ---- 运行（与 our 侧同绑核；线程由 OMP_NUM_THREADS env 控制，与 benchdnn 同口径）----
+# 关键修复（2026-08-29）：3.12.1 本 build 在 OMP_PROC_BIND=close OMP_PLACES=cores 下，
+# 进程内调 omp_set_num_threads(N) 会让此后所有 oneDNN PD 创建系统性返回 out_of_memory
+# （[preOMP] 建 OMP 线程池前 ok impl=jit:sve，[smoke] 其后 oom；benchdnn 同 env 不调
+# 该函数则 59 个 conv PD 全过 ⇒ 触发器就是该调用）。修复 = 不调它，线程数由
+# OMP_NUM_THREADS env 提供（libomp 首次初始化即读取，无 API 调用）。
 echo "[onednn] threads=$THREADS warmup=$WARMUP repeats=$REPEATS alg=$ALG csv=$CSV"
-OMP_PROC_BIND=close OMP_PLACES=cores \
+OMP_PROC_BIND=close OMP_PLACES=cores OMP_NUM_THREADS=$THREADS \
     ./build/onednn_e2e "$CSV" "$THREADS" "$WARMUP" "$REPEATS" $ALG 2>build/onednn_e2e.err \
     | tee build/onednn_e2e.csv
 
 # ---- 自查：数据行数应等于形状数；异常时把 stderr 打出来（编译过了也可能 parse 失败
 #      或全部形状抛 dnnl::error）----
-nrows=$(awk '!/^#/ && !/^mb,/ && NF {c++} END {print c+0}' build/onednn_e2e.csv)
+count_rows() { awk '!/^#/ && !/^mb,/ && NF {c++} END {print c+0}' "$1"; }
+nrows=$(count_rows build/onednn_e2e.csv)
 echo "[onednn] data rows: $nrows"
 
-# ---- SVE 兜底：默认 ISA 下 PD 创建系统性 OOM（疑 brgconv:sve_512 的 pd
-#      is_initialized 失败 → primitive_desc_t::create 返回 out_of_memory）→ 关 SVE
-#      重试。3.12.1 AArch64 的 ONEDNN_MAX_CPU_ISA 合法值：
-#      default / advanced_simd(纯 NEON，无 SVE) / sve_128 / sve_256 / sve_512。
+# ---- 兜底 A：OMP_NUM_THREADS=$THREADS 下仍 OOM？→ 去掉 OMP_NUM_THREADS
+#      （=benchdnn 同配置，已被证明可建 PD）确认库本身仍好。此档线程数为 oneDNN
+#      默认（非 $THREADS），merge 时不可与 16 线程列直接比——仅作「库是否可用」证据。
 if [ "$nrows" -lt 10 ]; then
-    echo "[onednn] default ISA gave only $nrows rows; retrying with ONEDNN_MAX_CPU_ISA=advanced_simd (SVE off) ..."
+    echo "[onednn] OMP_NUM_THREADS=$THREADS gave only $nrows rows; retrying WITHOUT OMP_NUM_THREADS (benchdnn-equivalent env) ..."
+    OMP_PROC_BIND=close OMP_PLACES=cores \
+        ./build/onednn_e2e "$CSV" "$THREADS" "$WARMUP" "$REPEATS" $ALG \
+        2>build/onednn_e2e_nothr.err | tee build/onednn_e2e_nothr.csv
+    nrows2=$(count_rows build/onednn_e2e_nothr.csv)
+    if [ "$nrows2" -ge 10 ]; then
+        cp build/onednn_e2e_nothr.csv build/onednn_e2e.csv
+        cp build/onednn_e2e_nothr.err build/onednn_e2e.err
+        nrows=$nrows2
+        echo "[onednn] NOTE: promoted run WITHOUT OMP_NUM_THREADS ($nrows rows) - thread count = oneDNN default (not $THREADS); merge comparison may be unfair"
+    fi
+fi
+
+# ---- 兜底 B：仍不够 → 关 SVE 重试（3.12.1 AArch64 的 ONEDNN_MAX_CPU_ISA 合法值：
+#      default / advanced_simd(纯 NEON，无 SVE) / sve_128 / sve_256 / sve_512）。
+#      已知 oom 根因是 omp_set_num_threads 而非 ISA，此兜底只是最后保险。
+if [ "$nrows" -lt 10 ]; then
+    echo "[onednn] still insufficient ($nrows rows); retrying with ONEDNN_MAX_CPU_ISA=advanced_simd (SVE off) ..."
     OMP_PROC_BIND=close OMP_PLACES=cores \
         ONEDNN_MAX_CPU_ISA=advanced_simd \
         ./build/onednn_e2e "$CSV" "$THREADS" "$WARMUP" "$REPEATS" $ALG \
         2>build/onednn_e2e_nosve.err | tee build/onednn_e2e_nosve.csv
-    nrows_ns=$(awk '!/^#/ && !/^mb,/ && NF {c++} END {print c+0}' build/onednn_e2e_nosve.csv)
+    nrows_ns=$(count_rows build/onednn_e2e_nosve.csv)
     if [ "$nrows_ns" -ge 10 ]; then
         cp build/onednn_e2e_nosve.csv build/onednn_e2e.csv
         cp build/onednn_e2e_nosve.err build/onednn_e2e.err
@@ -120,14 +142,16 @@ echo "[onednn] via alg histogram (which oneDNN alg actually ran per shape):"
 grep -o 'via alg=[a-z]*' build/onednn_e2e.err 2>/dev/null | sort | uniq -c || true
 echo "[onednn] impl histogram (pd.impl_info_str(): which impl actually ran - OOM 定位关键):"
 grep -o 'impl=[^ ]*' build/onednn_e2e.err 2>/dev/null | sort | uniq -c || true
-# 库级冒烟探针（版本一致性 + eltwise 非 conv PD）+ verbose info 行（ISA/线程检测）
+# 库级冒烟探针（版本一致性 + eltwise 非 conv PD + [thr] env 线程数确认）+ verbose info
+# 行（ISA/线程检测）。按 err 文件逐一列出：主运行 / 兜底 A(no OMP_NUM_THREADS) /
+# 兜底 B(SVE off)。[thr] 行确认 OMP_NUM_THREADS env 是否被 libomp 真正采纳。
 if [ -s build/onednn_e2e.err ]; then
-    echo "[onednn] ---- [env]/[smoke]/[preOMP]/info 探针（stderr 顶部）----"
-    grep -E '^\[env\]|^\[smoke\]|^\[capi|^\[heap\]|^\[preOMP\]|^dnnl_verbose,info|^parsed ' build/onednn_e2e.err | head -15
-    if [ -s build/onednn_e2e_nosve.err ]; then
-        echo "[onednn] ---- 探针（SVE-off 重试；dnnl_verbose,info 的 isa= 字段确认 advanced_simd 是否生效）----"
-        grep -E '^\[env\]|^\[smoke\]|^\[preOMP\]|^dnnl_verbose,info' build/onednn_e2e_nosve.err | head -6
-    fi
+    echo "[onednn] ---- 探针（按 err 文件逐一列出：主运行 / nothr / nosve）----"
+    for ef in build/onednn_e2e.err build/onednn_e2e_nothr.err build/onednn_e2e_nosve.err; do
+        [ -s "$ef" ] || continue
+        echo "[onednn] ---- $ef ----"
+        grep -E '^\[env\]|^\[thr\]|^\[smoke\]|^\[capi|^\[heap\]|^\[preOMP\]|^dnnl_verbose,info|^parsed ' "$ef" | head -12
+    done
 fi
 if [ -s build/probe_verbose.txt ]; then
     echo "[onednn] ---- build/probe_verbose.txt (ONEDNN_VERBOSE=all, default ISA, first shape) ----"
