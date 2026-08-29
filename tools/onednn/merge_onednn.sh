@@ -25,8 +25,10 @@ OURS="${1:?ours.csv}"; E2E="${2:?onednn_e2e.csv}"; BD_A="${3:?benchdnn_raw.txt}"
 # 含 rN 标签（r[0-9]+"）的才算 benchdnn 原始输出，否则当 shapes CSV。
 CSV="${4:-shapes/conv_all.csv}"
 BD_B=""
+# benchdnn 原始输出判据：perf, 行（--mode=p）或 PASSED 行（r[0-9]+" 的 corr 模式）；
+# 二者皆无才算 shapes CSV。
 if [ $# -ge 4 ] && [ -n "$4" ] && [ -f "$4" ] \
-   && grep -qE 'r[0-9]+"' "$4" 2>/dev/null; then
+   && grep -qE '^perf,|r[0-9]+"' "$4" 2>/dev/null; then
     BD_B="$4"
     CSV="${5:-shapes/conv_all.csv}"
 fi
@@ -46,6 +48,9 @@ pre_parse_perf() {   # $1 raw → $2 "key minms"
             if (match(prb, /ih[0-9]+/))  ih = substr(prb, RSTART+2, RLENGTH-2)
             if (match(prb, /iw[0-9]+/))  iw = substr(prb, RSTART+2, RLENGTH-2)
             if (match(prb, /oc[0-9]+/))  oc = substr(prb, RSTART+2, RLENGTH-2)
+            # benchdnn 缩写 prb：相邻相等对省略后者（ih==iw → iw 不打印）——
+            # iw 缺失 ⟺ iw==ih。兼容后再校验，缺任何键仍丢弃。
+            if (iw == "" && ih != "") iw = ih
             if (mb=="" || ic=="" || ih=="" || iw=="" || oc=="") next
             key = mb","ic","ih","iw","oc
             if (!(key in mn) || ms+0 < mn[key]) mn[key] = ms
@@ -66,6 +71,7 @@ pre_parse_exec() {   # $1 raw → $2 "key minms"
             if (match(desc, /ih[0-9]+/))  ih = substr(desc, RSTART+2, RLENGTH-2)
             if (match(desc, /iw[0-9]+/))  iw = substr(desc, RSTART+2, RLENGTH-2)
             if (match(desc, /oc[0-9]+/))  oc = substr(desc, RSTART+2, RLENGTH-2)
+            if (iw == "" && ih != "") iw = ih
             if (mb=="" || ic=="" || ih=="" || iw=="" || oc=="") next
             key = mb","ic","ih","iw","oc
             if (!(key in mn) || ms+0 < mn[key]) mn[key] = ms
@@ -86,6 +92,7 @@ build_src() {   # $1 raw → $2 "key minms"
 build_src "$BD_A" /tmp/merge_src_a.txt
 NAME_A=$(name_of "$BD_A")
 [ -s /tmp/merge_src_a.txt ] && NO_SRC_A=0 || NO_SRC_A=1
+NO_SRC_B=1
 if [ -n "$BD_B" ]; then
     build_src "$BD_B" /tmp/merge_src_b.txt
     NAME_B=$(name_of "$BD_B")

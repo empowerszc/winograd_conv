@@ -114,6 +114,12 @@ dilates 旧 bug，修复生效**，e2e 应出全量 59 行数据。
      tests/benchdnn/utils/perf_report.hpp + measure_perf_individual 确认）。
    - ③ merge：只认 perf 行（优先）与 ONEDNN_VERBOSE exec 行（兜底）；两者都无 →
      整列 N/A（彻底不用 PASSED 聚合时间），merge_summary 标 `[NO-SRC]`。
+     ⚠️ benchdnn 的 perf `%prb%` 字段是**缩写描述符**（相邻相等对省略后者：
+     ih==iw 时打印 `mb4ic192ih40oc192oh40kh3ph1...`，无 `iw`/`ow`/`kw`）。
+     merge 必须对 `iw` 缺失回退 `iw=ih`，否则 59 个正方形状全部被静默丢弃 →
+     误报 `[NO-SRC]`。**2026-08-29 首跑的 [NO-SRC] 实为此 bug**（perf 行其实
+     全在），非「无 perf 行」；另一个配套 bug：BD_B 嗅探用 `r[0-9]+"` 匹配
+     PASSED 行，但 `--mode=p` 不打印 PASSED 行，已改为 `^perf,|r[0-9]+"`。
 2. **e2e 列 = 最终对照**（同库 onednn-3.12.1-release、同 16 线程绑核、单次执行）：
    初步趋势——oneDNN brgconv:sve_512（GEMM 卷积）小形状更快（0.35~0.87x），
    我们 F(4,4,3,3) 在大而深形状反超（4,384,80²,96 1.49x / 4,768,40²,96 1.78x）。
@@ -170,8 +176,9 @@ dilates 旧 bug，修复生效**，e2e 应出全量 59 行数据。
      `jit:asimd` ⇒ SVE 未生效（检查 ONEDNN_MAX_CPU_ISA / 编译）。
    - **合并表加速比**：`onednn/ours`、`benchdnn_*/ours` >1 即我们快；benchdnn 列
      **应为 perf 单次行**（--mode=p + numactl 绑核，50f9f2a），与 e2e 列同量级；
-     merge_summary 应显示 `src≈59 na≈0`，若出现 `[NO-SRC]` 整列 N/A 属正常
-     （文件无 perf/exec 行，说明旧脚本/旧模式，PASSED 聚合数不可比）。
+     merge_summary 应显示 `src≈59 na≈0`；若 `[NO-SRC]` 整列 N/A → 先 `grep -c
+     '^perf,' build/benchdnn_*.txt` 确认确有 perf 行（--mode=p 应有），并确认
+     merge 是最新版（旧 merge 曾因缩写 prb 缺 iw 误报 [NO-SRC]，已修）。
    - **P0/P1 频探**：主频应稳定 2.0GHz（606/608 核），漂移说明节点状态异常。
 
 1. **同作业才可比**：任何跨作业数字（含本文历史数字）只作定性参考，性能结论必须
