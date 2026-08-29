@@ -120,4 +120,18 @@ echo "[onednn] via alg histogram (which oneDNN alg actually ran per shape):"
 grep -o 'via alg=[a-z]*' build/onednn_e2e.err 2>/dev/null | sort | uniq -c || true
 echo "[onednn] impl histogram (pd.impl_info_str(): which impl actually ran - OOM 定位关键):"
 grep -o 'impl=[^ ]*' build/onednn_e2e.err 2>/dev/null | sort | uniq -c || true
+# 库级冒烟探针（版本一致性 + eltwise 非 conv PD）+ verbose info 行（ISA/线程检测）
+if [ -s build/onednn_e2e.err ]; then
+    echo "[onednn] ---- [env]/[smoke] 探针（stderr 顶部）----"
+    grep -E '^\[env\]|^\[smoke\]|^parsed ' build/onednn_e2e.err | head -10
+    if [ -s build/onednn_e2e_nosve.err ]; then
+        echo "[onednn] ---- [env]/[smoke] 探针（SVE-off 重试）----"
+        grep -E '^\[env\]|^\[smoke\]' build/onednn_e2e_nosve.err | head -5
+    fi
+fi
+if [ -s build/probe_verbose.txt ]; then
+    echo "[onednn] ---- build/probe_verbose.txt (ONEDNN_VERBOSE=all, default ISA, first shape) ----"
+    head -120 build/probe_verbose.txt
+    echo "[onednn] ---- end probe ----"
+fi
 echo "[onednn] full result: build/onednn_e2e.csv (stdout is the file)"

@@ -159,6 +159,42 @@ int main(int argc, char** argv) {
         ladder_name = { "auto", "direct", "winograd" };
     }
 
+    // ---- 库级冒烟探针（PD 创建系统性 OOM 时二分用）----
+    // 源码分析（primitive_desc_iface.cpp:73-74）：out_of_memory 只可能来自
+    //  ① pd_iterator_ 为空（分配失败） ② pd_iterator_->is_initialized() 为假
+    // （attr_.is_initialized() 被读错——header/lib 结构体布局不一致的 ABI 症状）。
+    // 实现级 create 失败只会被迭代器跳过 → 最终 unimplemented，绝不会 oom。
+    // 所以只要 PD 创建 oom，就与算法/形状/布局/ISA 无关，是库级故障（集群观察到的
+    // 全 oom、SVE-off 也 oom、winograd 空实现列表也 oom 与此完全吻合）。
+    // ① header 宏 vs 链接库运行时版本：版本不一致 = ABI 破坏，该包直接判废。
+    const auto *ver = dnnl::version();
+    fprintf(stderr,
+            "[env] header DNNL_VERSION=%d.%d.%d lib runtime=%d.%d.%d "
+            "cpu_runtime=%u gpu_runtime=%u hash=%s\n",
+            DNNL_VERSION_MAJOR, DNNL_VERSION_MINOR, DNNL_VERSION_PATCH,
+            ver->major, ver->minor, ver->patch, ver->cpu_runtime,
+            ver->gpu_runtime, ver->hash ? ver->hash : "(null)");
+    // ② eltwise PD：非 conv 原语，验证引擎/attr/迭代器整条建 PD 路径。
+    //    若 eltwise 也 oom ⇒ 库二进制级坏（换 oneDNN 安装/重编）；若 eltwise
+    //    正常而 conv 全 oom ⇒ conv 专属（罕见，按 conv 实现表继续查）。
+    {
+        using dt = dnnl::memory::data_type;
+        using tag = dnnl::memory::format_tag;
+        dnnl::memory::dims d{1, 16, 16, 16};
+        auto smd = dnnl::memory::desc(d, dt::f32, tag::any);
+        dnnl::engine e0(dnnl::engine::kind::cpu, 0);
+        try {
+            auto epd = dnnl::eltwise_forward::primitive_desc(e0,
+                    dnnl::prop_kind::forward, dnnl::algorithm::eltwise_relu,
+                    smd, smd, 0.0f, 0.0f);
+            fprintf(stderr, "[smoke] eltwise PD ok impl=%s\n",
+                    epd.impl_info_str());
+        } catch (const dnnl::error &e) {
+            fprintf(stderr, "[smoke] eltwise PD FAIL status=%d(%s) what=%s\n",
+                    (int)e.status, status_name((int)e.status), e.what());
+        }
+    }
+
     fprintf(stdout, "# run: threads=%d warmup=%d repeats=%d alg=%s\n",
             threads, warmup, repeats, alg_s.c_str());
     fprintf(stdout, "mb,ic,ih,iw,oc,onednn_ms\n");
