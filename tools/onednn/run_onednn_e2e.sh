@@ -64,25 +64,24 @@ $CXX -O3 -std=c++17 -fopenmp -I"$ROOT/include" \
     tools/onednn/onednn_e2e.cpp \
     -L"$LIBS_DIR" -Wl,-rpath,"$LIBS_DIR" -ldnnl -o build/onednn_e2e
 
-# ---- verbose 探针（首个形状，1 轮）：ONEDNN_VERBOSE 输出会混进 stdout，
-#      所以单独起一次进程、单独文件，不污染数据流；用于定位 PD 创建 OOM 时
-#      oneDNN 到底选了哪个实现（brgconv:sve_512？）、失败发生点在哪。
-probe_shp=""
-[ -f "$CSV" ] && probe_shp=$(awk 'NR>1 && $0 !~ /^#/ {print; exit}' "$CSV")
-if [ -n "$probe_shp" ]; then
-    printf 'mb,ic,ih,iw,oc,kh,kw,stride_h,stride_w,pad_h,pad_w,dil_h,dil_w,grp,count\n%s\n' \
-        "$probe_shp" > build/probe_shape.csv
-    echo "[onednn] verbose probe on first shape (1 iter) -> build/probe_verbose.txt"
-    ONEDNN_VERBOSE=all ./build/onednn_e2e build/probe_shape.csv "$THREADS" 1 1 $ALG \
+# ---- verbose 探针（首个形状、独立进程、1 轮）：ONEDNN_VERBOSE 输出会混进 stdout，
+#      所以单独起一次进程、单独文件，不污染数据流；用于定位 PD 创建失败时 oneDNN
+#      到底选了哪个实现、失败发生在哪。用 --shape 模式（不带探针）且 e2e 只在
+#      ONEDNN_VERBOSE 未设置时 set_verbose(1) ⇒ env 的 all 级不会被覆盖。
+probe_shp5=""
+[ -f "$CSV" ] && probe_shp5=$(awk 'NR>1 && $0 !~ /^#/ {split($0,a,","); print a[1]","a[2]","a[3]","a[4]","a[5]; exit}' "$CSV")
+if [ -n "$probe_shp5" ]; then
+    echo "[onednn] verbose probe on first shape $probe_shp5 (1 iter) -> build/probe_verbose.txt"
+    ONEDNN_VERBOSE=all ./build/onednn_e2e --shape "$probe_shp5" "$THREADS" 1 1 $ALG \
         > build/probe_verbose.txt 2>&1 || true
 fi
 
 # ---- 运行（与 our 侧同绑核；线程由 OMP_NUM_THREADS env 控制，与 benchdnn 同口径）----
-# 关键修复（2026-08-29）：3.12.1 本 build 在 OMP_PROC_BIND=close OMP_PLACES=cores 下，
-# 进程内调 omp_set_num_threads(N) 会让此后所有 oneDNN PD 创建系统性返回 out_of_memory
-# （[preOMP] 建 OMP 线程池前 ok impl=jit:sve，[smoke] 其后 oom；benchdnn 同 env 不调
-# 该函数则 59 个 conv PD 全过 ⇒ 触发器就是该调用）。修复 = 不调它，线程数由
-# OMP_NUM_THREADS env 提供（libomp 首次初始化即读取，无 API 调用）。
+# 关键修复（2026-08-29）：conv PD 构造不再显式传 dilates={1,1}（CSV 是 dh=dw=0），
+# 改用「带 bias、不带 dilates」的重载（oneDNN 内部 dilates 置 0）。此前错误 dilation
+# 在集群 build 里直达 impl → 系统性 PD 创建 OOM（[PD-ALL] 全 oom），与线程数/ISA
+# 无关（nothr=608 线程、SVE off 都一样 oom）——8244944 的 omp_set_num_threads
+# 根因结论是错的，已更正。
 echo "[onednn] threads=$THREADS warmup=$WARMUP repeats=$REPEATS alg=$ALG csv=$CSV"
 OMP_PROC_BIND=close OMP_PLACES=cores OMP_NUM_THREADS=$THREADS \
     ./build/onednn_e2e "$CSV" "$THREADS" "$WARMUP" "$REPEATS" $ALG 2>build/onednn_e2e.err \
@@ -113,7 +112,6 @@ fi
 
 # ---- 兜底 B：仍不够 → 关 SVE 重试（3.12.1 AArch64 的 ONEDNN_MAX_CPU_ISA 合法值：
 #      default / advanced_simd(纯 NEON，无 SVE) / sve_128 / sve_256 / sve_512）。
-#      已知 oom 根因是 omp_set_num_threads 而非 ISA，此兜底只是最后保险。
 if [ "$nrows" -lt 10 ]; then
     echo "[onednn] still insufficient ($nrows rows); retrying with ONEDNN_MAX_CPU_ISA=advanced_simd (SVE off) ..."
     OMP_PROC_BIND=close OMP_PLACES=cores \
@@ -131,6 +129,44 @@ if [ "$nrows" -lt 10 ]; then
     fi
 fi
 
+# ---- 兜底 C：仍不够 → 逐 shape 起独立进程（每个进程只建一个 conv PD，彻底绕开
+#      进程内跨 PD 状态污染；即便有残留状态问题也能出全量数据）。
+if [ "$nrows" -lt 10 ]; then
+    echo "[onednn] still insufficient ($nrows rows); retrying per-shape fresh processes ..."
+    : > build/onednn_e2e_ps.csv
+    : > build/onednn_e2e_ps.err
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        case "$line" in \#*) continue ;; esac
+        case "$line" in mb,*) continue ;; esac
+        shp5=$(awk -F, '{print $1","$2","$3","$4","$5}' <<<"$line")
+        OMP_PROC_BIND=close OMP_PLACES=cores OMP_NUM_THREADS=$THREADS \
+            ./build/onednn_e2e --shape "$shp5" "$THREADS" "$WARMUP" "$REPEATS" $ALG \
+            >> build/onednn_e2e_ps.csv 2>> build/onednn_e2e_ps.err
+    done < "$CSV"
+    nrows_ps=$(count_rows build/onednn_e2e_ps.csv)
+    if [ "$nrows_ps" -ge 10 ]; then
+        cp build/onednn_e2e_ps.csv build/onednn_e2e.csv
+        cp build/onednn_e2e_ps.err build/onednn_e2e.err
+        nrows=$nrows_ps
+        echo "[onednn] per-shape fresh processes produced $nrows rows -> promoted"
+    else
+        echo "[onednn] per-shape processes also insufficient ($nrows_ps rows); see build/onednn_e2e_ps.err"
+    fi
+fi
+
+# ---- 单 PD 诊断矩阵（各自独立进程）：直接验证根因 = 旧 dilates 参数 ----
+echo "[onednn] ---- 单 PD 诊断矩阵（各独立进程；验证修复）----"
+: > build/diag.txt
+for dc in eltwise_nchw eltwise_any \
+          conv_direct_nchw_nodil conv_direct_any_nodil conv_direct_any_dil1; do
+    OMP_PROC_BIND=close OMP_PLACES=cores OMP_NUM_THREADS=$THREADS \
+        ./build/onednn_e2e --diag "$dc" "$THREADS" >> build/diag.txt 2>&1 || true
+done
+cat build/diag.txt
+echo "[onednn] 判读：conv_direct_any_nodil=ok 且 conv_direct_any_dil1=FAIL ⇒ 根因确认为 dilates 旧 bug，修复生效；"
+echo "        eltwise_any=FAIL 属预期（该 build 不支持 eltwise+format_any，非数据路径）。"
+
 if [ -s build/onednn_e2e.err ]; then
     echo "!!! onednn_e2e stderr (parsed N shapes + per-shape skip reason):"
     cat build/onednn_e2e.err
@@ -142,15 +178,15 @@ echo "[onednn] via alg histogram (which oneDNN alg actually ran per shape):"
 grep -o 'via alg=[a-z]*' build/onednn_e2e.err 2>/dev/null | sort | uniq -c || true
 echo "[onednn] impl histogram (pd.impl_info_str(): which impl actually ran - OOM 定位关键):"
 grep -o 'impl=[^ ]*' build/onednn_e2e.err 2>/dev/null | sort | uniq -c || true
-# 库级冒烟探针（版本一致性 + eltwise 非 conv PD + [thr] env 线程数确认）+ verbose info
+# 库级探针（版本一致性 + eltwise 非 conv PD + [thr] env 线程数确认）+ verbose info
 # 行（ISA/线程检测）。按 err 文件逐一列出：主运行 / 兜底 A(no OMP_NUM_THREADS) /
-# 兜底 B(SVE off)。[thr] 行确认 OMP_NUM_THREADS env 是否被 libomp 真正采纳。
+# 兜底 B(SVE off) / 兜底 C(per-shape)。探针现在在数据流之后。
 if [ -s build/onednn_e2e.err ]; then
-    echo "[onednn] ---- 探针（按 err 文件逐一列出：主运行 / nothr / nosve）----"
-    for ef in build/onednn_e2e.err build/onednn_e2e_nothr.err build/onednn_e2e_nosve.err; do
+    echo "[onednn] ---- 探针（按 err 文件逐一列出：主运行 / nothr / nosve / per-shape）----"
+    for ef in build/onednn_e2e.err build/onednn_e2e_nothr.err build/onednn_e2e_nosve.err build/onednn_e2e_ps.err; do
         [ -s "$ef" ] || continue
         echo "[onednn] ---- $ef ----"
-        grep -E '^\[env\]|^\[thr\]|^\[smoke\]|^\[capi|^\[heap\]|^\[preOMP\]|^dnnl_verbose,info|^parsed ' "$ef" | head -12
+        grep -E '^\[env\]|^\[thr\]|^\[smoke\]|^\[smoke-any\]|^\[capi|^\[heap\]|^\[preOMP\]|^dnnl_verbose,info|^parsed ' "$ef" | head -12
     done
 fi
 if [ -s build/probe_verbose.txt ]; then
