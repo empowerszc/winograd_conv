@@ -61,5 +61,12 @@ OMP_PROC_BIND=close OMP_PLACES=cores OMP_NUM_THREADS=$THREADS ONEDNN_VERBOSE=exe
     || { echo "[benchdnn] exit $?; raw output in $OUT" >&2; tail -20 "$OUT" >&2; exit 1; }
 
 echo "[benchdnn] done -> $OUT"
-echo "[benchdnn] lines with rN label: $(grep -c 'r[0-9]*"' "$OUT" 2>/dev/null || echo 0)"
-echo "[benchdnn] exec-time lines (onednn_verbose,primitive,exec): $(grep -c ',primitive,exec,' "$OUT" 2>/dev/null || echo 0)"
+N_PASS=$(grep -c 'r[0-9]*"' "$OUT" 2>/dev/null || echo 0)
+N_EXEC=$(grep -c ',primitive,exec,' "$OUT" 2>/dev/null || echo 0)
+echo "[benchdnn] PASSED lines (rN): $N_PASS"
+echo "[benchdnn] exec-time lines (onednn_verbose,...exec): $N_EXEC"
+if [ "$N_EXEC" -eq 0 ] && [ "$N_PASS" -gt 0 ]; then
+    echo "!! WARNING: benchdnn 输出无 exec 行（ONEDNN_VERBOSE=exec 未生效）。"
+    echo "   merge_onednn.sh 将退 PASSED 的 (N ms) 兜底，数值可能被聚合放大——"
+    echo "   先确认集群这份 run_benchdnn.sh 是 29ffb97 之后版本（含 ONEDNN_VERBOSE=exec）。"
+fi

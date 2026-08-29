@@ -87,14 +87,7 @@ awk -F, -v exa="/tmp/merge_exec_a.txt" -v psa="/tmp/merge_pass_a.txt" \
        -v exb="/tmp/merge_exec_b.txt" -v psb="/tmp/merge_pass_b.txt" \
        -v name_a="$NAME_A" -v name_b="$NAME_B" \
        -v csv="$CSV" -v ours="$OURS" -v e2e="$E2E" '
-    # getbd：优先 exec 单次 ms；无 exec 时经 row2key→rN 查 PASSED 兜底。
-    function getbd(key, exf, psf,  j) {
-        if (key in exf) return exf[key]
-        for (j = 0; j < row; j++)
-            if (row2key[j] == key) return (j in psf) ? psf[j] : "N/A"
-        return "N/A"
-    }
-    BEGIN { row = 0; n = 0 }
+    BEGIN { row = 0; n = 0; n_exa=n_psa=n_naa=n_exb=n_psb=n_nab=0 }
     # exec/pass 文件都是 "key 空格 ms"（无逗号），用 $0 切，不受 -F, 影响
     FILENAME == exa { split($0, t, " "); ex_a[t[1]] = t[2]; next }
     FILENAME == psa { split($0, t, " "); ps_a[t[1]] = t[2]; next }
@@ -117,9 +110,15 @@ awk -F, -v exa="/tmp/merge_exec_a.txt" -v psa="/tmp/merge_pass_a.txt" \
         for (i = 1; i <= n; i++) {
             k = order[i]
             e = (k in em) ? em[k] : "N/A"
-            a = getbd(k, ex_a, ps_a)
+            # 数据源统计：优先 exec 单次 ms；无 exec 才经 row2key→rN 退 PASSED 兜底。
+            a = "N/A"
+            if (k in ex_a) { a = ex_a[k]; n_exa++ }
+            else { for (j = 0; j < row; j++) if (row2key[j] == k && (j in ps_a)) { a = ps_a[j]; n_psa++; break }; if (a == "N/A") n_naa++ }
             b = "N/A"
-            if (name_b != "") b = getbd(k, ex_b, ps_b)
+            if (name_b != "") {
+                if (k in ex_b) { b = ex_b[k]; n_exb++ }
+                else { for (j = 0; j < row; j++) if (row2key[j] == k && (j in ps_b)) { b = ps_b[j]; n_psb++; break }; if (b == "N/A") n_nab++ }
+            }
             r1 = (e != "N/A" && e+0 > 0) ? sprintf("%.2fx", e/om[k]) : "N/A"
             r2 = (a != "N/A" && a+0 > 0) ? sprintf("%.2fx", a/om[k]) : "N/A"
             r3 = (b != "N/A" && b+0 > 0) ? sprintf("%.2fx", b/om[k]) : "N/A"
@@ -129,5 +128,10 @@ awk -F, -v exa="/tmp/merge_exec_a.txt" -v psa="/tmp/merge_pass_a.txt" \
             if (name_b != "") line = line ", " r3
             print line
         }
+        printf "merge_summary: %d shapes; %s -> exec=%d pass=%d na=%d",
+            n, name_a, n_exa, n_psa, n_naa > "/dev/stderr"
+        if (name_b != "")
+            printf "; %s -> exec=%d pass=%d na=%d", name_b, n_exb, n_psb, n_nab > "/dev/stderr"
+        printf "\n" > "/dev/stderr"
     }
 ' $AWK_FILES
