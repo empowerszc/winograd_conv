@@ -11,10 +11,14 @@
 # 用法：
 #   bash tools/onednn/merge_onednn.sh ours.csv onednn_e2e.csv benchdnn_wino.txt [benchdnn_auto.txt]
 #
-# benchdnn 时间来源（2026-08-29 修）：优先解析 onednn_verbose,...primitive,exec,... 行的
-#   末字段（= 单次执行 ms，run_benchdnn.sh 已带 ONEDNN_VERBOSE=exec），每个 shape 取
-#   **最小**单次执行时间（≈ best-of，与 ours/e2e 同口径）；仅当无 exec 行时才退回
-#   PASSED 行里的 (N ms)（benchdnn perf 循环的聚合时间，可能=多迭代总和，不可当单次）。
+# benchdnn 时间来源（2026-08-29 再修）：只认「单次执行」口径，优先级：
+#   1) --mode=p 的 perf 行：`perf,<engine>,<impl>,<name>,<prb>,<Gops>,<ctime>,<min-ms>,...`
+#      其中 %-time%（第 8 字段）= 逐次 start/stamp 的最小单次执行 ms
+#      （见 oneDNN 源码 tests/benchdnn/utils/perf_report.hpp + dnnl_common.cpp
+#       measure_perf_individual 的 t.start()/t.stamp() 逐次计时）。与 ours/e2e 同口径。
+#   2) ONEDNN_VERBOSE=exec 的 onednn_verbose,...exec,... 行（末字段单次 ms）。
+#   两者都无 → 整列 N/A。PASSED 的 (N ms) 是 corr 模式的聚合测试时间
+#   （含 fill/ref/compare）且旧跑法未绑线程可能被 608 线程超订放大，一律不用。
 set -euo pipefail
 OURS="${1:?ours.csv}"; E2E="${2:?onednn_e2e.csv}"; BD_A="${3:?benchdnn_raw.txt}"
 # 位置 4 有二义（第二个 benchdnn 文件 或 shapes CSV）：用内容嗅探判——只有
@@ -29,10 +33,29 @@ fi
 
 name_of() { basename "$1" | sed 's/\.txt$//'; }
 
-# --- exec 行：shapekey(逗号) 空格 minms。行形如
-#     onednn_verbose,v1,primitive,exec,cpu,convolution,<impl>,...,<descriptor>,<ms>
-#   用 -F, 时末字段 = ms、倒数第二 = descriptor；descriptor 里抽 mb/ic/ih/iw/oc。 ---
-pre_parse_exec() {   # $1 raw → $2 "key minms"（无 exec 行则空文件）
+# --- perf 行：perf,engine,impl,name,prb,Gops,ctime,min-ms,minGflops,avg-ms,avgGflops ---
+#   $5=prb（mb4ic192ih40iw40_oc192oh40ow40_kh3kw3_sh1sw1_ph1pw1_n"r0"），$8=min-ms
+pre_parse_perf() {   # $1 raw → $2 "key minms"
+    awk -F, '
+        /^perf,/ {
+            ms = $8; if (ms !~ /^[0-9]+([.][0-9]+)?$/) next
+            prb = $5
+            mb = ic = ih = iw = oc = ""
+            if (match(prb, /mb[0-9]+/))  mb = substr(prb, RSTART+2, RLENGTH-2)
+            if (match(prb, /ic[0-9]+/))  ic = substr(prb, RSTART+2, RLENGTH-2)
+            if (match(prb, /ih[0-9]+/))  ih = substr(prb, RSTART+2, RLENGTH-2)
+            if (match(prb, /iw[0-9]+/))  iw = substr(prb, RSTART+2, RLENGTH-2)
+            if (match(prb, /oc[0-9]+/))  oc = substr(prb, RSTART+2, RLENGTH-2)
+            if (mb=="" || ic=="" || ih=="" || iw=="" || oc=="") next
+            key = mb","ic","ih","iw","oc
+            if (!(key in mn) || ms+0 < mn[key]) mn[key] = ms
+        }
+        END { for (k in mn) print k, mn[k] }
+    ' "$1" | sort > "$2" || true
+}
+
+# --- exec 行：onednn_verbose,...primitive,exec,...,<desc>,<ms>（末字段单次 ms） ---
+pre_parse_exec() {   # $1 raw → $2 "key minms"
     awk -F, '
         /onednn_verbose,.*,primitive,exec,/ {
             ms = $NF; if (ms !~ /^[0-9]+([.][0-9]+)?$/) next
@@ -51,53 +74,38 @@ pre_parse_exec() {   # $1 raw → $2 "key minms"（无 exec 行则空文件）
     ' "$1" | sort > "$2" || true
 }
 
-# --- PASSED 行：rN → ms（兜底；仅当无 exec 行时使用）---
-pre_parse_pass() {   # $1 raw → $2 排序后的 "rN ms"
-    grep -E 'r[0-9]+"' "$1" | awk '{
-        if (match($0, /r[0-9]+"/)) n = substr($0, RSTART+1, RLENGTH-2); else next
-        ms = "N/A"
-        if      (match($0, /\([0-9][0-9.]* *ms\)/))  ms = substr($0, RSTART+1, RLENGTH-2)
-        else if (match($0, /[0-9]+\.[0-9]+ *ms/))    ms = substr($0, RSTART, RLENGTH)
-        else if (match($0, /time: *[0-9]+\.[0-9]+/)) ms = substr($0, RSTART+6, RLENGTH-6)
-        else if (match($0, /perf: *[0-9]+\.[0-9]+/)) ms = substr($0, RSTART+6, RLENGTH-6)
-        gsub(/ms/, "", ms); gsub(/[() ]/, "", ms)
-        if (ms != "N/A") pass[n] = ms
-        else if (!(n in pass)) pass[n] = "N/A"
-    }
-    END { for (n in pass) print n, pass[n] }' | sort -k1,1n > "$2" || true
+# --- 单列时间源：perf 优先、exec 兜底；都空 → 空文件（整列 N/A） ---
+build_src() {   # $1 raw → $2 "key minms"
+    pre_parse_perf "$1" /tmp/merge_pf.txt
+    if [ -s /tmp/merge_pf.txt ]; then cat /tmp/merge_pf.txt > "$2"; return 0; fi
+    pre_parse_exec "$1" /tmp/merge_ex.txt
+    if [ -s /tmp/merge_ex.txt ]; then cat /tmp/merge_ex.txt > "$2"; return 0; fi
+    : > "$2"
 }
 
-pre_parse_exec "$BD_A" /tmp/merge_exec_a.txt
-pre_parse_pass "$BD_A" /tmp/merge_pass_a.txt
+build_src "$BD_A" /tmp/merge_src_a.txt
 NAME_A=$(name_of "$BD_A")
-# exec 行为 0 的 benchdnn 文件：整列 N/A——PASSED 的 (N ms) 是聚合时间
-# （n 次迭代+ref+fill+compare）且可能被 608 线程超订放大，不可与单次执行比。
-NOEXEC_A=0; [ -s /tmp/merge_exec_a.txt ] || NOEXEC_A=1
+[ -s /tmp/merge_src_a.txt ] && NO_SRC_A=0 || NO_SRC_A=1
 if [ -n "$BD_B" ]; then
-    pre_parse_exec "$BD_B" /tmp/merge_exec_b.txt
-    pre_parse_pass "$BD_B" /tmp/merge_pass_b.txt
+    build_src "$BD_B" /tmp/merge_src_b.txt
     NAME_B=$(name_of "$BD_B")
-    NOEXEC_B=0; [ -s /tmp/merge_exec_b.txt ] || NOEXEC_B=1
+    [ -s /tmp/merge_src_b.txt ] && NO_SRC_B=0 || NO_SRC_B=1
 else
     NAME_B=""
 fi
 
-# awk 文件参数：exec 主列 + pass 主列 (+ exec 副列 + pass 副列) + shapes + ours + e2e
-AWK_FILES="/tmp/merge_exec_a.txt /tmp/merge_pass_a.txt"
-[ -n "$BD_B" ] && AWK_FILES="$AWK_FILES /tmp/merge_exec_b.txt /tmp/merge_pass_b.txt"
+AWK_FILES="/tmp/merge_src_a.txt"
+[ -n "$BD_B" ] && AWK_FILES="$AWK_FILES /tmp/merge_src_b.txt"
 AWK_FILES="$AWK_FILES $CSV $OURS $E2E"
 
-awk -F, -v exa="/tmp/merge_exec_a.txt" -v psa="/tmp/merge_pass_a.txt" \
-       -v exb="/tmp/merge_exec_b.txt" -v psb="/tmp/merge_pass_b.txt" \
+awk -F, -v sra="/tmp/merge_src_a.txt" -v srb="/tmp/merge_src_b.txt" \
        -v name_a="$NAME_A" -v name_b="$NAME_B" \
-       -v noexec_a="$NOEXEC_A" -v noexec_b="$NOEXEC_B" \
+       -v no_src_a="$NO_SRC_A" -v no_src_b="$NO_SRC_B" \
        -v csv="$CSV" -v ours="$OURS" -v e2e="$E2E" '
-    BEGIN { row = 0; n = 0; n_exa=n_psa=n_naa=n_exb=n_psb=n_nab=0 }
-    # exec/pass 文件都是 "key 空格 ms"（无逗号），用 $0 切，不受 -F, 影响
-    FILENAME == exa { split($0, t, " "); ex_a[t[1]] = t[2]; next }
-    FILENAME == psa { split($0, t, " "); ps_a[t[1]] = t[2]; next }
-    FILENAME == exb { split($0, t, " "); ex_b[t[1]] = t[2]; next }
-    FILENAME == psb { split($0, t, " "); ps_b[t[1]] = t[2]; next }
+    # src 文件都是 "key 空格 ms"（key 含逗号），用 $0 切，不受 -F, 影响
+    BEGIN { row = 0; n = 0; n_ea=n_naa=n_eb=n_nab=0 }
+    FILENAME == sra { split($0, t, " "); ex_a[t[1]] = t[2]; next }
+    FILENAME == srb { split($0, t, " "); ex_b[t[1]] = t[2]; next }
     FILENAME == csv {                       # 源 shape：rN = 数据行号（0 基）
         if ($0 ~ /^#/ || $0 ~ /^mb,/ || FNR == 1 || NF == 0) next
         row2key[row] = $1","$2","$3","$4","$5; row++
@@ -115,18 +123,10 @@ awk -F, -v exa="/tmp/merge_exec_a.txt" -v psa="/tmp/merge_pass_a.txt" \
         for (i = 1; i <= n; i++) {
             k = order[i]
             e = (k in em) ? em[k] : "N/A"
-            # 数据源统计：exec 文件为空(noexec) → 整列 N/A；有 exec 行优先取单次 ms，
-            # 单个 shape 缺 exec 才经 row2key→rN 退 PASSED 兜底（每个 shape 至少一行 exec）。
             a = "N/A"
-            if (noexec_a == 1) n_naa++
-            else if (k in ex_a) { a = ex_a[k]; n_exa++ }
-            else { for (j = 0; j < row; j++) if (row2key[j] == k && (j in ps_a)) { a = ps_a[j]; n_psa++; break }; if (a == "N/A") n_naa++ }
+            if (no_src_a == 0) { if (k in ex_a) { a = ex_a[k]; n_ea++ } else n_naa++ }
             b = "N/A"
-            if (name_b != "") {
-                if (noexec_b == 1) n_nab++
-                else if (k in ex_b) { b = ex_b[k]; n_exb++ }
-                else { for (j = 0; j < row; j++) if (row2key[j] == k && (j in ps_b)) { b = ps_b[j]; n_psb++; break }; if (b == "N/A") n_nab++ }
-            }
+            if (name_b != "" && no_src_b == 0) { if (k in ex_b) { b = ex_b[k]; n_eb++ } else n_nab++ }
             r1 = (e != "N/A" && e+0 > 0) ? sprintf("%.2fx", e/om[k]) : "N/A"
             r2 = (a != "N/A" && a+0 > 0) ? sprintf("%.2fx", a/om[k]) : "N/A"
             r3 = (b != "N/A" && b+0 > 0) ? sprintf("%.2fx", b/om[k]) : "N/A"
@@ -136,12 +136,12 @@ awk -F, -v exa="/tmp/merge_exec_a.txt" -v psa="/tmp/merge_pass_a.txt" \
             if (name_b != "") line = line ", " r3
             print line
         }
-        printf "merge_summary: %d shapes; %s -> exec=%d pass=%d na=%d",
-            n, name_a, n_exa, n_psa, n_naa > "/dev/stderr"
-        if (noexec_a == 1) printf " [NO-EXEC: 整列 N/A，PASSED 聚合时间不可比]" > "/dev/stderr"
+        printf "merge_summary: %d shapes; %s -> src=%d na=%d",
+            n, name_a, n_ea, n_naa > "/dev/stderr"
+        if (no_src_a == 1) printf " [NO-SRC: 无 perf/exec 行，整列 N/A]" > "/dev/stderr"
         if (name_b != "") {
-            printf "; %s -> exec=%d pass=%d na=%d", name_b, n_exb, n_psb, n_nab > "/dev/stderr"
-            if (noexec_b == 1) printf " [NO-EXEC: 整列 N/A]" > "/dev/stderr"
+            printf "; %s -> src=%d na=%d", name_b, n_eb, n_nab > "/dev/stderr"
+            if (no_src_b == 1) printf " [NO-SRC: 整列 N/A]" > "/dev/stderr"
         }
         printf "\n" > "/dev/stderr"
     }
