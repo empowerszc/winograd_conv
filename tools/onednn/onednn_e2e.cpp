@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -183,6 +184,7 @@ int main(int argc, char** argv) {
         dnnl::memory::dims d{1, 16, 16, 16};
         auto smd = dnnl::memory::desc(d, dt::f32, tag::any);
         dnnl::engine e0(dnnl::engine::kind::cpu, 0);
+        // ②a C++ 包装 + 默认 attr（与主流程同路径）
         try {
             auto epd = dnnl::eltwise_forward::primitive_desc(e0,
                     dnnl::prop_kind::forward, dnnl::algorithm::eltwise_relu,
@@ -192,6 +194,32 @@ int main(int argc, char** argv) {
         } catch (const dnnl::error &e) {
             fprintf(stderr, "[smoke] eltwise PD FAIL status=%d(%s) what=%s\n",
                     (int)e.status, status_name((int)e.status), e.what());
+        }
+        // ②b 原始 C API + attr=NULL：排除 C++ 包装/default_attr 的影响。
+        //    若这里成功而 ②a oom ⇒ 问题在 C++ 包装的 attr 路径（可绕行全用
+        //    C API + null attr）；若这里也 oom ⇒ 库 PD 机器层整体坏，只能换装。
+        {
+            dnnl_primitive_desc_t cpd = nullptr;
+            dnnl_status_t cst = dnnl_eltwise_forward_primitive_desc_create(
+                    &cpd, e0.get(), dnnl_forward_training, dnnl_eltwise_relu,
+                    smd.get(), smd.get(), 0.0f, 0.0f, nullptr);
+            fprintf(stderr,
+                    "[capi-eltwise] attr=NULL PD create=%d(%s)\n",
+                    (int)cst, status_name((int)cst));
+            if (cst == dnnl_success && cpd) dnnl_primitive_desc_destroy(cpd);
+        }
+        // ②c 最小分配路径 + 进程堆：区分「节点内存/cgroup 真不足」vs「库内故障」
+        {
+            dnnl_primitive_attr_t ca = nullptr;
+            dnnl_status_t st = dnnl_primitive_attr_create(&ca);
+            fprintf(stderr, "[capi] dnnl_primitive_attr_create=%d(%s)\n",
+                    (int)st, status_name((int)st));
+            if (st == dnnl_success && ca) dnnl_primitive_attr_destroy(ca);
+        }
+        {
+            void *p = malloc(256u << 20);
+            fprintf(stderr, "[heap] malloc(256MB)=%s\n", p ? "ok" : "FAIL");
+            free(p);
         }
     }
 
