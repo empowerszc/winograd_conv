@@ -91,12 +91,12 @@ fi
 
 echo
 echo "================ A3: benchdnn conv (--alg=WINO, same Winograd family as ours) ================"
-env $BIND bash tools/onednn/run_benchdnn.sh --winograd
+env $BIND bash tools/onednn/run_benchdnn.sh --winograd --threads "$T"
 
 if [ "${SKIP_AUTO:-0}" != "1" ]; then
     echo
     echo "================ A4: benchdnn conv auto (oneDNN default, fallback) ================"
-    env $BIND bash tools/onednn/run_benchdnn.sh
+    env $BIND bash tools/onednn/run_benchdnn.sh --threads "$T"
 fi
 
 if [ "${SKIP_FILTER:-0}" != "1" ]; then
