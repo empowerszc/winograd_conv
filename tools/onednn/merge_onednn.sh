@@ -70,10 +70,14 @@ pre_parse_pass() {   # $1 raw → $2 排序后的 "rN ms"
 pre_parse_exec "$BD_A" /tmp/merge_exec_a.txt
 pre_parse_pass "$BD_A" /tmp/merge_pass_a.txt
 NAME_A=$(name_of "$BD_A")
+# exec 行为 0 的 benchdnn 文件：整列 N/A——PASSED 的 (N ms) 是聚合时间
+# （n 次迭代+ref+fill+compare）且可能被 608 线程超订放大，不可与单次执行比。
+NOEXEC_A=0; [ -s /tmp/merge_exec_a.txt ] || NOEXEC_A=1
 if [ -n "$BD_B" ]; then
     pre_parse_exec "$BD_B" /tmp/merge_exec_b.txt
     pre_parse_pass "$BD_B" /tmp/merge_pass_b.txt
     NAME_B=$(name_of "$BD_B")
+    NOEXEC_B=0; [ -s /tmp/merge_exec_b.txt ] || NOEXEC_B=1
 else
     NAME_B=""
 fi
@@ -86,6 +90,7 @@ AWK_FILES="$AWK_FILES $CSV $OURS $E2E"
 awk -F, -v exa="/tmp/merge_exec_a.txt" -v psa="/tmp/merge_pass_a.txt" \
        -v exb="/tmp/merge_exec_b.txt" -v psb="/tmp/merge_pass_b.txt" \
        -v name_a="$NAME_A" -v name_b="$NAME_B" \
+       -v noexec_a="$NOEXEC_A" -v noexec_b="$NOEXEC_B" \
        -v csv="$CSV" -v ours="$OURS" -v e2e="$E2E" '
     BEGIN { row = 0; n = 0; n_exa=n_psa=n_naa=n_exb=n_psb=n_nab=0 }
     # exec/pass 文件都是 "key 空格 ms"（无逗号），用 $0 切，不受 -F, 影响
@@ -110,13 +115,16 @@ awk -F, -v exa="/tmp/merge_exec_a.txt" -v psa="/tmp/merge_pass_a.txt" \
         for (i = 1; i <= n; i++) {
             k = order[i]
             e = (k in em) ? em[k] : "N/A"
-            # 数据源统计：优先 exec 单次 ms；无 exec 才经 row2key→rN 退 PASSED 兜底。
+            # 数据源统计：exec 文件为空(noexec) → 整列 N/A；有 exec 行优先取单次 ms，
+            # 单个 shape 缺 exec 才经 row2key→rN 退 PASSED 兜底（每个 shape 至少一行 exec）。
             a = "N/A"
-            if (k in ex_a) { a = ex_a[k]; n_exa++ }
+            if (noexec_a == 1) n_naa++
+            else if (k in ex_a) { a = ex_a[k]; n_exa++ }
             else { for (j = 0; j < row; j++) if (row2key[j] == k && (j in ps_a)) { a = ps_a[j]; n_psa++; break }; if (a == "N/A") n_naa++ }
             b = "N/A"
             if (name_b != "") {
-                if (k in ex_b) { b = ex_b[k]; n_exb++ }
+                if (noexec_b == 1) n_nab++
+                else if (k in ex_b) { b = ex_b[k]; n_exb++ }
                 else { for (j = 0; j < row; j++) if (row2key[j] == k && (j in ps_b)) { b = ps_b[j]; n_psb++; break }; if (b == "N/A") n_nab++ }
             }
             r1 = (e != "N/A" && e+0 > 0) ? sprintf("%.2fx", e/om[k]) : "N/A"
@@ -130,8 +138,11 @@ awk -F, -v exa="/tmp/merge_exec_a.txt" -v psa="/tmp/merge_pass_a.txt" \
         }
         printf "merge_summary: %d shapes; %s -> exec=%d pass=%d na=%d",
             n, name_a, n_exa, n_psa, n_naa > "/dev/stderr"
-        if (name_b != "")
+        if (noexec_a == 1) printf " [NO-EXEC: 整列 N/A，PASSED 聚合时间不可比]" > "/dev/stderr"
+        if (name_b != "") {
             printf "; %s -> exec=%d pass=%d na=%d", name_b, n_exb, n_psb, n_nab > "/dev/stderr"
+            if (noexec_b == 1) printf " [NO-EXEC: 整列 N/A]" > "/dev/stderr"
+        }
         printf "\n" > "/dev/stderr"
     }
 ' $AWK_FILES

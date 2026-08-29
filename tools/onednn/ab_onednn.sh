@@ -147,6 +147,13 @@ echo "================ 结果归档（判读/交接只需这一份 build/SUMMARY
     echo "== e2e impl 直方图（build/onednn_e2e.err；OOM 定位关键） =="
     grep -o 'impl=[^ ]*' build/onednn_e2e.err 2>/dev/null | sort | uniq -c || true
     echo
+    echo "== libdnnl 线程模型（TBB 忽略 OMP_NUM_THREADS → benchdnn 608 线程超订的判定） =="
+    echo "-- onednn_e2e --"
+    ldd build/onednn_e2e 2>/dev/null | grep -iE 'tbb|gomp|omp|dnnl' || echo "  (no tbb/omp/gomp/dnnl in deps)"
+    bdnn=$(find /workspace/z00889957/000Libs -maxdepth 6 -type f -name benchdnn 2>/dev/null | head -1)
+    echo "-- benchdnn ($bdnn) --"
+    ldd "$bdnn" 2>/dev/null | grep -iE 'tbb|gomp|omp|dnnl' || echo "  (no tbb/omp/gomp/dnnl in deps)"
+    echo
     echo "== 诊断矩阵（build/diag.txt）=="
     cat build/diag.txt 2>/dev/null || echo "(no diag.txt)"
     echo
