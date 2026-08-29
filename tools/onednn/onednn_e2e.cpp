@@ -137,6 +137,31 @@ int main(int argc, char** argv) {
     if (!parse_csv(csv_path, shapes)) return 1;
     fprintf(stderr, "parsed %zu shapes\n", shapes.size());   // 自查：0 => parse 失败
 
+    // verbose 1 级：dnnl_verbose,info 行（runtime/nthr/isa）打进 stderr，
+    // 随主流程 stderr 一起输出，确认库对自己运行环境的检测结果。
+    dnnl::set_verbose(1);
+
+    // [preOMP] 在设置任何线程数/绑定之前，先用 C++ 包装建一个 eltwise PD：
+    // 此刻无 OMP 线程池、无任何 oneDNN 调用。若成功而后面 [smoke] oom ⇒ OMP
+    // 线程池/绑核/env 是触发器；若同样 oom ⇒ 库本身在此环境就坏（换安装）。
+    {
+        using dt = dnnl::memory::data_type;
+        using tag = dnnl::memory::format_tag;
+        dnnl::memory::dims d{1, 16, 16, 16};
+        auto smd = dnnl::memory::desc(d, dt::f32, tag::nchw);
+        dnnl::engine e0(dnnl::engine::kind::cpu, 0);
+        try {
+            auto epd = dnnl::eltwise_forward::primitive_desc(e0,
+                    dnnl::prop_kind::forward, dnnl::algorithm::eltwise_relu,
+                    smd, smd, 0.0f, 0.0f);
+            fprintf(stderr, "[preOMP] eltwise PD ok impl=%s\n",
+                    epd.impl_info_str());
+        } catch (const dnnl::error &e) {
+            fprintf(stderr, "[preOMP] eltwise PD FAIL status=%d(%s) what=%s\n",
+                    (int)e.status, status_name((int)e.status), e.what());
+        }
+    }
+
     // 线程数交给 omp_set_num_threads + 外层 OMP_PROC_BIND/PLACES。
     // 不用 dnnl::set_max_threads：它随 DNNL_CPU_THREADING_RUNTIME 条件编译，
     // 部分发行包（如 3.12.1-release）里根本不存在。

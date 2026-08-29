@@ -122,11 +122,11 @@ echo "[onednn] impl histogram (pd.impl_info_str(): which impl actually ran - OOM
 grep -o 'impl=[^ ]*' build/onednn_e2e.err 2>/dev/null | sort | uniq -c || true
 # 库级冒烟探针（版本一致性 + eltwise 非 conv PD）+ verbose info 行（ISA/线程检测）
 if [ -s build/onednn_e2e.err ]; then
-    echo "[onednn] ---- [env]/[smoke] 探针（stderr 顶部）----"
-    grep -E '^\[env\]|^\[smoke\]|^parsed ' build/onednn_e2e.err | head -10
+    echo "[onednn] ---- [env]/[smoke]/[preOMP]/info 探针（stderr 顶部）----"
+    grep -E '^\[env\]|^\[smoke\]|^\[capi|^\[heap\]|^\[preOMP\]|^dnnl_verbose,info|^parsed ' build/onednn_e2e.err | head -15
     if [ -s build/onednn_e2e_nosve.err ]; then
-        echo "[onednn] ---- [env]/[smoke] 探针（SVE-off 重试）----"
-        grep -E '^\[env\]|^\[smoke\]' build/onednn_e2e_nosve.err | head -5
+        echo "[onednn] ---- 探针（SVE-off 重试；dnnl_verbose,info 的 isa= 字段确认 advanced_simd 是否生效）----"
+        grep -E '^\[env\]|^\[smoke\]|^\[preOMP\]|^dnnl_verbose,info' build/onednn_e2e_nosve.err | head -6
     fi
 fi
 if [ -s build/probe_verbose.txt ]; then
