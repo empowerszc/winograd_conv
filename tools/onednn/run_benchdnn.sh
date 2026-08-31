@@ -95,9 +95,9 @@ OMP_PROC_BIND=close OMP_PLACES=cores OMP_NUM_THREADS=$THREADS \
     || { echo "[benchdnn] exit $?; raw output in $OUT" >&2; tail -20 "$OUT" >&2; exit 1; }
 
 echo "[benchdnn] done -> $OUT"
-N_PASS=$(grep -c 'r[0-9]*"' "$OUT" 2>/dev/null || echo 0)
-N_PERF=$(grep -c '^perf,' "$OUT" 2>/dev/null || echo 0)
-N_EXEC=$(grep -cE '(onednn|dnnl)_verbose,.*exec' "$OUT" 2>/dev/null || echo 0)
+N_PASS=$(grep -c 'r[0-9]*"' "$OUT" 2>/dev/null) || N_PASS=0
+N_PERF=$(grep -c '^perf,' "$OUT" 2>/dev/null) || N_PERF=0
+N_EXEC=$(grep -cE '(onednn|dnnl)_verbose,.*exec' "$OUT" 2>/dev/null) || N_EXEC=0
 echo "[benchdnn] PASSED lines: $N_PASS / perf single-exec lines: $N_PERF / onednn exec lines: $N_EXEC"
 if [ "$N_PERF" -eq 0 ] && [ "$N_EXEC" -eq 0 ] && [ "$N_PASS" -gt 0 ]; then
     echo "!! WARNING: 无 perf/exec 行——merge 将回退到 PASSED 聚合时间（含 fill/ref/compare，约 2x 执行时间）。"
