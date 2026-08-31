@@ -30,13 +30,12 @@ BIN="${BENCHDNN:-}"
 THREADS=16
 while [ $# -gt 0 ]; do
     case "$1" in
-        --winograd) ALG=(--alg=WINO); ;;
+        --winograd) ALG=(--alg=WINO); shift ;;
         --bin) BIN="$2"; shift 2 ;;
         --threads) THREADS="$2"; shift 2 ;;
         -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 1 ;;
     esac
-    shift
 done
 
 # ---- 输出文件：先确定再清空，保证任何失败路径都不留旧文件 ----
