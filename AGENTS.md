@@ -44,6 +44,32 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
   本地仓库 `README.md` 与 `swish_sve/` 是用户未提交改动——**绝不 stage**（只 `git add`
   具名文件）；`tools/diag_ab.sh` 是临时诊断脚本，闭环后删除。
 
+### 接下来要做的（给下一个 agent 的直接任务）
+
+**当前阻塞点**：集群 08-31 作业的 `build/benchdnn_{wino,auto}.txt` 仍无 perf 行 →
+merge 两列 `[NO-SRC]`（详见 `docs/onednn_comparison.md` §六）。
+
+第一步先确认下面 3 项（向用户索取或上集群自查）：
+1. `tail -8 build/benchdnn_wino.txt` —— 末尾自检行 `# PASSED=… perf_lines=…`
+   （只有新脚本才写；旧脚本/corr 模式没有）。
+2. `grep -c '^perf,' build/benchdnn_*.txt` + 文件 mtime（应为本作业时间，非上次）。
+3. 作业日志 A3/A4 的 `[benchdnn] binary:` / `PASSED lines:` / `!! WARNING` 行
+   （`ls -t slurm-*.out | head -1` 取最新）。
+
+拿到后按 §六 三假设定位：① BIN `find|head -1` 探测选错二进制 → 把
+`run_benchdnn.sh` 的 BIN 固定为已知好路径
+`/workspace/z00889957/000Libs/oneDNN-3.12.1/build/tests/benchdnn/benchdnn` 优先 +
+打印解析结果 + 自检行带 binary 路径；② 读了过期文件 → 运行前 `: > "$OUT"` 清空；
+③ 作业上下文差异（最不可能，手动 batch 同参数能出 perf）。
+
+**随后**：重跑 `sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"`，
+merge 应 `src≈59 na≈0`、benchdnn 列与 e2e 列同量级；判读 `build/SUMMARY.txt`，
+把集群输出贴回给用户合并。同时核实 `onednn_e2e.csv` 1423 行异常（应 59，疑过期）。
+
+**铁律**：只 `git add` 具名文件，**绝不 `git add -A`**；不碰用户未提交的
+`README.md` / `swish_sve/`；性能比较必须同作业内（node03 跨作业 3~7x 性能态）；
+ours 侧计时只信无 debug 的 E3/E5。
+
 ## 架构
 
 ### 数据流
