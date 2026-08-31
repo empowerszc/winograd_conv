@@ -161,12 +161,78 @@ exec_lines=57131 + nthr=16，merge `src=59 na=0`。
 | 5 | e2e 输出混入 verbose 行 | 1 轮 | `ONEDNN_VERBOSE=1` 污染 e2e stdout，加 `ONEDNN_VERBOSE=0` 给主运行 |
 | 6 | `grep -c \|\| echo 0` 产生 `0\n0` | 1 轮 | grep -c 无匹配时打印 0 且返回 1，echo 再打印 0 |
 
-## 七、给优化 agent 的注意事项
+## 七、优化建议（基于 oneDNN 对照最终数据）
 
-（注意事项已移至 §八末尾，此处仅保留索引。完整作业日志可能过长——判读只取
-`build/SUMMARY.txt`，交接 SOP 见 §八。）
+> 以下建议基于 §五最终对照数据 + `PERFORMANCE_ANALYSIS.md` §11 现有计划，
+> 标注与现有计划的关系（新增 / 确认 / 已完成）。
 
-## 八、交接 SOP（完整日志太长时只取判读文件）
+### 7.1 小形状算法选择（新增，最高优先级）
+
+**问题**：e2e 列显示小形状（batch=1, IC≤128, spatial≤56²）我们慢 0.09-0.91x。
+oneDNN 的 brgconv（im2col + GEMM）无 Winograd 变换开销，小形状天然占优。
+
+**方案**：增加**混合算法选择**——小形状走 direct convolution（im2col + arm_gemm），
+大形状走 F(4,4) Winograd。选择判据可参考 oneDNN 的 auto 模式逻辑：
+```
+if (n_tiles * IC * OC < 阈值)  → direct conv (im2col + arm_gemm)
+else                           → F(4,4) Winograd
+```
+**收益**：小形状从 0.09-0.91x 追到 ~1.0x（和 oneDNN brgconv 同口径）。
+**代价**：需要实现 im2col + arm_gemm 的 direct conv 路径（arm_gemm 已集成，加一层 im2col）。
+**与现有计划关系**：新增。PERFORMANCE_ANALYSIS.md §11 未涉及算法选择。
+
+### 7.2 V 跨调用缓存（确认，现有计划 §11.2 Tier 1）
+
+**问题**：oneDNN 缓存 TransformedWeights，我们每次调用重算。推理中权重恒定。
+
+**方案**：按权重指针 + shape 做 key 缓存 V，重复调用零权重变换。
+**收益**：Count≥8 的 row（benchdnn batch 重复调用）立省一次权重变换。
+**状态**：现有计划，未实施。**oneDNN 对照确认这是我们对标 oneDNN 的亏空之一。**
+
+### 7.3 L2 tile 分块（确认，现有计划 §11.2 Tier 1）
+
+**问题**：U 缓冲 2.7~11MB 远超 L2 768KB/核，大形状每 tile 走主存。
+
+**方案**：按 chunk 分组（~8 tile 一组 ≈221KB 落 L2）组内完成 input→GEMM→output。
+**收益**：大形状（我们已 1.1-2.8x 领先）进一步拉开差距。无 L3 机器特有机会。
+**状态**：现有计划，未实施。
+
+### 7.4 F(4,4) tile 选择验证（已完成，结论确认）
+
+**发现**：benchdnn_wino 列显示 oneDNN 的 wino:acl（疑似 F(2,2)）全面落后我们
+1.2-9x。F(4,4) 比 F(2,2) 少 ~44% GEMM 调用 + 单次 GEMM 矩阵更大 cache 友好。
+**结论**：F(4,4) 选择正确，无需加 F(2,2)。但若做 §7.1 混合选择，小形状应走
+direct conv 而非 F(2,2)——brgconv 比 F(2,2) 对小形状更优。
+
+### 7.5 channel padding 到 SVE 宽度（确认，现有计划 §11.2 Tier 1）
+
+**问题**：IC=48 时 SVE-512 只用 3 个寄存器（48/16），pad 到 64 用满 4 个。
+**收益**：直接提升小 IC case（Case 2: IC=48）的向量化利用率。
+**状态**：现有计划，未实施。
+
+### 7.6 benchdnn_wino 5x 差距深度分析（新增，分析方向）
+
+**问题**：我们的 F(4,4) vs oneDNN 的 wino:acl 差距 1.2-9x，原因未完全确认。
+
+**可做的分析**：用 `ONEDNN_VERBOSE=1` 的 verbose 输出拆解 oneDNN wino:acl 的
+内部结构——convolution exec time（整体）vs gemm_api exec time（逐次 GEMM）。
+若 gemm_api 单次 ~2ms 而我们 arm_gemm 同形状 ~0.5ms，则 GEMM 内核是主因；
+若 convolution exec time 远大于 36×gemm_api_min（并行 GEMM 墙钟），则变换是主因。
+**收益**：确认 5x 差距的构成，指导后续优化投入方向（GEMM vs 变换）。
+
+### 7.7 e2e 多行输出排查（新增，低优先级）
+
+**问题**：e2e 此前输出 1423 行（应 59），现虽 `: > csv` 清空后正常（59 行），
+但 `onednn_e2e.cpp` 可能每迭代输出一行（REPEATS=20 + WARMUP=3 ≈ 59×24=1416）。
+merge 用 last-wins 所以数值正确，但应查代码确认是否每 shape 只输出一行。
+**收益**：消除数据可信度疑虑。低优先级——merge 已正确处理。
+
+## 八、给优化 agent 的注意事项
+
+（注意事项已移至 §九末尾，此处仅保留索引。完整作业日志可能过长——判读只取
+`build/SUMMARY.txt`，交接 SOP 见 §九。）
+
+## 九、交接 SOP（完整日志太长时只取判读文件）
 
 判读/交接**只需 `build/SUMMARY.txt` 一份**，包含：
 数据行数（ours/e2e/benchdnn）、e2e impl 直方图、诊断矩阵（build/diag.txt）、合并表

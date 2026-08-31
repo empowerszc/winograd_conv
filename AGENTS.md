@@ -52,6 +52,38 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
 **运行协议**：`sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"`，
 判读 `build/SUMMARY.txt`：ours/e2e/benchdnn 均 59 行 + `src=59 na=0` + `nthr=16`。
 
+**后续优化方向**（基于 oneDNN 对照最终数据，详见 `docs/onednn_comparison.md` §七）：
+
+按优先级排序：
+
+1. **小形状算法选择（最高优先级，新增）**：e2e 列显示小形状（batch=1, IC≤128,
+   spatial≤56²）我们慢 0.09-0.91x——Winograd 变换固定开销在小形状上摊不薄。
+   方案：hybrid——小形状走 direct conv（im2col + arm_gemm），大形状走 F(4,4) Winograd。
+   arm_gemm 已集成，需加 im2col 层 + 选择判据。预期小形状从 0.09x 追到 ~1.0x。
+
+2. **V 跨调用缓存（Tier 1，现有计划 §11.2）**：oneDNN 缓存 TransformedWeights，
+   我们每次重算。推理中权重恒定 → 按权重指针+shape 做 key 缓存 V。纯赚。
+
+3. **L2 tile 分块（Tier 1，现有计划 §11.2）**：U 缓冲 2.7~11MB 远超 L2 768KB/核。
+   按 ~8 tile 一组（≈221KB）组内完成 input→GEMM→output。无 L3 机器特有机会。
+
+4. **channel padding 到 SVE 宽度（Tier 1，现有计划 §11.2）**：IC=48 时 SVE-512
+   只用 3 个寄存器（48/16），pad 到 64 用满 4 个。小 IC case 直接提升向量化率。
+
+5. **Bᵀ 零系数专用化（Tier 2，现有计划 §11.3）**：F(4,4) 的 Bᵀ 有 50% 零元素，
+   跳过零系数行/列减 ~50% 变换量。纯算术优化，比手写汇编划算。
+
+6. **benchdnn_wino 5x 差差距分析（新增，分析方向）**：用 `ONEDNN_VERBOSE=1`
+   verbose 输出拆解 oneDNN wino:acl 的 convolution exec vs gemm_api 逐次，
+   确认 5x 差距来自 GEMM 还是变换，指导后续投入方向。
+
+7. **e2e 多行输出排查（低优先级）**：onednn_e2e.cpp 可能每迭代输出一行
+   （REPEATS=20+WARMUP=3≈59×24=1416≈1423）。merge 用 last-wins 值正确，
+   但应查代码确认每 shape 只输出一行。
+
+**已完成**：F(4,4) tile 选择验证——benchdnn_wino 列显示 F(4,4) 全面碾压
+oneDNN 的 wino:acl（疑似 F(2,2)）1.2-9x，选择正确。
+
 **铁律**：只 `git add` 具名文件，**绝不 `git add -A`**；不碰用户未提交的
 `README.md` / `swish_sve/`；性能比较必须同作业内（node03 跨作业 3~7x 性能态）；
 ours 侧计时只信无 debug 的 E3/E5。
