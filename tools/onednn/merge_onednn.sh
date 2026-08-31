@@ -11,14 +11,12 @@
 # 用法：
 #   bash tools/onednn/merge_onednn.sh ours.csv onednn_e2e.csv benchdnn_wino.txt [benchdnn_auto.txt]
 #
-# benchdnn 时间来源（2026-08-31 改）：只认「单次执行」口径，优先级：
-#   1) perf 行（若有）：`perf,<engine>,<impl>,<name>,<prb>,<Gops>,<ctime>,<min-ms>,...`
-#      其中 %-time%（第 8 字段）= 逐次 start/stamp 的最小单次执行 ms。
-#   2) ONEDNN_VERBOSE=exec 的 onednn_verbose,...,exec,... 行（末字段单次 ms）。
-#      集群 benchdnn build 可能不支持 --mode=p（多次实测无 perf 行），改用
-#      ONEDNN_VERBOSE=exec 让 oneDNN 库直接打印 per-execution 计时行。
-#   两者都无 → 整列 N/A。PASSED 的 (N ms) 是 corr 模式的聚合测试时间
-#   （含 fill/ref/compare）且旧跑法未绑线程可能被 608 线程超订放大，一律不用。
+# benchdnn 时间来源（2026-08-31 改）：优先级：
+#   1) perf 行（若有）：`perf,...,min-ms,...`（单次执行口径，最佳）
+#   2) ONEDNN_VERBOSE=exec 的 onednn_verbose,...,exec,... 行（单次执行口径）
+#   3) PASSED 行：`N:PASSED (XXX ms) __REPRO: ...`（corr 模式聚合时间，
+#      含 fill/ref/compare，约 2x 执行时间，仅作粗略参考）
+#   三者都无 → 整列 N/A。
 set -euo pipefail
 OURS="${1:?ours.csv}"; E2E="${2:?onednn_e2e.csv}"; BD_A="${3:?benchdnn_raw.txt}"
 # 位置 4 有二义（第二个 benchdnn 文件 或 shapes CSV）：用内容嗅探判——只有
@@ -84,12 +82,41 @@ pre_parse_exec() {   # $1 raw → $2 "key minms"
     ' "$1" | sort > "$2" || true
 }
 
-# --- 单列时间源：perf 优先、exec 兜底；都空 → 空文件（整列 N/A） ---
+# --- PASSED 行：N:PASSED (XXX ms) __REPRO: --conv [--alg=...] mb..ic..ih..oc... ---
+#   corr 模式聚合时间（含 fill/ref/compare），非单次执行口径，仅作兜底参考。
+#   描述符格式同 perf prb：mb4ic192ih40oc192...（无冒号，连写）。
+pre_parse_passed() {   # $1 raw → $2 "key minms"
+    awk -F, '
+        /^[0-9]+:PASSED \([0-9.]+ ms\)/ {
+            line = $0
+            ms = ""
+            if (match(line, /\([0-9.]+ ms\)/)) {
+                ms = substr(line, RSTART+1, RLENGTH-5)
+            } else next
+            if (ms !~ /^[0-9]+([.][0-9]+)?$/) next
+            mb = ic = ih = iw = oc = ""
+            if (match(line, /mb[0-9]+/))  mb = substr(line, RSTART+2, RLENGTH-2)
+            if (match(line, /ic[0-9]+/))  ic = substr(line, RSTART+2, RLENGTH-2)
+            if (match(line, /ih[0-9]+/))  ih = substr(line, RSTART+2, RLENGTH-2)
+            if (match(line, /iw[0-9]+/))  iw = substr(line, RSTART+2, RLENGTH-2)
+            if (match(line, /oc[0-9]+/))  oc = substr(line, RSTART+2, RLENGTH-2)
+            if (iw == "" && ih != "") iw = ih
+            if (mb=="" || ic=="" || ih=="" || iw=="" || oc=="") next
+            key = mb","ic","ih","iw","oc
+            if (!(key in mn) || ms+0 < mn[key]) mn[key] = ms
+        }
+        END { for (k in mn) print k, mn[k] }
+    ' "$1" | sort > "$2" || true
+}
+
+# --- 单列时间源：perf 优先 → exec → PASSED 兜底；都空 → 空文件（整列 N/A） ---
 build_src() {   # $1 raw → $2 "key minms"
     pre_parse_perf "$1" /tmp/merge_pf.txt
     if [ -s /tmp/merge_pf.txt ]; then cat /tmp/merge_pf.txt > "$2"; return 0; fi
     pre_parse_exec "$1" /tmp/merge_ex.txt
     if [ -s /tmp/merge_ex.txt ]; then cat /tmp/merge_ex.txt > "$2"; return 0; fi
+    pre_parse_passed "$1" /tmp/merge_pa.txt
+    if [ -s /tmp/merge_pa.txt ]; then cat /tmp/merge_pa.txt > "$2"; return 0; fi
     : > "$2"
 }
 

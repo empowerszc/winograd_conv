@@ -98,8 +98,8 @@ N_PERF=$(grep -c '^perf,' "$OUT" 2>/dev/null || echo 0)
 N_EXEC=$(grep -cE '(onednn|dnnl)_verbose,.*exec' "$OUT" 2>/dev/null || echo 0)
 echo "[benchdnn] PASSED lines: $N_PASS / perf single-exec lines: $N_PERF / onednn exec lines: $N_EXEC"
 if [ "$N_PERF" -eq 0 ] && [ "$N_EXEC" -eq 0 ] && [ "$N_PASS" -gt 0 ]; then
-    echo "!! WARNING: 无 perf/exec 行——merge 将整列置 N/A。"
-    echo "   已设 ONEDNN_VERBOSE=exec；若仍无 exec 行，贴 head -20 $OUT 回来。"
+    echo "!! WARNING: 无 perf/exec 行——merge 将回退到 PASSED 聚合时间（含 fill/ref/compare，约 2x 执行时间）。"
+    echo "   已设 ONEDNN_VERBOSE=exec；若仍无 exec 行，benchdnn 可能压制了库级 verbose。"
 fi
 # 把自检写进 OUT 末尾（# 注释行，merge 忽略）——下一轮 SUMMARY 直接可见
 {

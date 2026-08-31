@@ -189,11 +189,12 @@ dilates 旧 bug，修复生效**，e2e 应出全量 59 行数据。
 | 自检带 binary | `run_benchdnn.sh:107` | `# run_benchdnn self-check: binary=$BIN ...` 写入 OUT 末尾，SUMMARY 直接可见用了哪个 benchdnn |
 | N_EXEC grep 放宽 | `run_benchdnn.sh:100` | 从 `,primitive,exec,` 改为 `(onednn\|dnnl)_verbose,.*exec`，与 merge 解析器一致 |
 | merge exec 解析器修 | `merge_onednn.sh:67-85` | regex 放宽（认 `dnnl_verbose` 旧名 + 不要求 "primitive"）+ 描述符从整行 $0 搜（不限于单字段）+ 认 `mb:4` 冒号格式 |
+| merge PASSED 兜底 | `merge_onednn.sh:85-110` | 三级兜底：perf → exec → PASSED。PASSED 行 `N:PASSED (XXX ms) __REPRO: ...` 的聚合时间（含 fill/ref/compare）作最后参考，比 [NO-SRC] 强 |
 | e2e CSV 清空 | `run_onednn_e2e.sh:62` | `mkdir -p build` 后 `: > build/onednn_e2e.csv`，编译失败不留 1423 行旧文件 |
 
 **集群验证（部署后跑一次 sbatch 作业，检查这 4 项）**：
-1. `tail -3 build/benchdnn_wino.txt` —— 末尾自检行应有 `binary=/workspace/.../benchdnn` + `exec_lines=N`（N≈59）。
-2. `grep -cE '(onednn|dnnl)_verbose,.*exec' build/benchdnn_*.txt` —— 应 > 0（≈59），不再是 0。
+1. `tail -3 build/benchdnn_wino.txt` —— 末尾自检行应有 `binary=/workspace/.../benchdnn` + `exec_lines`/`PASSED` 计数。
+2. `grep -cE '(onednn|dnnl)_verbose,.*exec' build/benchdnn_*.txt` —— 若 >0 则 merge 用 exec 行（单次执行口径）；若 =0 则 merge 回退 PASSED 聚合时间。
 3. `head -1 build/benchdnn_wino.txt` —— 应是 `[benchdnn] binary: /workspace/z00889957/000Libs/oneDNN-3.12.1/build/tests/benchdnn/benchdnn`。
 4. `wc -l build/onednn_e2e.csv` —— 应 59 行（+1 行表头），不再是 1423。
 
