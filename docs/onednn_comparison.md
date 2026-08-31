@@ -90,16 +90,16 @@ dilates 旧 bug，修复生效**，e2e 应出全量 59 行数据。
 59/59 全胜，geomean **1.99x**，合计 321.9 vs 804.9 ms = **2.50x**；大形状折算 GEMM
 ≈960 GFLOPS/16 核 ≈ SVE-512 峰值 94%。**全量逐形状表见 `docs/final_benchmark_bfd6b1e.md`。**
 
-### ours vs oneDNN —— 进行中
+### ours vs oneDNN —— 进行中（⚠️ benchdnn 列卡在 [NO-SRC]，见 §六）
 
 | 数据 | 状态 | 位置 |
 |---|---|---|
 | A1 ours 59 形状 | ✅ 有 | `build/ours_cmp.csv` |
-| A2 e2e 59 行 | ✅ 修复就绪，**待集群重跑** | `build/onednn_e2e.csv` |
-| A3 benchdnn WINO | ✅ 有 | `build/benchdnn_wino.txt` |
-| A4 benchdnn auto | ✅ 有 | `build/benchdnn_auto.txt` |
+| A2 e2e 59 行 | ⚠️ 08-31 作业 csv **1423 行**（应 59，疑过期，merge last-wins 值仍可用） | `build/onednn_e2e.csv` |
+| A3 benchdnn WINO | ⚠️ 文件 59 行但**无 perf 行**（[NO-SRC]，待解，见 §六） | `build/benchdnn_wino.txt` |
+| A4 benchdnn auto | ⚠️ 同上 | `build/benchdnn_auto.txt` |
 | A5 filter_sweep | ✅ 已闭环 | `build/filter_sweep_{auto,6x4VL,8x1VL,inter}.csv` |
-| A6 合并表 | 待 A2 出数 | 作业 stdout |
+| A6 合并表 | ⚠️ benchdnn 两列 N/A；e2e 列可用 | `build/merged.csv` |
 
 已观察到的三点（**均待本轮重跑核实**）：
 1. **benchdnn 列此前虚高已三修（50f9f2a 终版）**：
@@ -135,9 +135,50 @@ dilates 旧 bug，修复生效**，e2e 应出全量 59 行数据。
 强选 8x1VL 慢 1.45x、inter 慢 1.23x、6x4VL 最优且 auto 已选。唯一可挖点（不足以全局
 改）：4,96,80²,96 上 8x1VL 快 ~19%、4,768,20²,96 快 ~5%。
 
-## 六、给优化 agent 的注意事项
+## 六、⚠️ 当前卡点（2026-08-31）：benchdnn 仍 [NO-SRC]，待解
 
-（见下方；另：完整作业日志可能过长——判读只取 `build/SUMMARY.txt`，交接 SOP 见 §七）
+### 已确认事实
+- 集群已部署新脚本：`run_benchdnn.sh` 含 `--mode=p`（grep=5），`merge_onednn.sh` 含
+  `iw=ih` 回退（53/74 行）——**部署无误**。
+- 手动**单形状**与手动**batch**均能出 `perf,` 行（node02 实测）：
+  `numactl -C 0-15 $BENCHDNN --conv --mode=p --reset --alg=WINO --batch=shapes/conv_all.list`
+- 但 sbatch 作业（node03，08-31 09:04）产出的 `build/benchdnn_{wino,auto}.txt` 仍**无 perf 行**
+  （`grep -c '^perf,'` = 0），merge `src=0 na=0 [NO-SRC]`。
+- 08-29 首跑 [NO-SRC] 的真因已实锤 = **旧脚本**（corr 模式 `0:PASSED (613 ms)`，无 --mode=p）。
+- 08-31 作业 e2e 列异常：`onednn_e2e.csv` **1423 行**（应 59）。`parse_csv`
+  （onednn_e2e.cpp:346 每 shape 恰 1 行）对 59 形状不可能出 1423 → 疑**过期/污染文件**
+  （merge 用 last-wins，表内 e2e 值仍可用，但须核实）。
+- 诊断矩阵正常：`conv_direct_any_nodil=ok` / `conv_direct_any_dil1=FAIL`（OOM 根因修复确认有效）。
+- benchdnn 链接 `/data1/z00889957/apps/oneDNN-3.12.1/build/src/libdnnl.so.3`（第三处，
+  与 e2e 的 `onednn-3.12.1-release` 不是同一构建）。
+
+### 卡点假设（按嫌疑排序）
+1. **作业内 BIN 探测选错二进制**：`run_benchdnn.sh` 用 `find ... | head -1` 探测
+   （cand: ONEDNN_ROOT /usr/local /opt /workspace/z00889957/000Libs /workspace）。
+   已知好路径 `/workspace/z00889957/000Libs/oneDNN-3.12.1/build/tests/benchdnn/benchdnn`
+   （相对 000Libs 深度 5，`-maxdepth 5` 可命中）。若作业环境下别的 cand 先命中
+   **更旧的 benchdnn**（不认 `--mode=p`）→ corr 模式 PASSED 行 → merge [NO-SRC]。
+2. **读取过期文件**：ab_onednn `set +e`，若 run_benchdnn.sh 静默失败，
+   build/benchdnn_wino.txt 残留上一轮 corr 文件被 merge 照读。
+3. 作业上下文差异（env/绑核/sbatch）破坏 perf 输出（可能性最低——手动 batch 同参数可出）。
+
+### 待解诊断（已向用户索取）
+- `tail -8 build/benchdnn_wino.txt`：末尾自检行 `# PASSED=… perf_lines=…`（新脚本才写）。
+- `grep -c '^perf,' build/benchdnn_*.txt` + 文件 mtime（应为本作业 09:04 Aug 31）。
+- 作业日志 A3/A4 的 `[benchdnn] binary:` / `PASSED lines:` / `!! WARNING` 行
+  （`ls -t slurm-*.out | head -1` 取最新日志）。
+
+### 下一步（诊断后）
+- BIN 选错 → `run_benchdnn.sh` 改**固定已知路径**优先 + 打印解析结果 + 自检行带 binary
+  路径（job 日志不可靠，关键行写入 OUT 文件）。
+- 过期文件 → 运行前 `: > "$OUT"` 强制清空。
+- e2e 1423 行 → 核实 mtime / 确保 tee 前截断；若编译失败读了旧 CSV 需顺带修。
+- 出 perf 行后重跑整作业：merge 应 `src≈59 na≈0`，benchdnn 列与 e2e 列同量级。
+- 终态判读：benchdnn(wino:acl, ACL 构建) / e2e(brgconv:sve_512) / ours 三列同作业。
+
+## 七、给优化 agent 的注意事项
+
+（见下方；另：完整作业日志可能过长——判读只取 `build/SUMMARY.txt`，交接 SOP 见 §八）
 
 ### 注意事项
 
@@ -153,7 +194,7 @@ dilates 旧 bug，修复生效**，e2e 应出全量 59 行数据。
 5. **git 边界**：不要 stage 用户未提交的 `README.md` 与 `swish_sve/`；`tools/diag_ab.sh`
    是临时诊断脚本，闭环后删除。
 
-## 七、交接 SOP（完整日志太长时只取判读文件）
+## 八、交接 SOP（完整日志太长时只取判读文件）
 
 判读/交接**只需 `build/SUMMARY.txt` 一份**，包含：
 数据行数（ours/e2e/benchdnn）、e2e impl 直方图、诊断矩阵（build/diag.txt）、合并表

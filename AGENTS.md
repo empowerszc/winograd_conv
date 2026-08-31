@@ -11,22 +11,27 @@ Winograd 卷积复刻项目：基于 ACL（Arm Compute Library）的算法思路
 **目标平台**：AArch64（华为鲲鹏 920F / Armv9 + SVE-512 + SME）。
 L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
 
-## 当前状态（2026-08-29）— 新 agent 先读这里
+## 当前状态（2026-08-31）— 新 agent 先读这里
 
 - **正确性**：`--verify`（fp64 直接卷积参考 + 相对容差 1e-4）全过。arm_gemm 后端布局契约
   已修复（V 按 K 主序散写，`WINO_GEMM_BTRANS=0` 可回退对照），详见「历史修复记录」末尾。
 - **性能终局（arm_gemm vs OpenBLAS，同作业）**：**59/59 形状全胜**，geomean **1.99x**，
   合计 321.9 vs 804.9ms = **2.50x**；大形状 4,384,160²,384 3.02x ≈94% SVE-512 峰值。
   全量逐形状表：`docs/final_benchmark_bfd6b1e.md`。
-- **与 oneDNN 对照（进行中）**：工具 `tools/onednn/`（ab_onednn.sh = 单作业 A/B：
-  ours / e2e / benchdnn WINO+auto / filter_sweep / 合并表）。e2e 此前系统性 OOM 的
+- **与 oneDNN 对照（⚠️ 卡点，进行中）**：工具 `tools/onednn/`（ab_onednn.sh = 单作业
+  A/B：ours / e2e / benchdnn WINO+auto / filter_sweep / 合并表）。e2e 此前系统性 OOM 的
   **根因 = conv PD 误传 dilates={1,1}**（不是 omp_set_num_threads——8244944 是错修），
   已按用户参考格式修复（4bdc3ee）。判读矩阵、探针、坑：**`docs/onednn_comparison.md`**。
   ⚠️ benchdnn 计时虚高三修终版（50f9f2a）：① 608 线程超订（sbatch --exclusive
   默认全核）但 **TBB lib 忽略 OMP_NUM_THREADS**——用 **`numactl -C 0-15` 绑核**
   才生效；② benchdnn 默认 corr 模式，PASSED (N ms) 是聚合时间，须 **`--mode=p`**
   才打印 `perf,` 行（%-time%=单次执行 min）；③ merge 只解析 perf 行（exec 兜底），
-  无则整列 N/A。**重跑后 wino/auto 列应与 e2e 列同量级**；e2e 列=最终对照。
+  无则整列 N/A。**⛔ 当前卡点（2026-08-31）：集群作业产出的 benchdnn 文件仍无
+  perf 行 → merge 两列 `[NO-SRC]`**。新脚本已确认部署（grep mode=p=5、merge 有
+  iw=ih 回退），手动单/batch `--mode=p` 均能出 perf 行；作业内失败原因未明
+  （嫌疑：BIN find 探测选错二进制 / 读了过期文件 / 作业上下文），诊断清单与
+  计划修复见 **`docs/onednn_comparison.md` §六**。新 agent 接手先看该节。
+  出 perf 行后 wino/auto 列应与 e2e 列同量级；e2e 列=最终对照。
 - **M=25 选核**：已闭环（`tools/filter_sweep.sh`），**auto 保持最优**，不改选核。
 - **运行协议**：所有性能对比必须**单 sbatch 作业内 A/B**
   （`sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"`）——node03
@@ -34,7 +39,7 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
   `WINO_GEMM_DEBUG=1`（E1）会放大小形状。
 - **判读/交接**：完整作业日志可能过长——`ab_onednn.sh` 末尾自动生成
   **`build/SUMMARY.txt`**（数据行数 / impl 直方图 / 诊断矩阵 / 合并表），判读与交给
-  其他机器上的 agent 只取这一份即可；判读清单见 `docs/onednn_comparison.md` §七。
+  其他机器上的 agent 只取这一份即可；判读清单见 `docs/onednn_comparison.md` §八。
 - **git 边界**：集群代码是 scp 文件副本（**无 .git**，CRLF 由脚本 `sed` 自愈）。
   本地仓库 `README.md` 与 `swish_sve/` 是用户未提交改动——**绝不 stage**（只 `git add`
   具名文件）；`tools/diag_ab.sh` 是临时诊断脚本，闭环后删除。
