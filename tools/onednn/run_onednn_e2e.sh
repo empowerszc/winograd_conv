@@ -63,6 +63,10 @@ if [ -z "$LIBS_DIR" ]; then
 fi
 mkdir -p build
 : > build/onednn_e2e.csv   # 清空：避免编译/运行失败时 ab_onednn.sh 读到上一轮残留 CSV（1423 行异常根因）
+# oneDNN release 链接 libarm_compute.so，但该库不在默认搜索路径——须加 LD_LIBRARY_PATH。
+for d in /workspace/z00889957/000Libs/ComputeLibrary-*/build /data1/z00889957/apps/ComputeLibrary-*/build; do
+    [ -f "$d/libarm_compute.so" ] && { export LD_LIBRARY_PATH="$d:${LD_LIBRARY_PATH:-}"; echo "[e2e] ACL library: $d (added to LD_LIBRARY_PATH)"; break; }
+done
 echo "[e2e] ROOT=$ROOT"
 echo "[e2e] LIBS_DIR=$LIBS_DIR"
 echo "[e2e] CXX=$CXX"
@@ -95,7 +99,11 @@ fi
 # 无关（nothr=608 线程、SVE off 都一样 oom）——8244944 的 omp_set_num_threads
 # 根因结论是错的，已更正。
 echo "[onednn] threads=$THREADS warmup=$WARMUP repeats=$REPEATS alg=$ALG csv=$CSV"
+# ONEDNN_VERBOSE=0 防止环境变量里的 =1 污染 CSV（verbose 行混入 stdout）。
+# e2e 只在 ONEDNN_VERBOSE 未设置时 set_verbose(1)；设为 0 后 e2e 不调 set_verbose，
+# 且 env var 值 0 = off，双重保险。探针用 ONEDNN_VERBOSE=all（上一步，独立进程，不受影响）。
 OMP_PROC_BIND=close OMP_PLACES=cores OMP_NUM_THREADS=$THREADS \
+    ONEDNN_VERBOSE=0 \
     ./build/onednn_e2e "$CSV" "$THREADS" "$WARMUP" "$REPEATS" $ALG 2>build/onednn_e2e.err \
     | tee build/onednn_e2e.csv
 
