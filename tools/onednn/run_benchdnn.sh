@@ -87,11 +87,13 @@ else
     RUNNER=()
 fi
 
-# ONEDNN_VERBOSE=1 + -v4 让 benchdnn 输出 onednn_verbose,v1,primitive,exec,...,convolution,...,<ms> 行。
+# ONEDNN_VERBOSE=1 + -v4 + --mode=p 让 benchdnn 输出 onednn_verbose,v1,primitive,exec,...,convolution,...,<ms> 行。
 # 末字段 = 卷积纯执行时间（含变换+GEMM+逆变换），与 ours 同口径可比。
 # --mode=p 跑多次迭代，merge 取 MIN = best-of-N（与 ours best-of-20 同口径）。
 # 必须 ONEDNN_VERBOSE=1：没有它 -v4 完全不出 verbose 行（集群 3.12.1 实测确认）。
+# DNNL_NUM_THREADS + OMP_THREAD_LIMIT 尝试限制 oneDNN 线程数（集群实测 nthr:608 忽略 OMP_NUM_THREADS）。
 OMP_PROC_BIND=close OMP_PLACES=cores OMP_NUM_THREADS=$THREADS \
+    DNNL_NUM_THREADS=$THREADS OMP_THREAD_LIMIT=$THREADS \
     ONEDNN_VERBOSE=1 \
     "${RUNNER[@]}" "$BIN" --conv --mode=p -v4 --reset "${ALG[@]}" \
     --batch=shapes/conv_all.list >"$OUT" 2>&1 \
@@ -102,12 +104,14 @@ N_PASS=$(grep -c 'r[0-9]*"' "$OUT" 2>/dev/null) || N_PASS=0
 N_PERF=$(grep -c '^perf,' "$OUT" 2>/dev/null) || N_PERF=0
 N_EXEC=$(grep -cE '(onednn|dnnl)_verbose,.*primitive,exec,cpu,convolution,' "$OUT" 2>/dev/null) || N_EXEC=0
 echo "[benchdnn] PASSED lines: $N_PASS / perf lines: $N_PERF / convolution exec lines: $N_EXEC"
+NTHR=$(grep -o 'nthr:[0-9]*' "$OUT" 2>/dev/null | head -1 | cut -d: -f2) || NTHR="?"
+echo "[benchdnn] oneDNN nthr: $NTHR (expected $THREADS — if mismatch, OMP_NUM_THREADS 被忽略)"
 if [ "$N_PERF" -eq 0 ] && [ "$N_EXEC" -eq 0 ] && [ "$N_PASS" -gt 0 ]; then
     echo "!! WARNING: 无 perf/convolution-exec 行——merge 将回退到 PASSED 聚合时间（含 fill/ref/compare，约 2x 执行时间）。"
 fi
 # 把自检写进 OUT 末尾（# 注释行，merge 忽略）——下一轮 SUMMARY 直接可见
 {
     echo
-    echo "# run_benchdnn self-check: binary=$BIN algo=${ALG[*]:-auto} threads=$THREADS numactl=${NUMACTL_ARGS:-none}"
+    echo "# run_benchdnn self-check: binary=$BIN algo=${ALG[*]:-auto} threads=$THREADS nthr=$NTHR numactl=${NUMACTL_ARGS:-none}"
     echo "# PASSED=$N_PASS perf_lines=$N_PERF exec_lines=$N_EXEC"
 } >> "$OUT"

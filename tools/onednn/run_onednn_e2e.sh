@@ -63,10 +63,18 @@ if [ -z "$LIBS_DIR" ]; then
 fi
 mkdir -p build
 : > build/onednn_e2e.csv   # 清空：避免编译/运行失败时 ab_onednn.sh 读到上一轮残留 CSV（1423 行异常根因）
+echo "[e2e] ROOT=$ROOT"
+echo "[e2e] LIBS_DIR=$LIBS_DIR"
+echo "[e2e] CXX=$CXX"
+echo "[e2e] checking libdnnl in LIBS_DIR:"
+ls -la "$LIBS_DIR"/libdnnl* 2>/dev/null || echo "[e2e] !! WARNING: libdnnl not found in $LIBS_DIR"
 echo "[onednn] compiling with $CXX (libs: $LIBS_DIR) ..."
 $CXX -O3 -std=c++17 -fopenmp -I"$ROOT/include" \
     tools/onednn/onednn_e2e.cpp \
     -L"$LIBS_DIR" -Wl,-rpath,"$LIBS_DIR" -ldnnl -o build/onednn_e2e
+echo "[e2e] compilation exit=$?"
+echo "[e2e] ldd check:"
+ldd build/onednn_e2e 2>/dev/null | grep -iE 'dnnl|omp|tbb' || echo "[e2e] !! WARNING: no dnnl/omp/tbb in ldd — 编译可能未链接成功"
 
 # ---- verbose 探针（首个形状、独立进程、1 轮）：ONEDNN_VERBOSE 输出会混进 stdout，
 #      所以单独起一次进程、单独文件，不污染数据流；用于定位 PD 创建失败时 oneDNN
