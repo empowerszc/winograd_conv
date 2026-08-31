@@ -15,10 +15,10 @@
 #   2) 但用户实测 OMP_NUM_THREADS 对带 TBB 的 ACL build 无效（数值与修复前逐位
 #      相同）——真正有效的是 numactl -C 绑核（CPU 亲和对 OpenMP/TBB 都生效）。
 #      故改用 numactl -C 0-$(THREADS-1) 优先，OMP_NUM_THREADS 仅兜底。
-#   3) 原 --mode=p 出 perf 单次行，但集群 benchdnn build 始终无 perf 输出
-#      （可能不支持 perf 模式）。改用 ONEDNN_VERBOSE=exec 让 oneDNN 库直接
-#      打印 per-execution 计时行（onednn_verbose,...,exec,...,<ms>），merge
-#      的 exec 行解析兜底。PASSED (N ms) 是含 fill/ref/compare 的聚合时间，不用。
+#   3) -v4 让 benchdnn 输出 onednn_verbose,primitive,exec,...,convolution,...,<ms>
+#      行，末字段 = 卷积纯执行时间（与 ours 同口径可比）。--mode=p 不支持（该
+#      build 无 perf 行），ONEDNN_VERBOSE=exec env var 被 benchdnn 压制。PASSED
+#      (N ms) 是含 fill/ref/compare 的聚合时间，仅作兜底。
 # CRLF 自愈：SFTP 从 Windows 传文件可能带 \r\n，set -e 下 cd 路径含 \r 会静默失败。
 sed -i 's/\r$//' "$0" 2>/dev/null
 if grep -q $'\r' "$0"; then exec bash "$0"; fi
@@ -86,22 +86,21 @@ else
     RUNNER=()
 fi
 
-# ONEDNN_VERBOSE=exec 让 oneDNN 库打印 per-execution 计时行（merge 解析 exec 行兜底）。
-# 不用 --mode=p：该 benchdnn build 多次实测均无 perf 行（可能不支持 perf 模式）。
+# -v4 让 benchdnn 输出 onednn_verbose,primitive,exec,...,convolution,...,<ms> 行。
+# 末字段 = 卷积纯执行时间（含变换+GEMM+逆变换），与 ours 同口径可比。
+# 不用 ONEDNN_VERBOSE=exec env var（被 benchdnn 压制）；不用 --mode=p（该 build 不支持）。
 OMP_PROC_BIND=close OMP_PLACES=cores OMP_NUM_THREADS=$THREADS \
-    ONEDNN_VERBOSE=exec \
-    "${RUNNER[@]}" "$BIN" --conv --reset "${ALG[@]}" \
+    "${RUNNER[@]}" "$BIN" --conv -v4 --reset "${ALG[@]}" \
     --batch=shapes/conv_all.list >"$OUT" 2>&1 \
     || { echo "[benchdnn] exit $?; raw output in $OUT" >&2; tail -20 "$OUT" >&2; exit 1; }
 
 echo "[benchdnn] done -> $OUT"
 N_PASS=$(grep -c 'r[0-9]*"' "$OUT" 2>/dev/null) || N_PASS=0
 N_PERF=$(grep -c '^perf,' "$OUT" 2>/dev/null) || N_PERF=0
-N_EXEC=$(grep -cE '(onednn|dnnl)_verbose,.*exec' "$OUT" 2>/dev/null) || N_EXEC=0
-echo "[benchdnn] PASSED lines: $N_PASS / perf single-exec lines: $N_PERF / onednn exec lines: $N_EXEC"
+N_EXEC=$(grep -cE '(onednn|dnnl)_verbose,primitive,exec,cpu,convolution,' "$OUT" 2>/dev/null) || N_EXEC=0
+echo "[benchdnn] PASSED lines: $N_PASS / perf lines: $N_PERF / convolution exec lines: $N_EXEC"
 if [ "$N_PERF" -eq 0 ] && [ "$N_EXEC" -eq 0 ] && [ "$N_PASS" -gt 0 ]; then
-    echo "!! WARNING: 无 perf/exec 行——merge 将回退到 PASSED 聚合时间（含 fill/ref/compare，约 2x 执行时间）。"
-    echo "   已设 ONEDNN_VERBOSE=exec；若仍无 exec 行，benchdnn 可能压制了库级 verbose。"
+    echo "!! WARNING: 无 perf/convolution-exec 行——merge 将回退到 PASSED 聚合时间（含 fill/ref/compare，约 2x 执行时间）。"
 fi
 # 把自检写进 OUT 末尾（# 注释行，merge 忽略）——下一轮 SUMMARY 直接可见
 {
