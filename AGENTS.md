@@ -46,21 +46,23 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
 
 ### 接下来要做的（给下一个 agent 的直接任务）
 
-**防御性修复已落地（待集群验证）**：针对 §六 三假设已实施 5 处防御性修复
+**防御性修复已落地（待集群验证）**：针对 §六 三假设 + perf 模式不可用已实施 8 处修复
 （详见 `docs/onednn_comparison.md` §六「已实施防御性修复」表）：
-- `run_benchdnn.sh`：KNOWN_GOOD BIN 优先 + `: > "$OUT"` 前移清空 + gen_benchdnn_list 非致命 + 自检带 binary 路径
+- `run_benchdnn.sh`：KNOWN_GOOD BIN 优先 + `: > "$OUT"` 前移清空 + gen_benchdnn_list 非致命 + `--mode=p`→`ONEDNN_VERBOSE=exec` + 自检带 binary 路径 + N_EXEC grep 放宽
 - `run_onednn_e2e.sh`：编译前 `: > build/onednn_e2e.csv` 清空（治 1423 行 stale-file）
+- `merge_onednn.sh`：exec 解析器 regex 放宽（认 dnnl_verbose 旧名 + 不要求 "primitive"）+ 描述符从整行搜索 + 认 `mb:4` 冒号格式
 
 **集群验证（部署后跑一次 sbatch 作业，检查 4 项）**：
-1. `tail -3 build/benchdnn_wino.txt` —— 自检行应有 `binary=/workspace/.../benchdnn` + `perf_lines≈59`。
-2. `grep -c '^perf,' build/benchdnn_*.txt` —— 应 > 0（≈59），不再是 0。
+1. `tail -3 build/benchdnn_wino.txt` —— 自检行应有 `binary=/workspace/.../benchdnn` + `exec_lines≈59`。
+2. `grep -cE '(onednn|dnnl)_verbose,.*exec' build/benchdnn_*.txt` —— 应 > 0（≈59），不再是 0。
 3. `head -1 build/benchdnn_wino.txt` —— 应是 `[benchdnn] binary: /workspace/z00889957/000Libs/oneDNN-3.12.1/build/tests/benchdnn/benchdnn`。
 4. `wc -l build/onednn_e2e.csv` —— 应 59 行（+1 表头），不再是 1423。
 
-**若仍无 perf 行**：自检行的 `binary=` 字段直接揭示用了哪个 benchdnn——
+**若仍无 exec 行**：自检行的 `binary=` 字段直接揭示用了哪个 benchdnn——
 若非 KNOWN_GOOD 路径，说明该节点 `/workspace` 挂载不同，须 `--bin` 显式传路径。
+若 binary 正确但无 exec 行，可能 benchdnn 压制了 ONEDNN_VERBOSE，须查 benchdnn 自身的 verbose 选项。
 
-**部署**：`scp` 整树（含改过的 `tools/onednn/run_benchdnn.sh`、`tools/onednn/run_onednn_e2e.sh`）到集群，然后：
+**部署**：`scp` 整树（含改过的 `tools/onednn/run_benchdnn.sh`、`tools/onednn/run_onednn_e2e.sh`、`tools/onednn/merge_onednn.sh`）到集群，然后：
 ```
 sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"
 ```

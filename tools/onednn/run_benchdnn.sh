@@ -15,10 +15,10 @@
 #   2) 但用户实测 OMP_NUM_THREADS 对带 TBB 的 ACL build 无效（数值与修复前逐位
 #      相同）——真正有效的是 numactl -C 绑核（CPU 亲和对 OpenMP/TBB 都生效）。
 #      故改用 numactl -C 0-$(THREADS-1) 优先，OMP_NUM_THREADS 仅兜底。
-#   3) 必须 --mode=p：默认是 corr 模式，不打印 perf, 行，PASSED (N ms) 是含
-#      fill/ref/compare 的聚合时间（不可比）。--mode=p 打印
-#      `perf,<engine>,<impl>,<name>,<prb>,<Gops>,<ctime>,<min-ms>,...`，
-#      %-time% = 逐次 start/stamp 的最小单次执行 ms（与 ours/e2e 同口径）。
+#   3) 原 --mode=p 出 perf 单次行，但集群 benchdnn build 始终无 perf 输出
+#      （可能不支持 perf 模式）。改用 ONEDNN_VERBOSE=exec 让 oneDNN 库直接
+#      打印 per-execution 计时行（onednn_verbose,...,exec,...,<ms>），merge
+#      的 exec 行解析兜底。PASSED (N ms) 是含 fill/ref/compare 的聚合时间，不用。
 set -euo pipefail
 cd "$(dirname "$0")/../.."   # repo root
 
@@ -84,20 +84,22 @@ else
     RUNNER=()
 fi
 
-# --mode=p 出 perf 单次行；不带 --cfg=f32（3.12.1 已移除）。
+# ONEDNN_VERBOSE=exec 让 oneDNN 库打印 per-execution 计时行（merge 解析 exec 行兜底）。
+# 不用 --mode=p：该 benchdnn build 多次实测均无 perf 行（可能不支持 perf 模式）。
 OMP_PROC_BIND=close OMP_PLACES=cores OMP_NUM_THREADS=$THREADS \
-    "${RUNNER[@]}" "$BIN" --conv --mode=p --reset "${ALG[@]}" \
+    ONEDNN_VERBOSE=exec \
+    "${RUNNER[@]}" "$BIN" --conv --reset "${ALG[@]}" \
     --batch=shapes/conv_all.list >"$OUT" 2>&1 \
     || { echo "[benchdnn] exit $?; raw output in $OUT" >&2; tail -20 "$OUT" >&2; exit 1; }
 
 echo "[benchdnn] done -> $OUT"
 N_PASS=$(grep -c 'r[0-9]*"' "$OUT" 2>/dev/null || echo 0)
 N_PERF=$(grep -c '^perf,' "$OUT" 2>/dev/null || echo 0)
-N_EXEC=$(grep -c ',primitive,exec,' "$OUT" 2>/dev/null || echo 0)
+N_EXEC=$(grep -cE '(onednn|dnnl)_verbose,.*exec' "$OUT" 2>/dev/null || echo 0)
 echo "[benchdnn] PASSED lines: $N_PASS / perf single-exec lines: $N_PERF / onednn exec lines: $N_EXEC"
 if [ "$N_PERF" -eq 0 ] && [ "$N_EXEC" -eq 0 ] && [ "$N_PASS" -gt 0 ]; then
     echo "!! WARNING: 无 perf/exec 行——merge 将整列置 N/A。"
-    echo "   已加 --mode=p；若仍无 perf, 行，贴 head -20 $OUT 回来。"
+    echo "   已设 ONEDNN_VERBOSE=exec；若仍无 exec 行，贴 head -20 $OUT 回来。"
 fi
 # 把自检写进 OUT 末尾（# 注释行，merge 忽略）——下一轮 SUMMARY 直接可见
 {

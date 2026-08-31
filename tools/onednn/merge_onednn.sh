@@ -11,12 +11,12 @@
 # 用法：
 #   bash tools/onednn/merge_onednn.sh ours.csv onednn_e2e.csv benchdnn_wino.txt [benchdnn_auto.txt]
 #
-# benchdnn 时间来源（2026-08-29 再修）：只认「单次执行」口径，优先级：
-#   1) --mode=p 的 perf 行：`perf,<engine>,<impl>,<name>,<prb>,<Gops>,<ctime>,<min-ms>,...`
-#      其中 %-time%（第 8 字段）= 逐次 start/stamp 的最小单次执行 ms
-#      （见 oneDNN 源码 tests/benchdnn/utils/perf_report.hpp + dnnl_common.cpp
-#       measure_perf_individual 的 t.start()/t.stamp() 逐次计时）。与 ours/e2e 同口径。
-#   2) ONEDNN_VERBOSE=exec 的 onednn_verbose,...exec,... 行（末字段单次 ms）。
+# benchdnn 时间来源（2026-08-31 改）：只认「单次执行」口径，优先级：
+#   1) perf 行（若有）：`perf,<engine>,<impl>,<name>,<prb>,<Gops>,<ctime>,<min-ms>,...`
+#      其中 %-time%（第 8 字段）= 逐次 start/stamp 的最小单次执行 ms。
+#   2) ONEDNN_VERBOSE=exec 的 onednn_verbose,...,exec,... 行（末字段单次 ms）。
+#      集群 benchdnn build 可能不支持 --mode=p（多次实测无 perf 行），改用
+#      ONEDNN_VERBOSE=exec 让 oneDNN 库直接打印 per-execution 计时行。
 #   两者都无 → 整列 N/A。PASSED 的 (N ms) 是 corr 模式的聚合测试时间
 #   （含 fill/ref/compare）且旧跑法未绑线程可能被 608 线程超订放大，一律不用。
 set -euo pipefail
@@ -59,18 +59,22 @@ pre_parse_perf() {   # $1 raw → $2 "key minms"
     ' "$1" | sort > "$2" || true
 }
 
-# --- exec 行：onednn_verbose,...primitive,exec,...,<desc>,<ms>（末字段单次 ms） ---
+# --- exec 行：onednn_verbose,...exec,...,<ms>（末字段单次 ms） ---
+#   oneDNN verbose exec 行格式可能为 onednn_verbose,exec,convolution,...,mb:4,ic:192,...,0.123
+#   或旧名 dnnl_verbose。描述符分散在多个逗号字段（mb:4,ic:192,...），
+#   因此从整行 $0 搜索，而非单字段 $(NF-1)。同时兼容 mb4（无冒号，perf 行格式）
+#   和 mb:4（有冒号，verbose 格式）。
 pre_parse_exec() {   # $1 raw → $2 "key minms"
     awk -F, '
-        /onednn_verbose,.*,primitive,exec,/ {
+        /(onednn|dnnl)_verbose,/ && /,exec,/ {
             ms = $NF; if (ms !~ /^[0-9]+([.][0-9]+)?$/) next
-            desc = $(NF-1)
+            line = $0
             mb = ic = ih = iw = oc = ""
-            if (match(desc, /mb[0-9]+/))  mb = substr(desc, RSTART+2, RLENGTH-2)
-            if (match(desc, /ic[0-9]+/))  ic = substr(desc, RSTART+2, RLENGTH-2)
-            if (match(desc, /ih[0-9]+/))  ih = substr(desc, RSTART+2, RLENGTH-2)
-            if (match(desc, /iw[0-9]+/))  iw = substr(desc, RSTART+2, RLENGTH-2)
-            if (match(desc, /oc[0-9]+/))  oc = substr(desc, RSTART+2, RLENGTH-2)
+            if (match(line, /mb:?[0-9]+/)) { s=substr(line,RSTART,RLENGTH); sub(/^mb:?/,"",s); mb=s }
+            if (match(line, /ic:?[0-9]+/)) { s=substr(line,RSTART,RLENGTH); sub(/^ic:?/,"",s); ic=s }
+            if (match(line, /ih:?[0-9]+/)) { s=substr(line,RSTART,RLENGTH); sub(/^ih:?/,"",s); ih=s }
+            if (match(line, /iw:?[0-9]+/)) { s=substr(line,RSTART,RLENGTH); sub(/^iw:?/,"",s); iw=s }
+            if (match(line, /oc:?[0-9]+/)) { s=substr(line,RSTART,RLENGTH); sub(/^oc:?/,"",s); oc=s }
             if (iw == "" && ih != "") iw = ih
             if (mb=="" || ic=="" || ih=="" || iw=="" || oc=="") next
             key = mb","ic","ih","iw","oc

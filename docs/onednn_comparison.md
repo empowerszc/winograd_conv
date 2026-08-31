@@ -173,24 +173,27 @@ dilates 旧 bug，修复生效**，e2e 应出全量 59 行数据。
   路径（job 日志不可靠，关键行写入 OUT 文件）。
 - 过期文件 → 运行前 `: > "$OUT"` 强制清空。
 - e2e 1423 行 → 核实 mtime / 确保 tee 前截断；若编译失败读了旧 CSV 需顺带修。
-- 出 perf 行后重跑整作业：merge 应 `src≈59 na≈0`，benchdnn 列与 e2e 列同量级。
+- 出 exec 行后重跑整作业：merge 应 `src≈59 na=0`，benchdnn 列与 e2e 列同量级。
 - 终态判读：benchdnn(wino:acl, ACL 构建) / e2e(brgconv:sve_512) / ours 三列同作业。
 
 ### ✅ 已实施防御性修复（本地仓库，待集群验证）
 
-三假设的防御性修复已落地（commit 待 push），同时覆盖 ① BIN 选错 + ② 过期文件：
+三假设的防御性修复已落地（commit 待 push），同时覆盖 ① BIN 选错 + ② 过期文件 + perf 模式不可用：
 
 | 改动 | 文件 | 作用 |
 |------|------|------|
 | KNOWN_GOOD 优先 | `run_benchdnn.sh:57-60` | `/workspace/z00889957/000Libs/oneDNN-3.12.1/build/tests/benchdnn/benchdnn` 先于 find 循环检查，避免 `/usr/local`、`/opt` 先命中旧 benchdnn |
 | `: > "$OUT"` 前移 | `run_benchdnn.sh:50` | OUT 赋值后立即清空，gen_benchdnn_list / BIN 探测 / numactl 任一步 `set -e` 失败都不留旧文件（ab_onednn `set +e` 读到空文件 → merge [NO-SRC]，不读过期数据） |
 | gen_benchdnn_list 非致命 | `run_benchdnn.sh:75` | `\|\| true` 防止刷新描述符失败时 `set -e` 提前退出 |
-| 自检带 binary | `run_benchdnn.sh:105` | `# run_benchdnn self-check: binary=$BIN ...` 写入 OUT 末尾，SUMMARY 直接可见用了哪个 benchdnn |
+| `--mode=p` → `ONEDNN_VERBOSE=exec` | `run_benchdnn.sh:89-90` | 集群 benchdnn build 多次实测无 perf 行（可能不支持 perf 模式），改用 `ONEDNN_VERBOSE=exec` 让 oneDNN 库直接打印 per-execution 计时行 |
+| 自检带 binary | `run_benchdnn.sh:107` | `# run_benchdnn self-check: binary=$BIN ...` 写入 OUT 末尾，SUMMARY 直接可见用了哪个 benchdnn |
+| N_EXEC grep 放宽 | `run_benchdnn.sh:100` | 从 `,primitive,exec,` 改为 `(onednn\|dnnl)_verbose,.*exec`，与 merge 解析器一致 |
+| merge exec 解析器修 | `merge_onednn.sh:67-85` | regex 放宽（认 `dnnl_verbose` 旧名 + 不要求 "primitive"）+ 描述符从整行 $0 搜（不限于单字段）+ 认 `mb:4` 冒号格式 |
 | e2e CSV 清空 | `run_onednn_e2e.sh:62` | `mkdir -p build` 后 `: > build/onednn_e2e.csv`，编译失败不留 1423 行旧文件 |
 
 **集群验证（部署后跑一次 sbatch 作业，检查这 4 项）**：
-1. `tail -3 build/benchdnn_wino.txt` —— 末尾自检行应有 `binary=/workspace/.../benchdnn` + `perf_lines=N`（N≈59）。
-2. `grep -c '^perf,' build/benchdnn_*.txt` —— 应 > 0（≈59），不再是 0。
+1. `tail -3 build/benchdnn_wino.txt` —— 末尾自检行应有 `binary=/workspace/.../benchdnn` + `exec_lines=N`（N≈59）。
+2. `grep -cE '(onednn|dnnl)_verbose,.*exec' build/benchdnn_*.txt` —— 应 > 0（≈59），不再是 0。
 3. `head -1 build/benchdnn_wino.txt` —— 应是 `[benchdnn] binary: /workspace/z00889957/000Libs/oneDNN-3.12.1/build/tests/benchdnn/benchdnn`。
 4. `wc -l build/onednn_e2e.csv` —— 应 59 行（+1 行表头），不再是 1423。
 
