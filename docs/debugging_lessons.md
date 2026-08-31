@@ -86,3 +86,108 @@ PD 创建 `status=2(out_of_memory)`。第一印象：**"第 1 个 primitive 能�
 3. **设备实测为准**：源码只作辅助；实测与源码矛盾时信实测。
 4. **修完四步闭环**：正确性门 → 数据流出数 → 诊断矩阵判读 → **才**更新文档/memory。
 5. **参考用户已知可跑的样本**：有成功的参考调用格式就先对齐它。
+
+## 四、benchdnn [NO-SRC] 弯路（2026-08-31）
+
+> oneDNN 对照的 benchdnn 列从 [NO-SRC] 到 src=59 的排障复盘。6 条弯路，每条都有
+> "看起来对但实际错"的第一理论。根因与最终方案见 `docs/onednn_comparison.md` §六。
+
+### 弯路 1：误判 CRLF（2 轮）
+
+**症状**：`bash tools/onednn/run_benchdnn.sh --winograd --threads 16` 执行后零输出，
+文件 mtime 不变（仍 Aug 29）。
+
+**第一理论**：SFTP 从 Windows 传文件带 `\r\n`，`set -euo pipefail` 下 `cd "path\r"`
+路径含 `\r` 失败 → 脚本静默退出。
+
+**证伪**：用户 `sed -i 's/\r$//'` 剥掉 CRLF 后重跑——仍然零输出。CRLF 不是根因。
+
+**真根因**：参数解析 `esac` 后有多余的 `shift`（line 39）。`--threads 16` 在 case
+里 `shift 2` 消费两个参数后，外面 `shift` 对空参数返回 1 → `set -e` 静默退出。
+**`shift` 在 `set -e` 下对空参数返回 1 是静默的（无错误消息）**——和 CRLF 的
+"静默退出"表现一模一样，导致误判。
+
+**教训**：`bash -x script.sh` 能一下看到脚本在哪行退出。**set -e 的静默退出
+不提供任何错误信息，必须用 -x trace 定位。**
+
+### 弯路 2：`--mode=p` 不出 perf 行（2 轮）
+
+**症状**：集群 benchdnn `--mode=p` 跑完后 `grep -c '^perf,'` = 0。
+
+**第一理论**：该 oneDNN 3.12.1 build 不支持 `--mode=p` 的 perf 输出格式。
+
+**证伪**：加 `ONEDNN_VERBOSE=exec` env var → 仍 0 exec 行。加 PASSED 行解析兜底
+→ 出了 59 行但计时是聚合时间（含 fill/ref/compare），不可比。
+
+**真根因**：oneDNN 3.12.1 需要 `ONEDNN_VERBOSE=1` env var 才启用任何 verbose
+输出。`-v4` flag 只在 `ONEDNN_VERBOSE=1` 已设的前提下才生效。用户的本地
+oneDNN 3.4.0 不需要 env var（`-v4` 自动启用），导致版本差异被忽略。
+
+**教训**：**env var 的优先级和值因 oneDNN 版本而异**。3.4.0 自动启用 verbose，
+3.12.1 要求 `ONEDNN_VERBOSE=1`。跨版本行为差异不能用一个版本的观察推断另一个。
+
+### 弯路 3：e2e 0 行 + ldd 无 dnnl（2 轮）
+
+**症状**：`onednn_e2e.csv: 0 rows`，`ldd build/onednn_e2e` 显示无 dnnl/omp/tbb。
+
+**第一理论**：编译失败 / ROOT 探测选错路径 / CRLF 导致编译命令含 `\r`。
+
+**证伪**：加诊断打印——ROOT/LIBS_DIR/CXX 值正确，`libdnnl.so` 存在于 LIBS_DIR，
+编译 exit=0。但 ldd 仍无 dnnl。
+
+**真根因**：oneDNN release 库链接 `libarm_compute.so`（ACL），但 ACL 库不在
+`LD_LIBRARY_PATH`。编译时 `-ldnnl` 找到了（dnnl 依赖 ACL），但运行时 ACL 库
+找不到 → 二进制启动即崩溃 → 0 行输出。用户手动加 ACL 路径到 `LD_LIBRARY_PATH`
+解决。
+
+**教训**：**ldd 是诊断链接问题的第一步**。`ldd binary | grep dnnl` 一看就知道
+是否链接成功。不要在没看 ldd 的情况下猜编译失败。
+
+### 弯路 4：`grep -c || echo 0` 产生 `0\n0`（1 轮）
+
+**症状**：自检行 `perf_lines=0\n0 exec_lines=0\n0`，`[: 0\n0: integer expression
+expected`。
+
+**根因**：`grep -c` 无匹配时打印 `0` 到 stdout 且返回 exit code 1。`|| echo 0`
+再打印 `0`。`$(...)` 捕获到两行 `0\n0`。
+
+**修复**：`VAR=$(grep -c ...) || VAR=0`——`||` 后赋值不产生 stdout。
+
+**教训**：**`grep -c` 无匹配时 exit code = 1，但不报错——和"文件不存在"不可区分**。
+用 `|| VAR=0`（不是 `|| echo 0`）避免 stdout 污染。
+
+### 弯路 5：ONEDNN_VERBOSE=1 污染 e2e CSV（1 轮）
+
+**症状**：e2e 输出混入 `onednn_verbose,v1,...` 行，CSV 被污染。
+
+**根因**：用户 shell 设了 `export ONEDNN_VERBOSE=1`（为 benchdnn 调试），sbatch
+作业继承该 env var。e2e 的 oneDNN 库看到 `ONEDNN_VERBOSE=1` 就打印 verbose
+行到 stdout（混入 CSV）。
+
+**修复**：e2e 主运行加 `ONEDNN_VERBOSE=0`（探针用 `=all`，独立进程不受影响）。
+
+**教训**：**export 的 env var 会污染同作业内所有子进程**。调试完后要 unset，或
+在脚本里显式覆盖。
+
+### 弯路 6：nthr:608 担忧（1 轮）
+
+**症状**：手动测试 benchdnn 显示 `nthr:608`（608 线程），担心计时被 608 线程
+超订放大。
+
+**修复**：加 `DNNL_NUM_THREADS=16` + `OMP_THREAD_LIMIT=16` env var。集群实测
+自检行 `nthr=16`——生效了。
+
+**教训**：`OMP_NUM_THREADS` 对 oneDNN 3.12.1 + bisheng libomp **可能不生效**
+（e2e 通过 `omp_set_num_threads` API 调用生效，benchdnn 不调用 API 只靠 env var）。
+`DNNL_NUM_THREADS` 是 oneDNN 自己的 env var，比 `OMP_NUM_THREADS` 更可靠。
+
+### 弯路总结：方法论教训
+
+1. **`bash -x` 是定位 set -e 静默退出的唯一利器**——shift bug 用 -x 一下就能看到。
+2. **ldd 是诊断链接问题的第一步**——不要在没看 ldd 的情况下猜编译失败。
+3. **env var 的值和优先级因版本而异**——`ONEDNN_VERBOSE=1` vs `=exec` vs `=all`
+   在 3.4.0 和 3.12.1 上行为不同，不能用一个版本的观察推断另一个。
+4. **`grep -c` 的 exit code 陷阱**——无匹配返回 1，用 `|| VAR=0` 不用 `|| echo 0`。
+5. **export 的 env var 会污染同作业子进程**——调试完要 unset 或脚本里显式覆盖。
+6. **"静默退出"有多种原因**——CRLF、set -e + shift、链接缺失，表现一模一样（零输出），
+   必须 `bash -x` + `ldd` + `stat` 三板斧快速定位。

@@ -18,20 +18,15 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
 - **性能终局（arm_gemm vs OpenBLAS，同作业）**：**59/59 形状全胜**，geomean **1.99x**，
   合计 321.9 vs 804.9ms = **2.50x**；大形状 4,384,160²,384 3.02x ≈94% SVE-512 峰值。
   全量逐形状表：`docs/final_benchmark_bfd6b1e.md`。
-- **与 oneDNN 对照（⚠️ 卡点，进行中）**：工具 `tools/onednn/`（ab_onednn.sh = 单作业
-  A/B：ours / e2e / benchdnn WINO+auto / filter_sweep / 合并表）。e2e 此前系统性 OOM 的
-  **根因 = conv PD 误传 dilates={1,1}**（不是 omp_set_num_threads——8244944 是错修），
-  已按用户参考格式修复（4bdc3ee）。判读矩阵、探针、坑：**`docs/onednn_comparison.md`**。
-  ⚠️ benchdnn 计时虚高三修终版（50f9f2a）：① 608 线程超订（sbatch --exclusive
-  默认全核）但 **TBB lib 忽略 OMP_NUM_THREADS**——用 **`numactl -C 0-15` 绑核**
-  才生效；② benchdnn 默认 corr 模式，PASSED (N ms) 是聚合时间，须 **`--mode=p`**
-  才打印 `perf,` 行（%-time%=单次执行 min）；③ merge 只解析 perf 行（exec 兜底），
-  无则整列 N/A。**⛔ 当前卡点（2026-08-31）：集群作业产出的 benchdnn 文件仍无
-  perf 行 → merge 两列 `[NO-SRC]`**。新脚本已确认部署（grep mode=p=5、merge 有
-  iw=ih 回退），手动单/batch `--mode=p` 均能出 perf 行；作业内失败原因未明
-  （嫌疑：BIN find 探测选错二进制 / 读了过期文件 / 作业上下文），诊断清单与
-  计划修复见 **`docs/onednn_comparison.md` §六**。新 agent 接手先看该节。
-  出 perf 行后 wino/auto 列应与 e2e 列同量级；e2e 列=最终对照。
+- **与 oneDNN 对照（✅ 已闭环）**：工具 `tools/onednn/`（ab_onednn.sh = 单作业
+  A/B：ours / e2e / benchdnn WINO+auto / filter_sweep / 合并表）。三列同作业同 16 线程：
+  **e2e**（brgconv:sve_512，主对照）大形状我们快 1.1-2.8x、小形状 oneDNN 快 0.09-0.91x；
+  **benchdnn_wino**（wino:acl，同算法 PK）我们 F(4,4) 全面碾压 1.2-9x；
+  **benchdnn_auto**（brgconv:sve_512）≈ e2e + ~10%。benchdnn 用 `ONEDNN_VERBOSE=1`
+  + `--mode=p -v4` 拿卷积纯执行时间（exec 行解析，perf→exec→PASSED 三级兜底），
+  `DNNL_NUM_THREADS=16` + `OMP_THREAD_LIMIT=16` 限制线程数（nthr=16 已确认）。
+  e2e 需 ACL 库在 `LD_LIBRARY_PATH`（脚本自动探测）+ `ONEDNN_VERBOSE=0` 防 CSV 污染。
+  弯路复盘见 **`docs/debugging_lessons.md` §四**；最终方案见 `docs/onednn_comparison.md` §六。
 - **M=25 选核**：已闭环（`tools/filter_sweep.sh`），**auto 保持最优**，不改选核。
 - **运行协议**：所有性能对比必须**单 sbatch 作业内 A/B**
   （`sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"`）——node03
@@ -42,32 +37,20 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
   其他机器上的 agent 只取这一份即可；判读清单见 `docs/onednn_comparison.md` §八。
 - **git 边界**：集群代码是 scp 文件副本（**无 .git**，CRLF 由脚本 `sed` 自愈）。
   本地仓库 `README.md` 与 `swish_sve/` 是用户未提交改动——**绝不 stage**（只 `git add`
-  具名文件）；`tools/diag_ab.sh` 是临时诊断脚本，闭环后删除。
+  具名文件）；`tools/diag_verbose.sh` 临时脚本已删除；`tools/diag_ab.sh` 同为
+  临时脚本，不再使用，可删。
 
 ### 接下来要做的（给下一个 agent 的直接任务）
 
-**防御性修复已落地（待集群验证）**：针对 §六 三假设 + perf 模式不可用已实施 8 处修复
-（详见 `docs/onednn_comparison.md` §六「已实施防御性修复」表）：
-- `run_benchdnn.sh`：KNOWN_GOOD BIN 优先 + `: > "$OUT"` 前移清空 + gen_benchdnn_list 非致命 + `--mode=p`→`ONEDNN_VERBOSE=exec` + 自检带 binary 路径 + N_EXEC grep 放宽
-- `run_onednn_e2e.sh`：编译前 `: > build/onednn_e2e.csv` 清空（治 1423 行 stale-file）
-- `merge_onednn.sh`：exec 解析器 regex 放宽（认 dnnl_verbose 旧名 + 不要求 "primitive"）+ 描述符从整行搜索 + 认 `mb:4` 冒号格式
+**oneDNN 对照已闭环**：三列全出数据（src=59 na=0），nthr=16 已确认。最终方案：
+- `run_benchdnn.sh`：`ONEDNN_VERBOSE=1` + `--mode=p -v4` + `DNNL_NUM_THREADS=16` +
+  `OMP_THREAD_LIMIT=16` + KNOWN_GOOD BIN + `: > "$OUT"` 前移 + CRLF 自愈 + shift 修复
+- `run_onednn_e2e.sh`：ACL 库 `LD_LIBRARY_PATH` 自动探测 + `ONEDNN_VERBOSE=0` 防 CSV 污染 + CRLF 自愈
+- `merge_onednn.sh`：perf→exec→PASSED 三级兜底 + exec 解析器修（regex 放宽 + 整行搜 + 认冒号）
+- 所有 `set -euo pipefail` 脚本加 CRLF 自愈（`sed -i 's/\r$//' "$0"` 在 `set -e` 前）
 
-**集群验证（部署后跑一次 sbatch 作业，检查 4 项）**：
-1. `tail -3 build/benchdnn_wino.txt` —— 自检行应有 `binary=/workspace/.../benchdnn` + `exec_lines≈59`。
-2. `grep -cE '(onednn|dnnl)_verbose,.*exec' build/benchdnn_*.txt` —— 应 > 0（≈59），不再是 0。
-3. `head -1 build/benchdnn_wino.txt` —— 应是 `[benchdnn] binary: /workspace/z00889957/000Libs/oneDNN-3.12.1/build/tests/benchdnn/benchdnn`。
-4. `wc -l build/onednn_e2e.csv` —— 应 59 行（+1 表头），不再是 1423。
-
-**若仍无 exec 行**：自检行的 `binary=` 字段直接揭示用了哪个 benchdnn——
-若非 KNOWN_GOOD 路径，说明该节点 `/workspace` 挂载不同，须 `--bin` 显式传路径。
-若 binary 正确但无 exec 行，可能 benchdnn 压制了 ONEDNN_VERBOSE，须查 benchdnn 自身的 verbose 选项。
-
-**部署**：`scp` 整树（含改过的 `tools/onednn/run_benchdnn.sh`、`tools/onednn/run_onednn_e2e.sh`、`tools/onednn/merge_onednn.sh`）到集群，然后：
-```
-sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"
-```
-判读 `build/SUMMARY.txt`：merge 应 `src≈59 na=0`、benchdnn 列与 e2e 列同量级。
-把集群输出贴回给用户合并。
+**运行协议**：`sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"`，
+判读 `build/SUMMARY.txt`：ours/e2e/benchdnn 均 59 行 + `src=59 na=0` + `nthr=16`。
 
 **铁律**：只 `git add` 具名文件，**绝不 `git add -A`**；不碰用户未提交的
 `README.md` / `swish_sve/`；性能比较必须同作业内（node03 跨作业 3~7x 性能态）；
