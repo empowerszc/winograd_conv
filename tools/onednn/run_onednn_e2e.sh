@@ -59,6 +59,7 @@ if [ -z "$LIBS_DIR" ]; then
     echo "error: no lib/lib64 dir under $ROOT" >&2; exit 1
 fi
 mkdir -p build
+: > build/onednn_e2e.csv   # 清空：避免编译/运行失败时 ab_onednn.sh 读到上一轮残留 CSV（1423 行异常根因）
 echo "[onednn] compiling with $CXX (libs: $LIBS_DIR) ..."
 $CXX -O3 -std=c++17 -fopenmp -I"$ROOT/include" \
     tools/onednn/onednn_e2e.cpp \

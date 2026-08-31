@@ -36,7 +36,28 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-# ---- 定位 benchdnn ----
+# ---- 输出文件：先确定再清空，保证任何失败路径都不留旧文件 ----
+# 若 gen_benchdnn_list / BIN 探测 / numactl 设置任一步失败（set -e 提前退出），
+# 旧 OUT 残留会被 ab_onednn.sh 的 [ -f "$BD1" ] 照读 → merge [NO-SRC]。
+# 提前清空确保失败时留空文件（merge 走 [NO-SRC]，不读过期数据）。
+if [ ${#ALG[@]} -eq 0 ]; then
+    OUT=build/benchdnn_auto.txt
+    echo "[benchdnn] algo = auto (oneDNN default)"
+else
+    OUT=build/benchdnn_wino.txt
+    echo "[benchdnn] algo = ${ALG[*]} (oneDNN Winograd via ACL)"
+fi
+: > "$OUT"
+
+# ---- 定位 benchdnn：已知好路径优先，再 find 探测兜底 ----
+# 旧版 find 循环 cand 顺序为 ONEDNN_ROOT /usr/local /opt /workspace/... /workspace，
+# 若 /usr/local 或 /opt 先命中更旧的 benchdnn（不认 --mode=p）→ corr 模式 → 无 perf 行。
+# 已知好路径 /workspace/z00889957/000Libs/oneDNN-3.12.1/build/tests/benchdnn/benchdnn
+# （相对 000Libs 深度 5，-maxdepth 5 可命中）优先检查，避免 find 选错。
+KNOWN_GOOD="/workspace/z00889957/000Libs/oneDNN-3.12.1/build/tests/benchdnn/benchdnn"
+if [ -z "$BIN" ] && [ -x "$KNOWN_GOOD" ]; then
+    BIN="$KNOWN_GOOD"
+fi
 if [ -z "$BIN" ]; then
     for cand in "${ONEDNN_ROOT:-}" /usr/local /opt /workspace/z00889957/000Libs /workspace; do
         hit=$(find "$cand" -maxdepth 5 -type f -name benchdnn 2>/dev/null | head -1 || true)
@@ -50,16 +71,8 @@ fi
 echo "[benchdnn] binary: $BIN"
 echo "[benchdnn] threads=$THREADS (numactl -C 0-$(($THREADS-1)))"
 
-# ---- 刷新描述符清单 ----
-bash tools/gen_benchdnn_list.sh >/dev/null
-
-if [ ${#ALG[@]} -eq 0 ]; then
-    OUT=build/benchdnn_auto.txt
-    echo "[benchdnn] algo = auto (oneDNN default)"
-else
-    OUT=build/benchdnn_wino.txt
-    echo "[benchdnn] algo = ${ALG[*]} (oneDNN Winograd via ACL)"
-fi
+# ---- 刷新描述符清单（非致命：list 已在仓库，刷新失败不阻断 benchdnn 运行）----
+bash tools/gen_benchdnn_list.sh >/dev/null || true
 
 # ---- 线程绑定：numactl 优先；不可用则退 OpenMP 环境变量 ----
 NUMACTL_ARGS="${BENCHDNN_NUMACTL:--C 0-$((THREADS-1))}"
@@ -89,6 +102,6 @@ fi
 # 把自检写进 OUT 末尾（# 注释行，merge 忽略）——下一轮 SUMMARY 直接可见
 {
     echo
-    echo "# run_benchdnn self-check: algo=${ALG[*]:-auto} threads=$THREADS numactl=${NUMACTL_ARGS:-none}"
+    echo "# run_benchdnn self-check: binary=$BIN algo=${ALG[*]:-auto} threads=$THREADS numactl=${NUMACTL_ARGS:-none}"
     echo "# PASSED=$N_PASS perf_lines=$N_PERF exec_lines=$N_EXEC"
 } >> "$OUT"

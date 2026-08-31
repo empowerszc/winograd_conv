@@ -46,25 +46,26 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
 
 ### 接下来要做的（给下一个 agent 的直接任务）
 
-**当前阻塞点**：集群 08-31 作业的 `build/benchdnn_{wino,auto}.txt` 仍无 perf 行 →
-merge 两列 `[NO-SRC]`（详见 `docs/onednn_comparison.md` §六）。
+**防御性修复已落地（待集群验证）**：针对 §六 三假设已实施 5 处防御性修复
+（详见 `docs/onednn_comparison.md` §六「已实施防御性修复」表）：
+- `run_benchdnn.sh`：KNOWN_GOOD BIN 优先 + `: > "$OUT"` 前移清空 + gen_benchdnn_list 非致命 + 自检带 binary 路径
+- `run_onednn_e2e.sh`：编译前 `: > build/onednn_e2e.csv` 清空（治 1423 行 stale-file）
 
-第一步先确认下面 3 项（向用户索取或上集群自查）：
-1. `tail -8 build/benchdnn_wino.txt` —— 末尾自检行 `# PASSED=… perf_lines=…`
-   （只有新脚本才写；旧脚本/corr 模式没有）。
-2. `grep -c '^perf,' build/benchdnn_*.txt` + 文件 mtime（应为本作业时间，非上次）。
-3. 作业日志 A3/A4 的 `[benchdnn] binary:` / `PASSED lines:` / `!! WARNING` 行
-   （`ls -t slurm-*.out | head -1` 取最新）。
+**集群验证（部署后跑一次 sbatch 作业，检查 4 项）**：
+1. `tail -3 build/benchdnn_wino.txt` —— 自检行应有 `binary=/workspace/.../benchdnn` + `perf_lines≈59`。
+2. `grep -c '^perf,' build/benchdnn_*.txt` —— 应 > 0（≈59），不再是 0。
+3. `head -1 build/benchdnn_wino.txt` —— 应是 `[benchdnn] binary: /workspace/z00889957/000Libs/oneDNN-3.12.1/build/tests/benchdnn/benchdnn`。
+4. `wc -l build/onednn_e2e.csv` —— 应 59 行（+1 表头），不再是 1423。
 
-拿到后按 §六 三假设定位：① BIN `find|head -1` 探测选错二进制 → 把
-`run_benchdnn.sh` 的 BIN 固定为已知好路径
-`/workspace/z00889957/000Libs/oneDNN-3.12.1/build/tests/benchdnn/benchdnn` 优先 +
-打印解析结果 + 自检行带 binary 路径；② 读了过期文件 → 运行前 `: > "$OUT"` 清空；
-③ 作业上下文差异（最不可能，手动 batch 同参数能出 perf）。
+**若仍无 perf 行**：自检行的 `binary=` 字段直接揭示用了哪个 benchdnn——
+若非 KNOWN_GOOD 路径，说明该节点 `/workspace` 挂载不同，须 `--bin` 显式传路径。
 
-**随后**：重跑 `sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"`，
-merge 应 `src≈59 na≈0`、benchdnn 列与 e2e 列同量级；判读 `build/SUMMARY.txt`，
-把集群输出贴回给用户合并。同时核实 `onednn_e2e.csv` 1423 行异常（应 59，疑过期）。
+**部署**：`scp` 整树（含改过的 `tools/onednn/run_benchdnn.sh`、`tools/onednn/run_onednn_e2e.sh`）到集群，然后：
+```
+sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"
+```
+判读 `build/SUMMARY.txt`：merge 应 `src≈59 na=0`、benchdnn 列与 e2e 列同量级。
+把集群输出贴回给用户合并。
 
 **铁律**：只 `git add` 具名文件，**绝不 `git add -A`**；不碰用户未提交的
 `README.md` / `swish_sve/`；性能比较必须同作业内（node03 跨作业 3~7x 性能态）；

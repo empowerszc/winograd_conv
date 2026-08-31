@@ -176,6 +176,24 @@ dilates 旧 bug，修复生效**，e2e 应出全量 59 行数据。
 - 出 perf 行后重跑整作业：merge 应 `src≈59 na≈0`，benchdnn 列与 e2e 列同量级。
 - 终态判读：benchdnn(wino:acl, ACL 构建) / e2e(brgconv:sve_512) / ours 三列同作业。
 
+### ✅ 已实施防御性修复（本地仓库，待集群验证）
+
+三假设的防御性修复已落地（commit 待 push），同时覆盖 ① BIN 选错 + ② 过期文件：
+
+| 改动 | 文件 | 作用 |
+|------|------|------|
+| KNOWN_GOOD 优先 | `run_benchdnn.sh:57-60` | `/workspace/z00889957/000Libs/oneDNN-3.12.1/build/tests/benchdnn/benchdnn` 先于 find 循环检查，避免 `/usr/local`、`/opt` 先命中旧 benchdnn |
+| `: > "$OUT"` 前移 | `run_benchdnn.sh:50` | OUT 赋值后立即清空，gen_benchdnn_list / BIN 探测 / numactl 任一步 `set -e` 失败都不留旧文件（ab_onednn `set +e` 读到空文件 → merge [NO-SRC]，不读过期数据） |
+| gen_benchdnn_list 非致命 | `run_benchdnn.sh:75` | `\|\| true` 防止刷新描述符失败时 `set -e` 提前退出 |
+| 自检带 binary | `run_benchdnn.sh:105` | `# run_benchdnn self-check: binary=$BIN ...` 写入 OUT 末尾，SUMMARY 直接可见用了哪个 benchdnn |
+| e2e CSV 清空 | `run_onednn_e2e.sh:62` | `mkdir -p build` 后 `: > build/onednn_e2e.csv`，编译失败不留 1423 行旧文件 |
+
+**集群验证（部署后跑一次 sbatch 作业，检查这 4 项）**：
+1. `tail -3 build/benchdnn_wino.txt` —— 末尾自检行应有 `binary=/workspace/.../benchdnn` + `perf_lines=N`（N≈59）。
+2. `grep -c '^perf,' build/benchdnn_*.txt` —— 应 > 0（≈59），不再是 0。
+3. `head -1 build/benchdnn_wino.txt` —— 应是 `[benchdnn] binary: /workspace/z00889957/000Libs/oneDNN-3.12.1/build/tests/benchdnn/benchdnn`。
+4. `wc -l build/onednn_e2e.csv` —— 应 59 行（+1 行表头），不再是 1423。
+
 ## 七、给优化 agent 的注意事项
 
 （见下方；另：完整作业日志可能过长——判读只取 `build/SUMMARY.txt`，交接 SOP 见 §八）
