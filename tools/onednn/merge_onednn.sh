@@ -17,6 +17,9 @@
 #   3) PASSED 行：`N:PASSED (XXX ms) __REPRO: ...`（corr 模式聚合时间，
 #      含 fill/ref/compare，约 2x 执行时间，仅作粗略参考）
 #   三者都无 → 整列 N/A。
+# CRLF 自愈：SFTP 从 Windows 传文件可能带 \r\n，set -e 下命令含 \r 会静默失败。
+sed -i 's/\r$//' "$0" 2>/dev/null
+if grep -q $'\r' "$0"; then exec bash "$0"; fi
 set -euo pipefail
 OURS="${1:?ours.csv}"; E2E="${2:?onednn_e2e.csv}"; BD_A="${3:?benchdnn_raw.txt}"
 # 位置 4 有二义（第二个 benchdnn 文件 或 shapes CSV）：用内容嗅探判——只有

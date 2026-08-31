@@ -14,6 +14,9 @@
 #
 # Then on 920F:
 #   ./benchdnn --conv --cfg=f32 --reset --alg=WINO --batch=shapes/conv_all.list
+# CRLF 自愈：SFTP 从 Windows 传文件可能带 \r\n，set -e 下命令含 \r 会静默失败。
+sed -i 's/\r$//' "$0" 2>/dev/null
+if grep -q $'\r' "$0"; then exec bash "$0"; fi
 set -euo pipefail
 
 SRC="${1:-shapes/conv_all.csv}"

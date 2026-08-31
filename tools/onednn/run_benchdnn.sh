@@ -19,6 +19,9 @@
 #      （可能不支持 perf 模式）。改用 ONEDNN_VERBOSE=exec 让 oneDNN 库直接
 #      打印 per-execution 计时行（onednn_verbose,...,exec,...,<ms>），merge
 #      的 exec 行解析兜底。PASSED (N ms) 是含 fill/ref/compare 的聚合时间，不用。
+# CRLF 自愈：SFTP 从 Windows 传文件可能带 \r\n，set -e 下 cd 路径含 \r 会静默失败。
+sed -i 's/\r$//' "$0" 2>/dev/null
+if grep -q $'\r' "$0"; then exec bash "$0"; fi
 set -euo pipefail
 cd "$(dirname "$0")/../.."   # repo root
 

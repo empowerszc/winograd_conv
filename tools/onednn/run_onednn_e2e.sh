@@ -8,6 +8,9 @@
 #   bash tools/onednn/run_onednn_e2e.sh [--root ONEDNN_ROOT] [--threads T]
 #            [--warmup N] [--repeats M] [--winograd] [shapes.csv]
 #   ONEDNN_ROOT 默认：$ONEDNN_ROOT 环境变量 → 常见路径探测。
+# CRLF 自愈：SFTP 从 Windows 传文件可能带 \r\n，set -e 下 cd 路径含 \r 会静默失败。
+sed -i 's/\r$//' "$0" 2>/dev/null
+if grep -q $'\r' "$0"; then exec bash "$0"; fi
 set -euo pipefail
 cd "$(dirname "$0")/../.."   # repo root
 
