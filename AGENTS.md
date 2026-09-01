@@ -288,10 +288,10 @@ numactl --interleave=all env OMP_PROC_BIND=spread OMP_PLACES=cores \
 1. **GEMM 内核**：3 种可选（arm_gemm JIT SVE > OpenBLAS > naive）。**生产后端 = arm_gemm**（已在 920F 验证：59/59 全胜 OpenBLAS，见 `docs/final_benchmark_bfd6b1e.md`；构建指南 `tools/build_arm_gemm.md`）。OpenBLAS/naive 保留作对照与开发
 2. **NCHW 包装 vs 原生**：NCHW 现在是「转换 + NHWC 计算」包装。计算是共享的，NCHW 输入的实际开销 = 转换（整图两遍全量数据搬运）vs 旧内核的跨步提取/写回。2026-08-20 在 920F（9T NCHW 端到端）实测**转换开销较小**，后续性能比较统一用 NCHW 端到端口径。若某些 shape 转换反而更慢，可回退用 `ref/winograd_conv_nchw_ref.cpp` 里的原生内核（`Layout::NCHW` 换成 `winograd_convolution_nchw_ref`）
 3. **OpenMP 并行**：权重变换 + 输入/输出变换 + GEMM 均已并行。Phase 1-3 合并 1 区域，2 barrier（输入→GEMM, GEMM→输出），输出 `nowait`。权重变换独立并行区域
-4. **多线程扩展性受限**：8 线程后加速停滞，剩余瓶颈：OpenMP barrier 开销、GEMM 内核质量（OpenBLAS vs arm_gemm JIT）、NUMA 远程访问（920F 16 NUMA）
+4. **多线程扩展性受限**：8 线程后加速停滞，剩余瓶颈：OpenMP barrier 开销、NUMA 远程访问（920F 16 NUMA）。GEMM 内核已换 arm_gemm JIT（不再用 OpenBLAS）。
 5. **SME 仅 F(4,4,3,3) 输出变换**：F(2,2,3,3) 输出变换回退到 SVE
 6. **`--timing` 模式是串行的**：用于分析各阶段时间占比，不代表并行后的实际性能
-7. **9 线程 NCHW 端到端落后 oneDNN**：2026-08-20 实测多数 case（7/9）落后 `wino:acl`（仅 row 4/9 赢）。瓶颈在 **per-tile 内核效率**（GEMM/变换/scatter-gather/权重变换重算），不在固定开销——详见「性能优化记录」→「9 线程 NCHW 端到端实测」，差距归因见 `docs/why_faster_than_acl_23.11.md` §10
+7. ~~**9 线程 NCHW 端到端落后 oneDNN**~~：已过时——arm_gemm 后端 + oneDNN 对照已闭环（`docs/onednn_comparison.md` §五），F(4,4) 全面碾压 wino:acl 1.15-9.5x。
 
 ### 性能对比（NHWC, SVE, 16 线程，完整 9 case）— ⚠️ 已过时
 
@@ -459,7 +459,11 @@ Case 3/4/5 已大幅超越 oneDNN（大 IC 时变换计算量大，OpenMP 并行
 - IC ≤ 192 且 tiles ≥ 100（GEMM K 维小 + barrier 开销占比大）
 - Case 2 最差（IC=48, tiles=1600）：GEMM K=48 极小 + 8 个 barrier
 
-### 9 线程 NCHW 端到端实测（2026-08-20）：多数 case 落后 oneDNN wino:acl
+### 9 线程 NCHW 端到端实测（2026-08-20）：多数 case 落后 oneDNN wino:acl — ⚠️ 已过时
+
+> ⚠️ **已过时**：本表是 OpenBLAS 后端 + 9 case + NCHW 端到端口径的历史数据。
+> arm_gemm 后端切换后 59/59 全胜 OpenBLAS；与 oneDNN 对照已闭环（`docs/onednn_comparison.md` §五）。
+> 本表保留作 9 线程档多线程扩展性 + NCHW 端到端转换开销的历史参照。
 
 **测量**：NCHW 端到端计时、numactl 绑核、6 线程档（4/8/9/16/32/38）。onednn 走 ACL SVE Winograd（`wino:acl`，8/9 row）或直接卷积（`brgconv:sve_512`，1/9 row）；我们走 `winograd_convolution`（NCHW 包装层 → NHWC core）。转换开销实测较小（用户确认），差距在核心 per-tile 效率，不在包装层。（benchdnn 与端到端测速为何不同、怎么公平对照 → `docs/why_faster_than_acl_23.11.md` §10.4）
 

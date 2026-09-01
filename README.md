@@ -4,12 +4,12 @@
 >
 > 支持 F(2,2,3,3) 和 F(4,4,3,3) 两种 Winograd 配置，包含权重/输入/输出三步变换、GEMM（OpenBLAS/arm_gemm/naive 三选一）、端到端卷积、NHWC 计算核心 + NCHW 转换包装、OpenMP 多线程、以及与直接卷积的正确性验证。
 > 
-> 在鲲鹏 920F（Armv9 + SVE-512 + SME, 16 NUMA × 38 核）上，**8/9 测试 case 的 16 线程性能超越 oneDNN**（快 1.68~3.54x，A1/A2/A3 落地后复测）。
+> 在鲲鹏 920F（Armv9 + SVE-512 + SME, 16 NUMA × 38 核）上，arm_gemm 后端 59/59 形状全胜 OpenBLAS（geomean 1.99x）。
 >
-> **最新（2026-08-29）**：GEMM 后端切换 **arm_gemm 53.1.0** 后（不再用 OpenBLAS），
-> 59/59 形状**全胜 OpenBLAS**（geomean 1.99x，合计 2.50x；大形状 ≈94% SVE-512 峰值）——
-> 全量逐形状表见 `docs/final_benchmark_bfd6b1e.md`。与 **oneDNN** 的对照（e2e + benchdnn）
-> 进行中，工具、OOM 根因、判读矩阵见 `docs/onednn_comparison.md`。
+> **最新（2026-09-01）**：与 **oneDNN** 对照已闭环——三列同作业同 16 线程：
+> **e2e_auto**（oneDNN 自选：40 wino:acl + 19 brgconv）大形状我们快 1.1-2.8x；
+> **e2e_wino**（同算法 PK）我们 F(4,4) 全面碾压 oneDNN wino:acl **1.15-9.5x**。
+> 工具、弯路复盘、优化建议见 `docs/onednn_comparison.md`。
 >
 > 逐 case 正确性经 **fp64 直接卷积参考**验证：fp32 舍入误差相对 ~2-6e-6（随 IC 增长的是绝对误差，相对误差恒定），符合 fp32 精度预期。
 
@@ -55,7 +55,7 @@ winograd_conv/
 │   │   ├── run_benchdnn.sh                ← benchdnn conv（--alg=WINO / auto）
 │   │   ├── onednn_e2e.cpp                 ← e2e 源码（CSV / --shape / --diag 三种模式）
 │   │   └── merge_onednn.sh                ← 三列合并（ours/e2e/benchdnn）
-│   └── diag_ab.sh                         ← ⚠️ 临时诊断脚本，闭环后删除
+│   └── diag_ab.sh                         ← ⚠️ 临时诊断脚本，已不再使用，可删
 └── docs/
     ├── algorithm.md                       ← 算法详解（数学、布局、缓冲、并行、ISA 内核、精度）
     ├── why_faster_than_acl_23.11.md       ← 为什么比 ACL 23.11 快（独立分析，含例子）
@@ -366,7 +366,7 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 | 数据布局 | NHWC 计算核心；NCHW 经转换包装（原生 NCHW 存档于 `ref/`） | NHWC + Winograd 专用布局 |
 | 多线程 | OpenMP（权重+输入+GEMM+输出 全并行，合并区域） | NEScheduler |
 | 正确性 | ✅ 22/22 验证通过（NCHW + NHWC）；bench `--verify` 用 fp64 参考 + 相对容差 | ✅ |
-| 性能 | **8/9 case 超越 oneDNN**（A1/A2/A3 后快 1.68~3.54x），仅 Case 2 慢 1.13x | 高度优化 |
+| 性能 | arm_gemm 后端 59/59 全胜 OpenBLAS（geomean 1.99x）；F(4,4) 全面碾压 oneDNN wino:acl 1.15-9.5x | 高度优化 |
 
 ### 性能分析
 
@@ -418,11 +418,10 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 ⑦ +权重并行(合并):    7.0ms (1.94x, Case 3-8 改善明显)
 ```
 
-**最终结果**（2026-08-10 A1/A2/A3 后复测, 16 线程, 9 case）：
-- **8/9 case 超越 oneDNN**（快 1.68x~3.54x）；仅 Case 2 慢 1.13x（从慢 2.56x 追到 11.5%）
-- t16 几何平均较旧版最优加速 ~1.67x；Case 0/1/2（拷贝/缓冲受限）加速 2.3~3.7x
-- Case 4/5（大 IC，GEMM 受限）仅 ~1.1x —— 下一目标：`-DUSE_ARM_GEMM` JIT 内核
-- 高线程扩展 6.2~26.6x（t1→t38），小 tile 数 case 16 线程后内存带宽受限平台化
+**最终结果**（2026-09-01 更新）：
+- arm_gemm 后端 59/59 全胜 OpenBLAS（geomean 1.99x，合计 2.50x）；大形状 ≈94% SVE-512 峰值
+- 与 oneDNN 对照已闭环：F(4,4) 全面碾压 oneDNN wino:acl 1.15-9.5x（同算法 PK，59 shape）
+- 详见 `docs/onednn_comparison.md` §五（最终对照结果）+ `docs/final_benchmark_bfd6b1e.md`（逐形状表）
 
 ### 数值精度说明（2026-08-11）
 
@@ -449,7 +448,7 @@ set_isa_level(ISALevel::SVE);  // 强制用 SVE
 
 - ✅ **arm_gemm 替换 OpenBLAS** 已完成（59/59 全胜，见 `docs/final_benchmark_bfd6b1e.md`）。
 - ✅ **M=25 选核实验** 已闭环（`tools/filter_sweep.sh`）：auto 保持最优，不改选核。
-- 🔄 **与 oneDNN 对照** 进行中（`docs/onednn_comparison.md`，等集群重跑出 e2e 数据）。
+- ✅ **与 oneDNN 对照** 已闭环（`docs/onednn_comparison.md` §五）：三列全出数据，F(4,4) 全面碾压 wino:acl 1.15-9.5x。
 - 剩余方向（针对大形状 / 深层瘦条之外的优化空间，按需取舍）：
   1. **Tile 分块处理**：8 tile/组，数据放 L2（768KB）（注意：分块会放大 V 的重复读取，只在 V 小时有效，详见 AGENTS.md）
   2. **变换函数专用化**：F(4,4) B^T 有 50% 零元素可跳过
