@@ -97,18 +97,19 @@ dilates 旧 bug，修复生效**，e2e 应出全量 59 行数据。
 | 数据 | 状态 | 位置 |
 |---|---|---|
 | A1 ours 59 形状 | ✅ | `build/ours_cmp.csv` |
-| A2 e2e auto (brgconv) 59 行 | ✅ ACL 库路径修复 + CSV 清空 | `build/onednn_e2e.csv` |
-| **A2b e2e wino (wino:acl) 59 行** | ✅ **新增**：`--winograd` 强制 wino:acl，同算法 PK | `build/onednn_e2e_wino.csv` |
+| A2 e2e auto 59 行 | ✅ `convolution_auto` ladder 修复：40 wino:acl + 19 brgconv | `build/onednn_e2e.csv` |
+| **A2b e2e wino 59 行** | ✅ `--winograd` 强制 wino:acl，同算法 PK | `build/onednn_e2e_wino.csv` |
 | A3 benchdnn WINO | ✅ `ONEDNN_VERBOSE=1` + `--mode=p` + `-v4` + exec 行解析 | `build/benchdnn_wino.txt` |
 | A4 benchdnn auto | ✅ 同上 | `build/benchdnn_auto.txt` |
 | A5 filter_sweep | ✅ 已闭环 | `build/filter_sweep_{auto,6x4VL,8x1VL,inter}.csv` |
-| A6 合并表 (brgconv 对照) | ✅ `src=59 na=0` | `build/merged.csv` |
-| **A6b 合并表 (wino:acl 对照)** | ✅ **新增**：ours / e2e_wino / benchdnn_wino | `build/merged_wino.csv` |
+| A6 合并表 (auto 对照) | ✅ `src=59 na=0` | `build/merged.csv` |
+| **A6b 合并表 (wino:acl 对照)** | ✅ ours / e2e_wino / benchdnn_wino | `build/merged_wino.csv` |
 
 > ⚠️ **e2e `--auto` 用 `convolution_auto`**（ladder 已修：auto 排第一）——oneDNN 试
-> direct + Winograd 选最优。16 线程下部分 shape 选 wino:acl、部分选 brgconv:sve_512
+> direct + Winograd 选最优。16 线程下 **40 shape 选 wino:acl、19 shape 选 brgconv:sve_512**
 > （与用户之前独立测试一致）。要强制 wino:acl 用 `--winograd` flag（A2b）。
 > impl 直方图来自 A2（auto）的 err 文件；A2b 的 err 已单独保存为 `onednn_e2e_auto.err`。
+> e2e warmup=3, repeats=20, best-of-20。
 
 ### 最终对照结果
 
@@ -116,19 +117,20 @@ dilates 旧 bug，修复生效**，e2e 应出全量 59 行数据。
 
 | 对照列 | oneDNN 算法 | 问题 | 我们快的情况 | oneDNN 快的情况 |
 |--------|-------------|------|-------------|-----------------|
-| **e2e**（主对照） | brgconv:sve_512 | 我们比 oneDNN 最优自动选择快还是慢？ | 大形状 1.1-2.8x | 小形状 0.09-0.91x |
-| **benchdnn_wino** | wino:acl | 同样做 Winograd，我们比 ACL 快还是慢？ | **全部 1.2-9x** | 无 |
-| **benchdnn_auto** | brgconv:sve_512 | benchdnn driver 口径的 brgconv 对照 | 大形状 1.1-3.1x | 小形状 0.10-0.85x |
+| **e2e_auto**（主对照） | auto（40 wino:acl + 19 brgconv） | 我们比 oneDNN 最优自动选择快还是慢？ | 大形状 1.1-2.8x | 小形状 0.09-0.91x |
+| **e2e_wino / benchdnn_wino** | wino:acl | 同样做 Winograd，我们比 ACL 快还是慢？ | **全部 1.15-9.5x** | 无 |
+| **benchdnn_auto** | brgconv:sve_512 | benchdnn driver 口径的 brgconv 对照 | 大形状 1.1-2.9x | 小形状 0.10-0.85x |
 
 **关键结论**：
-1. **e2e 列**（同口径主对照）：分水岭在 IC×spatial ≳ 256×56²。大形状我们的 F(4,4) Winograd
-   摊薄变换开销后反超 brgconv；小形状 brgconv 无变换开销直接更快。
-2. **benchdnn_wino 列**（同算法 PK）：我们的 F(4,4) 全面碾压 oneDNN 的 wino:acl（疑似
-   F(2,2)），1.2-9x。原因：F(4,4) 比 F(2,2) 少 ~44% GEMM 调用 + 单次 GEMM 矩阵更大
-   cache 友好 + arm_gemm JIT SVE 内核优于 oneDNN 的 gemm_api。
-3. **benchdnn_auto ≈ e2e + ~10%**：两列都是 brgconv:sve_512，差异来自不同 oneDNN build
-   + 不同 measurement driver（benchdnn `--mode=p` best-of-N vs e2e best-of-20）。
-4. benchdnn 自检确认 `nthr=16`（`DNNL_NUM_THREADS` + `OMP_THREAD_LIMIT` 生效，不再 608 超订）。
+1. **e2e_auto 列**（oneDNN 自选最优）：分水岭在 IC×spatial ≳ 256×56²。大形状我们
+   F(4,4) Winograd 比最优对手（brgconv 或 wino:acl）都快；小形状 brgconv 无变换开销
+   直接更快。
+2. **A6b 同算法 PK**：我们的 F(4,4) 全面碾压 oneDNN 的 wino:acl（疑似 F(2,2)），
+   1.15-9.5x。e2e_wino 与 benchdnn_wino 两列互相验证（同算法不同 driver，数值吻合），
+   数据可信。
+3. **oneDNN auto 正确选了 brgconv 给 19 个小 shape**——这验证了优化建议 §7.1
+   （小形状走 direct conv）的方向。
+4. benchdnn 自检确认 `nthr=16`（`DNNL_NUM_THREADS` + `OMP_THREAD_LIMIT` 生效）。
 
 ### filter_sweep（M=25 选核）—— 已闭环 ✅
 

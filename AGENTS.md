@@ -19,14 +19,15 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
   合计 321.9 vs 804.9ms = **2.50x**；大形状 4,384,160²,384 3.02x ≈94% SVE-512 峰值。
   全量逐形状表：`docs/final_benchmark_bfd6b1e.md`。
 - **与 oneDNN 对照（✅ 已闭环）**：工具 `tools/onednn/`（ab_onednn.sh = 单作业
-  A/B：ours / e2e / benchdnn WINO+auto / filter_sweep / 合并表）。三列同作业同 16 线程：
-  **e2e**（brgconv:sve_512，主对照）大形状我们快 1.1-2.8x、小形状 oneDNN 快 0.09-0.91x；
-  **benchdnn_wino**（wino:acl，同算法 PK）我们 F(4,4) 全面碾压 1.2-9x；
-  **benchdnn_auto**（brgconv:sve_512）≈ e2e + ~10%。benchdnn 用 `ONEDNN_VERBOSE=1`
-  + `--mode=p -v4` 拿卷积纯执行时间（exec 行解析，perf→exec→PASSED 三级兜底），
-  `DNNL_NUM_THREADS=16` + `OMP_THREAD_LIMIT=16` 限制线程数（nthr=16 已确认）。
-  e2e 需 ACL 库在 `LD_LIBRARY_PATH`（脚本自动探测）+ `ONEDNN_VERBOSE=0` 防 CSV 污染。
-  弯路复盘见 **`docs/debugging_lessons.md` §四**；最终方案见 `docs/onednn_comparison.md` §六。
+  A/B：ours / e2e auto / e2e wino / benchdnn WINO+auto / filter_sweep / 合并表）。
+  三列同作业同 16 线程：**e2e_auto**（`convolution_auto`，40 wino:acl + 19 brgconv）
+  大形状我们快 1.1-2.8x、小形状 oneDNN 快 0.09-0.91x；**e2e_wino**（强制 wino:acl，
+  同算法 PK）我们 F(4,4) 全面碾压 1.15-9.5x；**benchdnn**（`ONEDNN_VERBOSE=1` +
+  `--mode=p -v4` 拿卷积纯执行时间，perf→exec→PASSED 三级兜底，`DNNL_NUM_THREADS=16`
+  限线程 nthr=16 已确认）。e2e 需 ACL 库在 `LD_LIBRARY_PATH`（脚本自动探测）+
+  `ONEDNN_VERBOSE=0` 防 CSV 污染。e2e ladder 已修：`convolution_auto` 排第一（旧版
+  `direct` 排第一导致全选 brgconv）。弯路复盘见 **`docs/debugging_lessons.md` §四**；
+  最终方案见 `docs/onednn_comparison.md` §五-§七。
 - **M=25 选核**：已闭环（`tools/filter_sweep.sh`），**auto 保持最优**，不改选核。
 - **运行协议**：所有性能对比必须**单 sbatch 作业内 A/B**
   （`sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"`）——node03
