@@ -97,11 +97,18 @@ dilates 旧 bug，修复生效**，e2e 应出全量 59 行数据。
 | 数据 | 状态 | 位置 |
 |---|---|---|
 | A1 ours 59 形状 | ✅ | `build/ours_cmp.csv` |
-| A2 e2e 59 行 | ✅ ACL 库路径修复 + CSV 清空 | `build/onednn_e2e.csv` |
+| A2 e2e auto (brgconv) 59 行 | ✅ ACL 库路径修复 + CSV 清空 | `build/onednn_e2e.csv` |
+| **A2b e2e wino (wino:acl) 59 行** | ✅ **新增**：`--winograd` 强制 wino:acl，同算法 PK | `build/onednn_e2e_wino.csv` |
 | A3 benchdnn WINO | ✅ `ONEDNN_VERBOSE=1` + `--mode=p` + `-v4` + exec 行解析 | `build/benchdnn_wino.txt` |
 | A4 benchdnn auto | ✅ 同上 | `build/benchdnn_auto.txt` |
 | A5 filter_sweep | ✅ 已闭环 | `build/filter_sweep_{auto,6x4VL,8x1VL,inter}.csv` |
-| A6 合并表 | ✅ `src=59 na=0` 三列全有数据 | `build/merged.csv` |
+| A6 合并表 (brgconv 对照) | ✅ `src=59 na=0` | `build/merged.csv` |
+| **A6b 合并表 (wino:acl 对照)** | ✅ **新增**：ours / e2e_wino / benchdnn_wino | `build/merged_wino.csv` |
+
+> ⚠️ **e2e `--auto` 实际是 `alg=direct`（不是 `automatic`）**——只试 direct（brgconv），
+> 不试 Winograd。全部 59 shape 的 impl 都是 `brgconv:sve_512`（`via alg=direct pk=fwdinf`）。
+> 要拿 wino:acl 的计时，必须用 `--winograd` flag（A2b）。oneDNN 的 auto 正确选了
+> brgconv（对小形状更快），但这不代表 oneDNN 不支持 Winograd——只是 auto 没选它。
 
 ### 最终对照结果
 

@@ -75,8 +75,15 @@ echo "================ A1: ours full 59 shapes (pinned baseline) ===============
 env $BIND bash tools/compare.sh shapes/conv_all.csv | tee build/ours_cmp.csv
 
 echo
-echo "================ A2: oneDNN e2e (same shapes, pinned, primitive reused) ================"
+echo "================ A2: oneDNN e2e --auto (brgconv, same shapes, pinned) ================"
 env $BIND bash tools/onednn/run_onednn_e2e.sh
+cp build/onednn_e2e.csv build/onednn_e2e_auto.csv   # 保存 auto(brgconv) 版
+
+echo
+echo "================ A2b: oneDNN e2e --winograd (wino:acl, same-algorithm PK) ================"
+env $BIND bash tools/onednn/run_onednn_e2e.sh --winograd
+mv build/onednn_e2e.csv build/onednn_e2e_wino.csv    # 保存 wino:acl 版
+cp build/onednn_e2e_auto.csv build/onednn_e2e.csv    # 恢复 auto 为主 e2e
 
 # ---- 库级链接核查：e2e 与 benchdnn 各链接哪个 libdnnl（若不同，OOM 时先查这个）----
 echo "[onednn] e2e libdnnl linkage (build/onednn_e2e):"
@@ -134,15 +141,28 @@ else
 fi
 
 echo
+if [ -f build/onednn_e2e_wino.csv ]; then
+    echo "================ A6b: merge (ours / e2e_wino / benchdnn_wino) — 同算法 PK ================"
+    echo "[A6b] e2e_wino = oneDNN wino:acl (forced --winograd), benchdnn_wino = wino:acl (benchdnn driver)"
+    if bash tools/onednn/merge_onednn.sh build/ours_cmp.csv build/onednn_e2e_wino.csv \
+            build/benchdnn_wino.txt "" shapes/conv_all.csv > build/merged_wino.csv 2>&1; then
+        cat build/merged_wino.csv
+    else
+        echo "!! merge_wino error, see build/merged_wino.csv"
+    fi
+fi
+
+echo
 echo "================ 结果归档（判读/交接只需这一份 build/SUMMARY.txt） ================"
 {
     echo "ab_onednn SUMMARY  node=$(hostname) date=$(date) threads=$T"
     echo
-    echo "== 数据行数（应均为 59；e2e 曾全 oom 现在应满） =="
-    echo "ours_cmp.csv      : $(awk '!/^#/ && !/^mb,/ && NF {c++} END {print c+0}' build/ours_cmp.csv) rows"
-    echo "onednn_e2e.csv    : $(awk '!/^#/ && !/^mb,/ && NF {c++} END {print c+0}' build/onednn_e2e.csv) rows"
-    echo "benchdnn_wino.txt : $(grep -c 'r[0-9]*"' build/benchdnn_wino.txt 2>/dev/null || echo 0) rows"
-    echo "benchdnn_auto.txt : $(grep -c 'r[0-9]*"' build/benchdnn_auto.txt 2>/dev/null || echo 0) rows"
+    echo "== 数据行数（应均为 59） =="
+    echo "ours_cmp.csv         : $(awk '!/^#/ && !/^mb,/ && NF {c++} END {print c+0}' build/ours_cmp.csv) rows"
+    echo "onednn_e2e.csv      : $(awk '!/^#/ && !/^mb,/ && NF {c++} END {print c+0}' build/onednn_e2e.csv) rows (brgconv, --auto)"
+    echo "onednn_e2e_wino.csv : $(awk '!/^#/ && !/^mb,/ && NF {c++} END {print c+0}' build/onednn_e2e_wino.csv 2>/dev/null || echo 0) rows (wino:acl, --winograd)"
+    echo "benchdnn_wino.txt   : $(grep -c 'r[0-9]*"' build/benchdnn_wino.txt 2>/dev/null || echo 0) rows"
+    echo "benchdnn_auto.txt   : $(grep -c 'r[0-9]*"' build/benchdnn_auto.txt 2>/dev/null || echo 0) rows"
     echo
     echo "== e2e impl 直方图（build/onednn_e2e.err；OOM 定位关键） =="
     grep -o 'impl=[^ ]*' build/onednn_e2e.err 2>/dev/null | sort | uniq -c || true
@@ -157,8 +177,11 @@ echo "================ 结果归档（判读/交接只需这一份 build/SUMMARY
     echo "== 诊断矩阵（build/diag.txt）=="
     cat build/diag.txt 2>/dev/null || echo "(no diag.txt)"
     echo
-    echo "== 合并表（build/merged.csv）=="
+    echo "== 合并表 A6（ours / e2e_auto(brgconv) / benchdnn_wino / benchdnn_auto）=="
     cat build/merged.csv 2>/dev/null || echo "(no merged.csv)"
+    echo
+    echo "== 合并表 A6b（ours / e2e_wino(wino:acl) / benchdnn_wino）— 同算法 PK =="
+    cat build/merged_wino.csv 2>/dev/null || echo "(no merged_wino.csv)"
 } > build/SUMMARY.txt
 echo "[archive] 判读只需一份：build/SUMMARY.txt"
 echo "         或三份：build/merged.csv + build/diag.txt + build/onednn_e2e.csv"
