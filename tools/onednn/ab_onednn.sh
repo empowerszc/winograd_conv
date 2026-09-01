@@ -75,15 +75,17 @@ echo "================ A1: ours full 59 shapes (pinned baseline) ===============
 env $BIND bash tools/compare.sh shapes/conv_all.csv | tee build/ours_cmp.csv
 
 echo
-echo "================ A2: oneDNN e2e --auto (brgconv, same shapes, pinned) ================"
+echo "================ A2: oneDNN e2e --auto (oneDNN 自选最优, pinned) ================"
 env $BIND bash tools/onednn/run_onednn_e2e.sh
-cp build/onednn_e2e.csv build/onednn_e2e_auto.csv   # 保存 auto(brgconv) 版
+cp build/onednn_e2e.csv build/onednn_e2e_auto.csv   # 保存 auto 版
+cp build/onednn_e2e.err build/onednn_e2e_auto.err    # 保存 auto 的 impl 直方图
 
 echo
 echo "================ A2b: oneDNN e2e --winograd (wino:acl, same-algorithm PK) ================"
 env $BIND bash tools/onednn/run_onednn_e2e.sh --winograd
 mv build/onednn_e2e.csv build/onednn_e2e_wino.csv    # 保存 wino:acl 版
 cp build/onednn_e2e_auto.csv build/onednn_e2e.csv    # 恢复 auto 为主 e2e
+cp build/onednn_e2e_auto.err build/onednn_e2e.err    # 恢复 auto 的 err（impl 直方图）
 
 # ---- 库级链接核查：e2e 与 benchdnn 各链接哪个 libdnnl（若不同，OOM 时先查这个）----
 echo "[onednn] e2e libdnnl linkage (build/onednn_e2e):"

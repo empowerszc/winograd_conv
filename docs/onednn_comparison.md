@@ -105,10 +105,10 @@ dilates 旧 bug，修复生效**，e2e 应出全量 59 行数据。
 | A6 合并表 (brgconv 对照) | ✅ `src=59 na=0` | `build/merged.csv` |
 | **A6b 合并表 (wino:acl 对照)** | ✅ **新增**：ours / e2e_wino / benchdnn_wino | `build/merged_wino.csv` |
 
-> ⚠️ **e2e `--auto` 实际是 `alg=direct`（不是 `automatic`）**——只试 direct（brgconv），
-> 不试 Winograd。全部 59 shape 的 impl 都是 `brgconv:sve_512`（`via alg=direct pk=fwdinf`）。
-> 要拿 wino:acl 的计时，必须用 `--winograd` flag（A2b）。oneDNN 的 auto 正确选了
-> brgconv（对小形状更快），但这不代表 oneDNN 不支持 Winograd——只是 auto 没选它。
+> ⚠️ **e2e `--auto` 用 `convolution_auto`**（ladder 已修：auto 排第一）——oneDNN 试
+> direct + Winograd 选最优。16 线程下部分 shape 选 wino:acl、部分选 brgconv:sve_512
+> （与用户之前独立测试一致）。要强制 wino:acl 用 `--winograd` flag（A2b）。
+> impl 直方图来自 A2（auto）的 err 文件；A2b 的 err 已单独保存为 `onednn_e2e_auto.err`。
 
 ### 最终对照结果
 
