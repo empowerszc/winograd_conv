@@ -293,7 +293,10 @@ numactl --interleave=all env OMP_PROC_BIND=spread OMP_PLACES=cores \
 6. **`--timing` 模式是串行的**：用于分析各阶段时间占比，不代表并行后的实际性能
 7. **9 线程 NCHW 端到端落后 oneDNN**：2026-08-20 实测多数 case（7/9）落后 `wino:acl`（仅 row 4/9 赢）。瓶颈在 **per-tile 内核效率**（GEMM/变换/scatter-gather/权重变换重算），不在固定开销——详见「性能优化记录」→「9 线程 NCHW 端到端实测」，差距归因见 `docs/why_faster_than_acl_23.11.md` §10
 
-### 性能对比（NHWC, SVE, 16 线程，完整 9 case）
+### 性能对比（NHWC, SVE, 16 线程，完整 9 case）— ⚠️ 已过时
+
+> ⚠️ **已过时**：本表是 OpenBLAS 后端 + benchdnn wino_acl 口径的历史数据（9 case 微基准）。
+> 最新对照用 arm_gemm 后端 + 59 形状，见 `docs/onednn_comparison.md` §五（已闭环）。
 
 | Case | Shape | 本项目 t16(ms) | oneDNN t16(ms) | 结果 |
 |------|-------|--------------|---------------|------|
@@ -391,7 +394,12 @@ Case 3/4/5 已大幅超越 oneDNN（大 IC 时变换计算量大，OpenMP 并行
 - **正确做法**：`--verify` 参考改用 **fp64 直接卷积**（`direct_convolution_3x3_f64`，OpenMP 按 batch 并行），判据改**相对容差** `err < 1e-4 × max|ref| + 1e-5`。fp64 参考测的是 Winograd 相对精确数学的真实误差。
 - **若要进一步降误差**：GEMM fp64/Kahan 累加（打在性能关键路径）> 变换 fp64（破坏 SIMD，代价大）> 换 F(2,2)（矩阵全 ±1 无放大，但改变被测算法）。换 arm_gemm 后 blocked 累加也会比 naive 串行更准。
 
-### 最终性能对比（完整 9 case, NHWC, SVE, 16 线程）— A1/A2/A3 后复测
+### 最终性能对比（完整 9 case, NHWC, SVE, 16 线程）— A1/A2/A3 后复测 — ⚠️ 已过时
+
+> ⚠️ **已过时**：本表是 OpenBLAS 后端 + benchdnn WINO 口径的历史数据（9 case 微基准，
+> oneDNN 侧被测量方式拖慢 1.7-3.6x）。最新对照用 arm_gemm 后端 + 59 形状，见
+> `docs/onednn_comparison.md` §五（已闭环）：e2e_auto（40 wino:acl + 19 brgconv，
+> oneDNN 自选最优）、e2e_wino（同算法 PK，F(4,4) 全面碾压 wino:acl 1.15-9.5x）。
 
 | Case | Shape (N,IC,IH,IW) | (OC,IC) | Tiles | 旧 t16(ms) | 新 t16(ms) | 加速 | oneDNN t16(ms) | 结果 |
 |------|---------------------|---------|-------|-----------|-----------|------|---------------|------|

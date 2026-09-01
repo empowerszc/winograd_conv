@@ -6,7 +6,9 @@
 > 指导后续进一步优化（特别是 SVE/SME 汇编变换、arm_gemm GEMM 内核等）。
 >
 > A1/A2/A3 落地后（2026-08-10 复测），`winograd_conv` 在 t16 微基准上已 **8/9 case 快于 oneDNN**（快 1.68~3.54x，仅 Case 2 慢 1.13x）。
-> 但注意：该优势主要来自微基准下更低的固定开销（详见 `../PERFORMANCE_ANALYSIS.md` 第 10 节），ACL 的手写汇编变换 + arm_gemm JIT 内核在**大负载**下仍更强，仍是本项目的参考优化目标。
+> ⚠️ **已过时（2026-09-01 更新）**：最新用 arm_gemm 后端 + 59 形状对照（见 `../docs/onednn_comparison.md` §五，已闭环）：
+> **我们的 F(4,4) 全面碾压 oneDNN 的 wino:acl 1.15-9.5x**（同算法 PK，e2e_wino + benchdnn_wino 两列互相验证）。
+> 但 ACL 的手写汇编变换 + arm_gemm JIT 内核仍是参考优化目标（尤其小形状 direct conv 路径）。
 >
 > 详见 `../PERFORMANCE_ANALYSIS.md` 的差距分析和下一步优化建议。
 

@@ -290,6 +290,10 @@ F(4,4) fp32 误差的主源是 **GEMM 按 IC 串行累加**（naive 内核），
 
 ## 12. 性能特征总结
 
+> ⚠️ **已过时**：「8/9 case」是 OpenBLAS 后端 + 9 case 微基准的历史数据。
+> 最新用 arm_gemm 后端 + 59 形状，见 `docs/onednn_comparison.md` §五（已闭环）：
+> F(4,4) 全面碾压 oneDNN wino:acl 1.15-9.5x（同算法 PK）。
+
 当前实现「8/9 case 快于 oneDNN」的关键设计点：
 
 1. **单 OpenMP 区域 + 每调用零分配**（A2）：微基准对固定开销极敏感。

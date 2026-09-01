@@ -279,6 +279,6 @@ merge 用 last-wins 所以数值正确，但应查代码确认是否每 shape �
      不能当 arm_gemm 后端的结论；arm_gemm 后端 vs OpenBLAS 才是 59/59 终局。
   4. **oneDNN WINO 依赖 ACL**：benchdnn 链接 `/data1/.../ComputeLibrary-53.1.0`（带 ACL），
      e2e 链接 `/workspace/.../ComputeLibrary-53.1.0`（也带 ACL）。两个 build 不同但都有 ACL，
-     wino:acl 列可用。e2e 用 `--auto` 在 16 线程下全选 brgconv:sve_512（不走 wino）。
+     wino:acl 列可用。e2e 用 `--auto` 在 16 线程下选 40 wino:acl + 19 brgconv（ladder 已修）。
   5. **git 边界**：不要 stage 用户未提交的 `README.md` 与 `swish_sve/`；
      `tools/diag_verbose.sh` 是临时诊断脚本，闭环后已删除。
