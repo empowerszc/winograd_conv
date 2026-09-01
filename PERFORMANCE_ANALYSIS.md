@@ -488,9 +488,11 @@ F(4,4) 的 B^T 有 50% 零元素，专用展开可跳过零系数行/列，减�
 | 变换 | 编译器生成 + intrinsics | 手写 SVE 汇编（完全展开、无分支、指令调度） | 中 |
 | 权重变换 | 已并行化（#10，3.18ms→0.2ms）但**每次调用重算**、走中间缓冲 | 直接展开写 V + **TransformedWeights 缓存在 primitive** | 中（亏在缓存） |
 
-### 11.1 Tier 0——现成，最快
+### 11.1 Tier 0——现成，最快 — ✅ 已完成（2026-08-28）
 
 **1. 启用 arm_gemm JIT GEMM（`-DUSE_ARM_GEMM`，代码已实现见 #11，8/9 基准用的是 OpenBLAS）**
+> ✅ **已完成**：59/59 全胜 OpenBLAS（geomean 1.99x），见 `docs/final_benchmark_bfd6b1e.md`。
+> 且 oneDNN 对照已闭环（见 `docs/onednn_comparison.md` §五）：F(4,4) 全面碾压 wino:acl 1.15-9.5x。
 - 直接借对手的内核补最弱一层；blocked 累加比 naive 串行更准（顺带提升数值）；
 - **如果换 arm_gemm 后仍 8/9 赢，就反向验证「我们赢在工程层」的结论是真实的**；
 - 预期 Case 0/1/2（小 K，OpenBLAS 短板）提升最大（§6.3/AGENTS 原预期各 -1~2ms）；

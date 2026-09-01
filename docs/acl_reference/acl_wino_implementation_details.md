@@ -697,6 +697,11 @@ oneDNN `init_conf_wino` 有 **两类拦截**，理解它们是分析每个 case 
 > **本机关键结论**：608 核使 `threads>28` 恒真。因此在默认 `convolution_auto` 模式下，**全部 11 个 case 都会被 auto 回退**，落到 `brgemm_conv<sve_512>`。只有以下两种情形 acl:wino 才会真正生效：
 > - 用户显式设 `alg_kind = convolution_winograd`（绕过 auto 回退，但仍受形状硬约束）；
 > - 或把线程数压到 ≤28（如 `OMP_NUM_THREADS=28`，但单 NUMA 有 38 核，仍 >28，故需进一步限制）。
+>
+> ⚠️ **2026-09-01 实测修正**：上述结论基于默认 608 线程。实际 benchmark 用 `DNNL_NUM_THREADS=16` +
+> `OMP_THREAD_LIMIT=16`（nthr=16 ≤ 28），**auto 模式不回退**，59 shape 中 40 个选 `wino:acl`、
+> 19 个选 `brgconv:sve_512`（见 `docs/onednn_comparison.md` §五）。且我们的 F(4,4) 全面碾压
+> wino:acl 1.15-9.5x（同算法 PK）。
 
 ### 12.1 SME 可用时的变换三元组（3×3 卷积）
 
@@ -769,13 +774,14 @@ F(4,4,3,3)：n_multis=36，输出 tile 4×4，stride=1 且 pad=1 时 OH=IH、OW=
 
 | 场景 | 拦截层 | 原因 | 落到 |
 |------|--------|------|------|
-| 本机 auto 模式全部 case | auto 回退 | `threads=608>28` | `brgemm_conv<sve_512>` |
+| 本机 auto 模式（默认 608 线程） | auto 回退 | `threads=608>28` | `brgemm_conv<sve_512>` |
+| 本机 auto 模式（nthr=16，实测） | auto 不回退 | `threads=16≤28` | **40 wino:acl + 19 brgconv**（见 `docs/onednn_comparison.md` §五） |
 | stride=2 的 case（2,4,5,7,9） | 形状硬约束 | `stride≠1` | `brgemm_conv<sve_512>`（任何模式都不可用 wino） |
 | auto + 大图（case 6 即便线程≤28） | auto 回退 | `ih=iw=160>112` | `brgemm_conv<sve_512>` |
 | 带 groups | init_conf | 拒绝 groups | `brgemm_conv` 或 depthwise |
 | threadpool 运行时 | init() 守卫 | `threading_runtime==threadpool` | `brgemm_conv` |
 
-> **关键洞察**：在这台 608 核 + SME 机器上，**auto 模式下 acl:wino 形同虚设**（线程数远超阈值），所有 case 实际命中 `brgemm_conv<sve_512>`（其 GEMM 也会用 SME 内核）。acl:wino 的价值在于：当用户对 stride=1 的 3×3 层（case 1,3,8,10,11）显式指定 `winograd` 算法时，借助 SME 的 F(4,4,3,3) 获得乘法量下降的红利。是否真比 BRGEMM 快，需 benchmark——因为本机 BRGEMM 同样用 SME GEMM 且无 mutex 串行、支持更高并发。
+> **关键洞察**：在这台 608 核 + SME 机器上，**默认 auto 模式下 acl:wino 形同虚设**（线程数远超阈值），所有 case 实际命中 `brgemm_conv<sve_512>`。但**用 `DNNL_NUM_THREADS=16` 限制线程数后（nthr=16 ≤ 28），auto 不回退**——实测 59 shape 中 40 个选 wino:acl（见 `docs/onednn_comparison.md` §五）。且我们的 F(4,4) Winograd 全面碾压 oneDNN 的 wino:acl 1.15-9.5x。acl:wino 的价值在于：当用户对 stride=1 的 3×3 层显式指定 `winograd` 算法时，借助 SME 的 F(4,4,3,3) 获得乘法量下降的红利。
 
 ---
 
