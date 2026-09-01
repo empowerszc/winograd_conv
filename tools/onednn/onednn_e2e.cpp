@@ -269,8 +269,10 @@ bool run_one(const Shape& s, const char* layout, int warmup, int repeats,
                    { dnnl::algorithm::convolution_direct,   "direct" },
                    { dnnl::algorithm::convolution_auto,     "auto" } };
     else
-        ladder = { { dnnl::algorithm::convolution_direct,   "direct" },
-                   { dnnl::algorithm::convolution_auto,     "auto" },
+        // --auto: convolution_auto 排第一——让 oneDNN 试所有算法（含 Winograd）选最优。
+        // 旧版 direct 排第一会把 brgconv 短路（direct 总成功），导致永远不出 wino:acl。
+        ladder = { { dnnl::algorithm::convolution_auto,     "auto" },
+                   { dnnl::algorithm::convolution_direct,   "direct" },
                    { dnnl::algorithm::convolution_winograd, "winograd" } };
 
     dnnl::convolution_forward::primitive_desc pd;
