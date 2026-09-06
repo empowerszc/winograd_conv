@@ -1,10 +1,13 @@
-# 终局基准：arm_gemm 后端 vs OpenBLAS（59 形状，同作业 A/B）
+# 终局基准：arm_gemm 后端 vs OpenBLAS（鲲鹏版）（59 形状，同作业 A/B）
 
 > **测量**：2026-08-28，node03，`sbatch -w node03 --exclusive`，单作业内 arm/OB/旧码三侧对照
 > （diag_ab.sh v2.2，commit bfd6b1e + f3367e7）。
 > 16 线程，`OMP_PROC_BIND=close OMP_PLACES=cores`，频探首尾 10×1999 / 598×2000 MHz 稳定无漂移。
 > 读法：**加速比 = OB / 我们，>1 表示我们快**；同作业内比较才有效（跨作业存在 3~7x 性能态，见 perf_engine_sweep.md 作废说明）。
 > 我们侧 = `WINO_GEMM_VERIFY` 通过的正确性门之后、`build/`（arm_gemm 53.1.0, SVE-512）二进制。
+> OB = OpenBLAS（鲲鹏版，`apt install libopenblas-dev` 安装的鲲鹏优化版本）。
+>
+> **结论**：arm_gemm 53.1.0 JIT SVE 全面优于 OpenBLAS（鲲鹏版），59/59 全胜，geomean 1.99x。
 
 ## 结论前置
 
