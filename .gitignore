@@ -9,3 +9,7 @@ CMakeFiles/
 cmake_install.cmake
 *.cmake
 !CMakeLists.txt
+
+# build variants & third-party trees (never commit)
+build_*/
+ComputeLibrary*

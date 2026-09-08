@@ -10,7 +10,9 @@ option(ENABLE_SME "Enable SME+SVE (-march=armv9-a+sme)" OFF)
 option(ENABLE_OPENMP "Enable OpenMP threading" OFF)
 option(USE_OPENBLAS "Use OpenBLAS for GEMM (cblas_sgemm)" OFF)
 option(USE_ARM_GEMM "Use arm_gemm for GEMM (requires arm_gemm library)" OFF)
+option(USE_KML "Use Huawei KML kblas for GEMM (cblas_sgemm-compatible, no ACL needed)" OFF)
 set(OPENBLAS_ROOT "" CACHE PATH "Path to OpenBLAS installation")
+set(KML_ROOT "" CACHE PATH "Path to KML installation (…/HPCKit/…/kml/bisheng)")
 set(ARM_GEMM_ROOT "" CACHE PATH "Path to arm_gemm library (e.g. ComputeLibrary/src/core/NEON/kernels/convolution/common/gemm")
 
 # Base optimization
@@ -31,10 +33,20 @@ endif()
 if(ENABLE_OPENMP)
     find_package(OpenMP REQUIRED)
     message(STATUS "OpenMP found: ${OpenMP_CXX_FLAGS} | ${OpenMP_CXX_LIBRARIES}")
+    # BiSheng/clang's libomp.so lives in the compiler's arch-specific lib dir,
+    # not on the default loader path. Bake it into the rpath so the test/bench
+    # executables run right after `make` without a manual LD_LIBRARY_PATH.
+    foreach(_omp_lib ${OpenMP_CXX_LIBRARIES})
+        if(_omp_lib MATCHES "\\.so$")
+            get_filename_component(_omp_dir ${_omp_lib} DIRECTORY)
+            set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath,${_omp_dir}")
+            message(STATUS "OpenMP rpath: ${_omp_dir}")
+        endif()
+    endforeach()
 endif()
 
 # OpenBLAS support
-if(USE_OPENBLAS AND NOT USE_ARM_GEMM)
+if(USE_OPENBLAS AND NOT USE_ARM_GEMM AND NOT USE_KML)
     find_path(OPENBLAS_INCLUDE_DIR cblas.h
               PATHS ${OPENBLAS_ROOT}/include /usr/include /usr/local/include
                     /usr/include/aarch64-linux-gnu)
@@ -49,6 +61,34 @@ if(USE_OPENBLAS AND NOT USE_ARM_GEMM)
     else()
         message(FATAL_ERROR "OpenBLAS not found. Install openblas-dev or set -DOPENBLAS_ROOT=/path")
     endif()
+endif()
+
+# KML kblas support (Huawei KML ships a cblas-compatible sgemm: same
+# cblas_sgemm signature and CblasRowMajor/CblasNoTrans enums as OpenBLAS, so we
+# reuse the USE_OPENBLAS code path in winograd_conv.cpp through a
+# cblas.h->kblas.h include shim (tools/kml_shim). Links the *locking*
+# (single-threaded, lock-guarded) build because the outer OpenMP loop supplies the
+# parallelism; GEMM must stay 1-thread to avoid oversubscription.
+if(USE_KML)
+    find_path(KML_INCLUDE_DIR kblas.h
+              PATHS ${KML_ROOT}/include ${KML_ROOT}/bisheng/include
+                    /home/envs/HPCKit_26.1.RC1/HPCKit/26.1.RC1/kml/bisheng/include)
+    if(NOT KML_INCLUDE_DIR)
+        message(FATAL_ERROR "kblas.h not found. Set -DKML_ROOT=.../kml/bisheng")
+    endif()
+    find_file(KML_KBLAS_LIB libkblas.so
+              PATHS ${KML_ROOT}/lib/matrix/kblas/locking
+                    ${KML_ROOT}/bisheng/lib/matrix/kblas/locking
+                    /home/envs/HPCKit_26.1.RC1/HPCKit/26.1.RC1/kml/bisheng/lib/matrix/kblas/locking)
+    if(NOT KML_KBLAS_LIB)
+        message(FATAL_ERROR "libkblas.so (locking, thread-safe) not found. Set -DKML_ROOT=.../kml/bisheng")
+    endif()
+    get_filename_component(KML_KBLAS_DIR ${KML_KBLAS_LIB} DIRECTORY)
+    add_compile_definitions(USE_OPENBLAS)          # reuse the cblas_sgemm path
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/tools/kml_shim ${KML_INCLUDE_DIR})
+    link_libraries(${KML_KBLAS_LIB})
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath,${KML_KBLAS_DIR}")
+    message(STATUS "=== KML kblas GEMM backend: ${KML_KBLAS_LIB} ===")
 endif()
 
 # arm_gemm support (compiles the fp32-SVE subset of the embedded arm_gemm copy
@@ -164,6 +204,9 @@ include_directories(include)
 
 # Library
 add_library(winograd_conv STATIC src/winograd_conv.cpp)
+if(USE_KML)
+    target_sources(winograd_conv PRIVATE tools/kml_shim/kml_shim.cpp)
+endif()
 
 # arm_gemm (built above) is required by winograd_conv when USE_ARM_GEMM is on.
 if(USE_ARM_GEMM)

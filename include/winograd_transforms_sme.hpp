@@ -16,7 +16,14 @@
 #pragma once
 
 #include <arm_sve.h>
+#if defined(__ARM_NEON_SVE_BRIDGE) && __has_include(<arm_neon_sve_bridge.h>)
+#include <arm_neon_sve_bridge.h>
+#elif defined(__has_include)
+// GCC spells the (unused here) NEON<->SVE bridge header arm_neon_sve.h
+#if __has_include(<arm_neon_sve.h>) && defined(__GNUC__) && !defined(__clang__)
 #include <arm_neon_sve.h>
+#endif
+#endif
 #include <cstddef>
 #include <cstring>
 #include "winograd_matrices.hpp"
@@ -51,11 +58,17 @@ void input_transform_sme(
     int channels,
     const float Bt_matrix[TILE_SIZE][TILE_SIZE]
 ) {
-    SME_SMSTART_ZA();
+    // The input transform is a pure-SVE elementwise matrix product (no ZA /
+    // FMOPA), so there is nothing for streaming mode to accelerate here. ACL's
+    // sme_fp32_mla_6x6 is a single self-contained asm body it can safely wrap
+    // in SMSTART/SMSTOP, but our transform_2d_sve lazily reallocs a
+    // thread_local tmp buffer — running the allocator (which uses ADVSIMD)
+    // inside streaming mode is illegal and corrupts the heap when a larger
+    // shape triggers the growth. So keep it in normal mode (identical to the
+    // SVE path).
     transform_2d_sve<TILE_SIZE, TILE_SIZE>(
         Bt_matrix, d, U, channels, channels
     );
-    SME_SMSTOP();
 }
 
 // ============================================================================
@@ -121,8 +134,8 @@ static inline void sme_output_transform_f44(
       "ldr x20, [%x[params], %[ofs_ot]]\n"
       ".inst 0xd503477f  // SMSTART ZA\n"
       "ptrue p5.b\n"
-      "ld1rw { z12.s }, p5/Z, [%x[params], %[ofs_amax]]\n"
-      "ld1rw { z10.s }, p5/Z, [%x[params], %[ofs_amin]]\n"
+      "ld1rw { z10.s }, p5/Z, [%x[params], %[ofs_amax]]\n"
+      "ld1rw { z12.s }, p5/Z, [%x[params], %[ofs_amin]]\n"
       "pfalse p8.b\n"
       "ldr x8, [%x[params], %[ofs_it]]\n"
       "ld1w { z6.s }, p5/Z, [x20]\n"
@@ -625,7 +638,7 @@ static inline void sme_output_transform_f44(
       ".inst 0xc08234ba  // mova z26.s, p5/M, za1h.s[x13, #1]\n"
       "fmax z31.s, p5/M, z31.s, z12.s\n"
       "fmin z27.s, p5/M, z27.s, z10.s\n"
-      ".inst 0xc08215b9  // mova z25.s, p5/M, za1h.s[x12, #1]\n"
+      ".inst 0xc08214b9  // mova z25.s, p5/M, za1h.s[x12, #1]\n"
       "fmax z30.s, p5/M, z30.s, z12.s\n"
       "fmin z26.s, p5/M, z26.s, z10.s\n"
       ".inst 0xc08254b8  // mova z24.s, p5/M, za1h.s[x14, #1]\n"
