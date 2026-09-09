@@ -41,9 +41,60 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
   具名文件）；`tools/diag_verbose.sh` 临时脚本已删除；`tools/diag_ab.sh` 同为
   临时脚本，不再使用，可删。
 
+### 2026-09-08 — 本机（毕昇/HPCKit 直连环境）状态快照（最优先读）
+
+**本机与集群不同**：608 核 / 32 NUMA（38 核/节点），无作业调度，直接 `taskset`/
+`numactl` 跑即可。环境：`source /home/envs/HPCKit_26.1.RC1/HPCKit/26.1.RC1/setvars.sh`
+→ 毕昇 clang 19.1.7（CC/CXX 默认即它）；GCC 12.3.1 在 `.../compiler/gcc/bin/`。
+**SME 硬件带 `smef32f32`**（fp32 外积，cpuinfo 可见）。ACL 53.1.0 源码已由用户放到
+仓库根 `ComputeLibrary-53.1.0/`（.gitignore 已排除 ComputeLibrary*/ 与 build_*/）。
+
+- **构建矩阵（全部已验证）**：`build_ag/` = arm_gemm（`-DUSE_ARM_GEMM=ON
+  -DARM_GEMM_ROOT=$PWD/ComputeLibrary-53.1.0`）；`build_sme_kml/` = **推荐日常**
+  （`-DENABLE_SME=ON -DENABLE_OPENMP=ON -DUSE_KML=ON`）；`build_kml/` = SVE+KML。
+  **USE_KML** 是新增的无 ACL GEMM 后端：KML kblas 提供 cblas 兼容 `cblas_sgemm`，
+  经 `tools/kml_shim/cblas.h` 重定向复用 USE_OPENBLAS 代码路径。**必须链 `locking`
+  变体**——实测 `nolocking` 在 OpenMP 并发下间歇出错（25 次 verify 挂 2 次 +
+  "Bad memory unallocation"）。毕昇 libomp 已烘焙进 rpath，免设 LD_LIBRARY_PATH。
+- **GEMM 后端排名（本机 t16 全 59 形状）**：KML 233ms < arm_gemm 328ms。大 IC
+  小 tile（row 3/14/16/28/46）KML 快 2~2.5x；仅小 OC 长序列 arm_gemm 略胜。
+  与集群「arm_gemm 全胜 OpenBLAS」结论**不可迁移**，本机一切以 KML 为基线。
+- **SME 路径修复史（重要）**：本仓库 SME F44 输出变换从移植以来就是坏的（集群
+  从未实测 `--sme`，历史基准全 `--sve`）。修了 3 bug（见修复记录 2026-09-08 三行）。
+  修复后 `--sme` 22/22 + fp64 verify 全过；t1 geomean SVE/SME=1.02，变换密集形状
+  （IC≤64）最高 1.33x，大 IC 持平。**SME 输出变换 asm 已全部换成真实助记符**
+  （fmopa/mova/zero/smstart，800 指令字 objdump 逐位校验，语义零变化，801d222）。
+- **ACLE 现实（别再踩）**：毕昇 clang19 无单组 fp32 fmopa intrinsic（无
+  `__ARM_FEATURE_SME_F32F32`，-march 也开不出）；其 `svread/write_hor_za32_m`
+  下发为全上下文保存占位实现（不可用）；`svzero_za`/`smstart` 属性可用但整套
+  重写会破坏 ACL 手写调度。GCC 12.3 无 sme-f32f32 特性。**SME kernel 只能
+  助记符 asm**；fmopa 编码公式（已验证）：`0x8080b400 | Zm<<16 | Zn<<5 | Za`，
+  语义 `za[row][col] += Zm[row]·Zn[col]`（Zn=第一个列出的向量→列侧）。
+- **已证伪的优化（勿重试）**：① tile-major U/M 消灭 scatter/gather → KML -14%、
+  arm_gemm -16%（GEMM A 的 lda 从 IC 变 36·IC，局部性损失 > 拷贝收益 8~12%；
+  代码内 Phase-2 注释已记录，run()/naive 的 lda/ldc 参数保留给手写 GEMM）。
+  ② transform_1d_sve 寄存器分块 → IC≥96 慢 20%（微基准 /tmp/rb_micro 方法，
+  IC=48 时快 1.4x，可考虑只对 IC≤64 走分块，未做）。
+- **已落地**：V 跨调用缓存（key=权重指针+64 点内容指纹+shape+f44+ISA，防同址
+  重分配 ABA；KML t16 geomean 1.07x 最高 1.74x；`WINO_V_CACHE=0` 关）。
+
 ### 接下来要做的（给下一个 agent 的直接任务）
 
-**oneDNN 对照已闭环**：三列全出数据（src=59 na=0），nthr=16 已确认。最终方案：
+**本机主线（2026-09-08 起，优先级序）**：
+1. **SME F32F32 FMOPA GEMM**（最大杠杆，探测已证：4-tile 循环 2.0 TFLOPS/核 ≈
+   13x KML 单核；Winograd 小切片 GEMM 现在只有 ~17 GFLOPS@t1）。**第一步不是写
+   内核，是标定**：本机 fmopa 写/mova 读的 ZA 列寻址有非直觉置换（本仓库输出
+   变换靠写读同一套约定自洽掩盖；探针实测 slot→物理列 = [0,4,2,6,10,14,3,7,11,15]+6 读空，
+   K=1 dump 方法见会话记录），做 GEMM 前必须拿到完整 P(fmopa lane→列)/Q(mova→列)
+   标定表。之后：16×16 条带内核 + U 的 16-tile 组转置写直通（Phase1 内 16×16
+   寄存器转置代价估算 ≈+0.3ms/全 U，可接受）+ V 复用 Bt-pack 缓存。
+2. **F44 专用展开 SVE 变换内核**（Case2 输入变换占 23%，循环开销主导：
+   52 cyc/vec-op vs 理想 ~2）。ACL `sve_fp32_6x6.cpp` 为参考。
+3. Phase1/3 大 IC 通道分块（Case4 IC=384：d_tile/U_tile/tmp≈150KB > 32KB L1，
+   TileExt 10%+InXform 25% 均劣化）。
+4. 其余集群旧任务（小形状 hybrid direct conv 等）优先级低于以上，见下节历史清单。
+
+**oneDNN 对照已闭环**（集群侧，历史）：三列全出数据（src=59 na=0），nthr=16 已确认。最终方案：
 - `run_benchdnn.sh`：`ONEDNN_VERBOSE=1` + `--mode=p -v4` + `DNNL_NUM_THREADS=16` +
   `OMP_THREAD_LIMIT=16` + KNOWN_GOOD BIN + `: > "$OUT"` 前移 + CRLF 自愈 + shift 修复
 - `run_onednn_e2e.sh`：ACL 库 `LD_LIBRARY_PATH` 自动探测 + `ONEDNN_VERBOSE=0` 防 CSV 污染 + CRLF 自愈
@@ -164,13 +215,19 @@ cmake .. -DENABLE_SME=ON -DENABLE_OPENMP=ON -DUSE_OPENBLAS=ON
 # 全部启用（arm_gemm 版）
 cmake .. -DENABLE_SME=ON -DENABLE_OPENMP=ON -DUSE_ARM_GEMM=ON -DARM_GEMM_ROOT=...
 
+# KML kblas GEMM（本机推荐；无需 ACL。KML 提供 cblas 兼容 sgemm，链 locking 变体）
+cmake .. -DENABLE_SME=ON -DENABLE_OPENMP=ON -DUSE_KML=ON
+# 默认自动找 /home/envs/HPCKit_26.1.RC1/HPCKit/26.1.RC1/kml/bisheng；不同路径用 -DKML_ROOT=...
+
 make -j && ./test_winograd
 ```
 
 **关键**：
 - `__ARM_FEATURE_SVE`/`__ARM_FEATURE_SME` 是编译器内部宏，由 `-march` 触发，不能手动 `#define`
 - 修改 CMakeLists.txt 后必须 `rm -rf build` 清缓存
-- GEMM 内核优先级：arm_gemm > OpenBLAS > naive（互斥，arm_gemm 优先）
+- GEMM 内核优先级：arm_gemm > OpenBLAS/KML > naive（互斥，arm_gemm 优先）
+- **USE_KML 注意**：必须链 KML 的 `locking`（线程安全）变体——`nolocking` 在
+  OpenMP 并发 cblas_sgemm 下间歇性出错（本机实测）。KML/毕昇环境见"当前状态"节。
 - OpenBLAS 需要 `cblas.h` + `libopenblas`：`apt install libopenblas-dev`
 - arm_gemm 从 ACL 23.11 源码树**就地编译 fp32-SVE 子集**（19 个源 + `src/arm_gemm_cpuinfo.cpp`），用 `include/arm_compute/core/CPP/CPPTypes.h` 自包含 shim 替代 CPUInfo，无需编译整个 ACL。构建细节见 `tools/build_arm_gemm.md`
 
@@ -344,6 +401,10 @@ Case 3/4/5 已大幅超越 oneDNN（大 IC 时变换计算量大，OpenMP 并行
 | 2026-08 | OpenMP 不生效 | CMake `PRIVATE`→`PUBLIC`；`omp_set_num_threads` 原为桩函数 |
 | 2026-08 | double free | OpenBLAS 内部线程与 OpenMP 冲突，`openblas_set_num_threads(1)` |
 | 2026-08 | OpenMP 无加速 | 每 tile 在循环内 `std::vector` 分配导致堆锁竞争 |
+| 2026-09-08 | SME F44 输出全错 | ReLU/bias clamp 抄反：fmin 配 act_min、fmax 配 act_max，全部坍缩到 act_max；交换两 ld1rw 界寄存器（z10=act_max/z12=act_min）|
+| 2026-09-08 | SME F44 OC>16 错 | za1 组 `mova z25` 编码多抄 bit8（0xc08215b9→0xc08214b9），仅输出行 6 错；GCC 汇编器交叉验证 |
+| 2026-09-08 | 多 shape 后段错误(BLAS 内) | SME 输入变换把含 thread_local malloc 的 transform_2d_sve 包进 SMSTART/SMSTOP，streaming 模式跑 ADVSIMD 破坏堆；去掉包裹（输入变换本就纯 SVE）|
+| 2026-09-08 | KML 后端间歇 verify 挂 | kblas `nolocking` 变体在 OpenMP 并发 cblas_sgemm 下非线程安全；USE_KML 改链 `locking` |
 | 2026-08 | 权重并行后变慢 | 独立 `#pragma omp parallel` 增加额外 fork/join，合并进主 region 修复 |
 
 ## 性能优化记录
