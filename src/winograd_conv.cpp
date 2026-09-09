@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstdio>
+#include <memory>
 #include <mutex>
 #include <vector>
 #include <arm_neon.h>
@@ -112,6 +113,7 @@ inline float* scratch_f32(size_t n, Scratch& s) {
 // by the master thread before the region starts; thread_local so they survive
 // across calls (reuse without realloc).
 thread_local Scratch sU, sM, sV;
+thread_local Scratch sUg, sVkt, sUst;
 
 // Per-thread tile buffers — each thread gets its own set, each with its own
 // allocation.
@@ -170,8 +172,17 @@ inline uint64_t wei_fingerprint(const float* wei, size_t n) {
 
 std::mutex& vcache_mu() { static std::mutex m; return m; }
 
+// Entries publish complete: when SME GEMM is active, vkt (the [ts][k][oc64]
+// transposed B operand) is packed together with v under the same lock, so
+// readers never see a half-built entry.
+struct VCacheEntry {
+    VCacheKey key;
+    std::vector<float> v;
+    std::vector<float> vkt;
+};
+
 struct VCacheStore {
-    std::vector<std::pair<VCacheKey, std::vector<float>>> entries;
+    std::vector<std::unique_ptr<VCacheEntry>> entries;
     size_t bytes = 0;
     // Bounds for the benchmark set (59 distinct layers, V up to ~42MB):
     // cap entry count and total footprint; past that we stop caching (the
@@ -811,6 +822,209 @@ void winograd_gemm_batched(
 // layout note in the pipeline; the run()/naive lda,ldc plumbing stays for
 // a future hand-tuned (SME FMOPA) kernel that can exploit it.)
 
+#if defined(__ARM_FEATURE_SME)
+// ============================================================================
+// SME F32F32 FMOPA batched GEMM (experimental; enable with WINO_GEMM=sme)
+// ============================================================================
+// M[ts][tile][oc] = sum_ic U[ts][tile][ic] * V[ts][oc][ic] via ZA outer
+// products. Operand roles were calibrated on this part ("str za[w12,#0]"
+// with slice base v stores za[v&3] column v>>2 as 64B along the Zm-row
+// direction; all maps identity), which lets us choose
+//   ZA rows (Zm) = 16 OCs | ZA cols (Zn) = 16 tiles | za0..3 = 4 OC-blocks
+// so every drained slice is exactly one contiguous 16-OC run of an M_buf
+// row: the drain lands directly in the buffer. Tail blocks (blk*16+16 >
+// oc_here) go to a 4KB stage line and the caller copies the valid prefix.
+// Registers: scratch vectors are z16-z20 ONLY - z8-z15 are callee-saved
+// (AAPCS64) and this function is a real call; an earlier version clobbering
+// z8-z12 silently destroyed caller live values (e.g. doubles in d10).
+//
+// Operands are packed, not per-call work:
+//   Vkt[ts][k][oc64]  packed with V when the weight-cache entry publishes,
+//                     per call only when the cache is off (sVkt scratch)
+//   Ug[ts][g][k16][t] produced by the Phase-1 group path below (row-major U
+//                     is never materialized on the SME path)
+namespace wino_sme {
+
+inline bool requested() {
+    static const bool on = [] {
+        const char* e = getenv("WINO_GEMM");
+        return e && strcmp(e, "sme") == 0;
+    }();
+    return on;
+}
+inline bool active(int OC) { return requested() && OC >= 16; }
+
+template <class F>
+static inline void transpose16(const float (*tmp)[16], F&& out) {
+    const svbool_t full = svptrue_b32();
+    const svuint32_t base = svindex_u32(0, 16);
+    for (int j = 0; j < 16; j++) {
+        svuint32_t idx = svadd_n_u32_x(full, base, (uint32_t)j);
+        out(j, svld1_gather_u32index_f32(full, (const float*)tmp, idx));
+    }
+}
+
+// V[ts][oc][ic] -> Vkt[(ts*IC + k)*OC64 + oc0..15] for one ts.
+void pack_vkt_ts(const float* V, float* Vkt, int ts, int IC, int OC, int OC64) {
+    const svbool_t full = svptrue_b32();
+    for (int kb = 0; kb < IC; kb += 16)
+        for (int ob = 0; ob < OC64; ob += 16) {
+            alignas(64) float tmp[16][16];
+            const svbool_t pk = svwhilelt_b32_s32(kb, IC);
+            for (int i = 0; i < 16; i++) {
+                const int oc = ob + i;
+                if (oc < OC)
+                    svst1_f32(pk, tmp[i],
+                              svld1_f32(pk, V + ((size_t)ts * OC + oc) * IC + kb));
+                else
+                    svst1_f32(full, tmp[i], svdup_f32(0.0f));
+            }
+            float* dst = Vkt + (size_t)ts * IC * OC64 + ob;
+            transpose16(tmp, [&](int j, svfloat32_t col) {
+                if (kb + j < IC)
+                    svst1_f32(full, dst + (size_t)(kb + j) * OC64, col);
+            });
+        }
+}
+
+// Group staging Ust[ts][i][k] (i < tiles_here valid) -> Ug[(k)][t0..15].
+void pack_ug_group(const float* Ust, float* Ug, int ts, int tiles_here,
+                   int IC, int IC16) {
+    const svbool_t full = svptrue_b32();
+    for (int kb = 0; kb < IC16; kb += 16) {
+        alignas(64) float tmp[16][16];
+        const svbool_t pk = svwhilelt_b32_s32(kb, IC);
+        for (int i = 0; i < 16; i++) {
+            if (i < tiles_here)
+                svst1_f32(pk, tmp[i],
+                          svld1_f32(pk, Ust + ((size_t)ts * 16 + i) * IC + kb));
+            else
+                svst1_f32(full, tmp[i], svdup_f32(0.0f));
+        }
+        transpose16(tmp, [&](int j, svfloat32_t col) {
+            svst1_f32(full, Ug + (size_t)(kb + j) * 16, col);
+        });
+    }
+}
+
+__attribute__((noinline)) static void gemm_window(
+        const float* A, const float* B, float* M, float* stage,
+        int IC, int bstep, int ldc, int tiles_here, int oc_here) {
+    __asm__ volatile(
+      "smstart\n"
+      "ptrue p0.s\n"
+      "zero {za0.s, za1.s, za2.s, za3.s}\n"
+      "mov x9, %[A]\n"
+      "mov x10, %[B]\n"
+      "mov x11, #0\n"
+      "1:\n"
+      "ld1w { z16.s }, p0/z, [x9]\n"
+      "ld1w { z17.s }, p0/z, [x10]\n"
+      "ld1w { z18.s }, p0/z, [x10, #1, MUL VL]\n"
+      "ld1w { z19.s }, p0/z, [x10, #2, MUL VL]\n"
+      "ld1w { z20.s }, p0/z, [x10, #3, MUL VL]\n"
+      "fmopa za0.s, p0/m, p0/m, z16.s, z17.s\n"
+      "fmopa za1.s, p0/m, p0/m, z16.s, z18.s\n"
+      "fmopa za2.s, p0/m, p0/m, z16.s, z19.s\n"
+      "fmopa za3.s, p0/m, p0/m, z16.s, z20.s\n"
+      "add x9, x9, #64\n"
+      "add x10, x10, %[bstep]\n"
+      "add x11, x11, #1\n"
+      "cmp x11, %[ic]\n"
+      "b.lt 1b\n"
+      "mov x4, %[M]\n"
+      "mov x5, %[stage]\n"
+      "lsl x6, %[ldc], #2\n"
+      "mov x14, #0\n"
+      "2:\n"
+      "lsr x1, x14, #2\n"
+      "and x2, x14, #3\n"
+      "cmp x1, %[th]\n"
+      "b.ge 5f\n"
+      "lsl x3, x2, #4\n"
+      "cmp x3, %[oh]\n"
+      "b.ge 5f\n"
+      "mul x7, x1, x6\n"
+      "add x7, x7, x2, LSL #6\n"
+      "add x7, x7, x4\n"
+      "add x3, x3, #16\n"
+      "cmp x3, %[oh]\n"
+      "b.le 3f\n"
+      "lsl x7, x1, #8\n"
+      "add x7, x7, x2, LSL #6\n"
+      "add x7, x7, x5\n"
+      "3:\n"
+      "mov x12, x14\n"
+      "str za[w12, #0], [x7]\n"
+      "5:\n"
+      "add x14, x14, #1\n"
+      "cmp x14, #64\n"
+      "b.lt 2b\n"
+      "smstop\n"
+      :
+      : [A] "r"(A), [B] "r"(B), [M] "r"(M), [stage] "r"(stage),
+        [ic] "r"((uint64_t)IC), [bstep] "r"((uint64_t)bstep),
+        [ldc] "r"((uint64_t)ldc), [th] "r"((uint64_t)tiles_here),
+        [oh] "r"((uint64_t)oc_here)
+      : "memory", "cc",
+        "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x9", "x10", "x11", "x12",
+        "x14",
+        "d8", "d9", "d10", "d11", "d12", "d13", "d14", "d15",
+        "z16", "z17", "z18", "z19", "z20",
+        "p1", "p2", "p3", "p4", "p5", "p6", "p7",
+        "p8", "p9", "p10", "p11", "p12", "p13", "p14", "p15",
+        "p0");
+}
+
+// Phase-2 body; called by ALL threads of the enclosing parallel region.
+// Vkt_cached != null (weight cache carries vkt) -> no packing work per call.
+void gemm_phase(float* M_buf, const float* Ug, const float* V,
+                float* Vkt_scratch, const float* Vkt_cached,
+                int NM, int n_tiles, int OC, int IC) {
+    const int nG = (n_tiles + 15) / 16;
+    const int IC16 = (IC + 15) & ~15;
+    const int OC64 = (OC + 63) & ~63;
+    const float* Vkt = Vkt_cached;
+    if (Vkt == nullptr) {
+        #pragma omp for schedule(static)
+        for (int ts = 0; ts < NM; ts++) pack_vkt_ts(V, Vkt_scratch, ts, IC, OC, OC64);
+        #pragma omp barrier
+        Vkt = Vkt_scratch;
+    }
+    #pragma omp for schedule(dynamic)
+    for (int ts = 0; ts < NM; ts++) {
+        alignas(64) float stage[16 * 64];
+        const float* A0 = Ug + (size_t)ts * nG * IC16 * 16;
+        const float* B0 = Vkt + (size_t)ts * IC * OC64;
+        float* M0 = M_buf + (size_t)ts * n_tiles * OC;
+        for (int g = 0; g < nG; g++) {
+            const int tiles_here =
+                n_tiles - g * 16 < 16 ? n_tiles - g * 16 : 16;
+            for (int ch = 0; ch * 64 < OC; ch++) {
+                const int oc_here =
+                    OC - ch * 64 < 64 ? OC - ch * 64 : 64;
+                gemm_window(A0 + (size_t)g * IC16 * 16, B0 + ch * 64,
+                            M0 + (size_t)g * 16 * OC + ch * 64, stage,
+                            IC, OC64 * 4, OC, tiles_here, oc_here);
+                if (oc_here & 15) {
+                    const int blk = oc_here >> 4;
+                    const int rem = oc_here & 15;
+                    for (int c = 0; c < tiles_here; c++) {
+                        float* d = M0 + ((size_t)g * 16 + c) * OC
+                                       + ch * 64 + blk * 16;
+                        const float* s = stage + c * 64 + blk * 16;
+                        for (int q = 0; q < rem; q++) d[q] = s[q];
+                    }
+                }
+            }
+        }
+    }
+    #pragma omp barrier
+}
+
+} // namespace wino_sme
+#endif
+
 // ============================================================================
 // Direct (reference) 3x3 convolution with stride=1, pad=1
 // ============================================================================
@@ -920,12 +1134,39 @@ static void winograd_convolution_nhwc_core(
     const VCacheKey vkey{wei, vfp, IC, OC, is_f44, static_cast<int>(isa)};
     float* V = nullptr;
     bool v_hit = false;
+    struct VCacheEntry* vent = nullptr;
     if (vcache_enabled()) {
         std::lock_guard<std::mutex> lk(vcache_mu());
         for (auto& e : vcache().entries)
-            if (e.first == vkey) { V = e.second.data(); v_hit = true; break; }
+            if (e->key == vkey) { vent = e.get(); V = e->v.data(); v_hit = true; break; }
     }
     if (!v_hit) V = scratch_f32(V_size, sV);
+
+#if defined(__ARM_FEATURE_SME)
+    const bool use_sme_gemm = wino_sme::active(OC);
+    const int OC64 = (OC + 63) & ~63;
+    float* Ug = nullptr;
+    float* Vkt_scr = nullptr;
+    const float* Vkt_cached = nullptr;
+    if (use_sme_gemm) {
+        Ug = scratch_f32((size_t)NM * ((n_tiles + 15) / 16) * ((IC + 15) & ~15) * 16, sUg);
+        if (vent) {
+            if (vent->vkt.empty()) {   // hit pre-vkt entry: pack once, keep it
+                std::lock_guard<std::mutex> lk(vcache_mu());
+                if (vent->vkt.empty()) {
+                    vent->vkt.resize((size_t)NM * IC * OC64);
+                    for (int ts = 0; ts < NM; ts++)
+                        wino_sme::pack_vkt_ts(V, vent->vkt.data(), ts, IC, OC, OC64);
+                }
+            }
+            Vkt_cached = vent->vkt.data();
+        } else {
+            Vkt_scr = scratch_f32((size_t)NM * IC * OC64, sVkt);
+        }
+    }
+#else
+    const bool use_sme_gemm = false;
+#endif
 
     #pragma omp parallel
     {
@@ -966,43 +1207,75 @@ static void winograd_convolution_nhwc_core(
 
         // ---- Step 2: Per-batch loop ----
         for (int n = 0; n < N; n++) {
-            // Phase 1: Input transform
+            // Phase 1: Input transform. The tile body is shared; variants
+            // differ only in where the transformed 36xIC (or 16xIC) block
+            // goes: row-major U (scatter) or per-thread group staging that
+            // the SME path then transposes into Ug in bulk.
+            auto extract_and_transform = [&](int tr, int tc) {
+                bool is_edge = (tr == 0 || tr == n_tile_rows - 1 ||
+                                tc == 0 || tc == n_tile_cols - 1);
+                if (is_edge) {
+                    memset(d_tile, 0, TS * TS * IC * sizeof(float));
+                }
+
+                // Clip the input-tile rows/cols to the actual input extent.
+                // A tile spans ih in [tr*OT-1, tr*OT-1+TS); rows outside
+                // [0, IH) stay zero (from the edge memset above). The old
+                // "TS-1 for the last tile" rule only held for even sizes —
+                // odd IH/IW (e.g. IH=7, last tile row reads ih=7) read one
+                // past the last valid row, i.e. the next channel's row 0.
+                int ih_begin = tr * OT - 1;
+                int ti_start = (ih_begin < 0) ? -ih_begin : 0;
+                int ti_end   = (ih_begin + TS > IH) ? (IH - ih_begin) : TS;
+                if (ti_end < ti_start) ti_end = ti_start;
+                int iw_begin = tc * OT - 1;
+                int tj_start = (iw_begin < 0) ? -iw_begin : 0;
+                int tj_end   = (iw_begin + TS > IW) ? (IW - iw_begin) : TS;
+                if (tj_end < tj_start) tj_end = tj_start;
+
+                for (int ti = ti_start; ti < ti_end; ti++) {
+                    int ih = tr * OT - 1 + ti;
+                    for (int tj = tj_start; tj < tj_end; tj++) {
+                        int iw = tc * OT - 1 + tj;
+                        const float* sp = src + ((n * IH + ih) * IW + iw) * IC;
+                        copy_f32(sp, d_tile + (ti * TS + tj) * IC, IC);
+                    }
+                }
+
+                dispatch_input_transform(d_tile, U_tile, IC, is_f44, isa);
+            };
+
+#if defined(__ARM_FEATURE_SME)
+            if (use_sme_gemm) {
+                // 16-tile groups: transform into staging, transpose to Ug.
+                // Row-major U stays untouched (never materialized here).
+                const int nG = (n_tiles + 15) / 16;
+                const int IC16 = (IC + 15) & ~15;
+                float* Ust = scratch_f32((size_t)NM * 16 * IC, sUst);
+                #pragma omp for schedule(dynamic, 1)
+                for (int g = 0; g < nG; g++) {
+                    const int t_beg = g * 16;
+                    const int t_end = t_beg + 16 < n_tiles ? t_beg + 16 : n_tiles;
+                    for (int t = t_beg; t < t_end; t++) {
+                        extract_and_transform(t / n_tile_cols, t % n_tile_cols);
+                        const int i = t - t_beg;
+                        for (int ts = 0; ts < NM; ts++)
+                            copy_f32(U_tile + (size_t)ts * IC,
+                                     Ust + ((size_t)ts * 16 + i) * IC, IC);
+                    }
+                    for (int ts = 0; ts < NM; ts++)
+                        wino_sme::pack_ug_group(
+                            Ust, Ug + ((size_t)ts * nG + g) * IC16 * 16,
+                            ts, t_end - t_beg, IC, IC16);
+                }
+            } else
+#endif
+            {
             #pragma omp for collapse(2) schedule(dynamic, 2)
             for (int tr = 0; tr < n_tile_rows; tr++) {
                 for (int tc = 0; tc < n_tile_cols; tc++) {
                     int tile_idx = tr * n_tile_cols + tc;
-
-                    bool is_edge = (tr == 0 || tr == n_tile_rows - 1 ||
-                                    tc == 0 || tc == n_tile_cols - 1);
-                    if (is_edge) {
-                        memset(d_tile, 0, TS * TS * IC * sizeof(float));
-                    }
-
-                    // Clip the input-tile rows/cols to the actual input extent.
-                    // A tile spans ih in [tr*OT-1, tr*OT-1+TS); rows outside
-                    // [0, IH) stay zero (from the edge memset above). The old
-                    // "TS-1 for the last tile" rule only held for even sizes —
-                    // odd IH/IW (e.g. IH=7, last tile row reads ih=7) read one
-                    // past the last valid row, i.e. the next channel's row 0.
-                    int ih_begin = tr * OT - 1;
-                    int ti_start = (ih_begin < 0) ? -ih_begin : 0;
-                    int ti_end   = (ih_begin + TS > IH) ? (IH - ih_begin) : TS;
-                    if (ti_end < ti_start) ti_end = ti_start;
-                    int iw_begin = tc * OT - 1;
-                    int tj_start = (iw_begin < 0) ? -iw_begin : 0;
-                    int tj_end   = (iw_begin + TS > IW) ? (IW - iw_begin) : TS;
-                    if (tj_end < tj_start) tj_end = tj_start;
-
-                    for (int ti = ti_start; ti < ti_end; ti++) {
-                        int ih = tr * OT - 1 + ti;
-                        for (int tj = tj_start; tj < tj_end; tj++) {
-                            int iw = tc * OT - 1 + tj;
-                            const float* sp = src + ((n * IH + ih) * IW + iw) * IC;
-                            copy_f32(sp, d_tile + (ti * TS + tj) * IC, IC);
-                        }
-                    }
-
-                    dispatch_input_transform(d_tile, U_tile, IC, is_f44, isa);
+                    extract_and_transform(tr, tc);
 
                     for (int ti = 0; ti < TS; ti++) {
                         for (int tj = 0; tj < TS; tj++) {
@@ -1013,9 +1286,21 @@ static void winograd_convolution_nhwc_core(
                     }
                 }
             }
+            }
 
             // Phase 2: GEMM. All NM slices have identical (M,N,K) -- dynamic
             // scheduling buys nothing and costs a chunk-claim per slice.
+            bool sme_gemm_done = false;
+#if defined(__ARM_FEATURE_SME)
+            if (use_sme_gemm) {
+                wino_sme::gemm_phase(M_buf, Ug, V, Vkt_scr, Vkt_cached,
+                                     NM, n_tiles, OC, IC);
+                sme_gemm_done = true;
+            }
+#endif
+            if (sme_gemm_done) {
+                // gemm_phase ends with its own barrier; nothing else here.
+            } else {
             // Layout note: U/M_buf stay ROW-major ([ts][tile][C]) on purpose.
             // A tile-major variant (transform writes/reads slices in place,
             // dropping these scatter/gather copies) was implemented and
@@ -1060,6 +1345,7 @@ static void winograd_convolution_nhwc_core(
                 winograd_gemm(U_slice, V_slice, M_slice, n_tiles, OC, IC);
             }
 #endif
+            }
 
             // Phase 3: Output transform
             #pragma omp for collapse(2) schedule(dynamic, 2) nowait
@@ -1100,11 +1386,14 @@ static void winograd_convolution_nhwc_core(
         std::lock_guard<std::mutex> lk(vcache_mu());
         auto& store = vcache();
         bool dup = false;
-        for (auto& e : store.entries) if (e.first == vkey) { dup = true; break; }
+        for (auto& e : store.entries) if (e->key == vkey) { dup = true; break; }
         if (!dup && store.entries.size() < VCacheStore::kMaxEntries &&
             store.bytes + static_cast<size_t>(V_size) * 4 <= VCacheStore::kMaxBytes) {
-            store.entries.emplace_back(vkey, std::vector<float>(V, V + V_size));
+            auto ne = std::make_unique<VCacheEntry>();
+            ne->key = vkey;
+            ne->v.assign(V, V + V_size);
             store.bytes += static_cast<size_t>(V_size) * 4;
+            store.entries.push_back(std::move(ne));
         }
     }
 }
