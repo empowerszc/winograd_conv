@@ -59,6 +59,7 @@ winograd_conv/
 └── docs/
     ├── algorithm.md                       ← 算法详解（数学、布局、缓冲、并行、ISA 内核、精度）
     ├── project_summary.md                 ← 项目工作总结/汇报底稿（对比、证据、路线）★
+    ├── vs_acl.md                          ← 与 ACL Winograd 的逐层差异与优势（汇报用）★
     ├── sme_fmopa_gemm.md                  ← 自研 SME FMOPA GEMM（设计、标定、踩坑、性能）★
     ├── why_faster_than_acl_23.11.md       ← 为什么比 ACL 23.11 快（独立分析，含例子）
     ├── timing_breakdown_920f.md           ← 920F 步耗时拆解与并行效率（--timing + 线程扩展实测）

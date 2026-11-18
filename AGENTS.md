@@ -821,6 +821,7 @@ OMP_PROC_BIND=spread OMP_PLACES=cores ./bench_winograd --sve --nhwc --threads 32
 ## 相关文档
 
 - **项目工作总结（汇报用）**：`docs/project_summary.md` — 一页纸摘要、技术方案、关键决策、**与 ACL/oneDNN/OpenBLAS/KML/SME 的多维对比**、性能证据、局限与路线、PPT 要点
+- **与 ACL 的逐层差异与优势**：`docs/vs_acl.md` — 同源清单（矩阵/tile/布局逐项一致）、八个维度的实现差异、8 条优势（机制+证据+边界）、6 条诚实的差距、汇报三张幻灯片、逐条验证命令
 - **SME FMOPA GEMM**：`docs/sme_fmopa_gemm.md` — 动机（Winograd 小切片 GEMM 形态）、ZA 布局标定、操作数角色选择、打包/微内核/drain、流水线集成、**`smstart/smstop` clobber 陷阱复盘**、性能与后续优化
 - **算法详解**：`docs/algorithm.md` — 当前实现的分步讲解（Winograd 数学、三步变换、数据/缓冲布局、OpenMP 并行结构、NEON/SVE/SME 内核、GEMM 选择、tile 边界、数值精度）
 - **快于 ACL 23.11 的分析**：`docs/why_faster_than_acl_23.11.md` — 独立分析：双方都是 Winograd+SVE，8/9 赢是固定开销主导的小负载微基准结果（含有效 GFLOPS 证据、3 个具体例子、6 个原因、验证清单）
