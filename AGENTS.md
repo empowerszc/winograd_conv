@@ -13,6 +13,13 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
 
 ## 当前状态（2026-08-31）— 新 agent 先读这里
 
+- **SME FMOPA GEMM（2026-11-18，默认关闭）**：`WINO_GEMM=sme` 启用自研 ZA 外积 GEMM
+  （`src/winograd_conv.cpp` → `namespace wino_sme`）。**必须绑核测量**：t1 绑单核合计快
+  2.5%（31/59 胜，7²/14² 深通道最高 2.2x）；t16 绑 16 核合计 346ms vs KML 386ms
+  （**快 10.4%**，32/59 胜，最大形状 4,384,160²,384 快 1.5x）；小空间大 IC/OC 落后 1.4–3.4x。
+  设计与踩坑：**`docs/sme_fmopa_gemm.md`**。
+  ⚠️ 关键教训：`smstart/smstop` 使**所有** z 寄存器与谓词不可预测，内联 asm 必须 clobber
+  `d8–d15` + `p1–p15`，否则 -O1/-O2 下摧毁调用者 callee-saved 值（曾表现为普通计时变 `inf`）。
 - **正确性**：`--verify`（fp64 直接卷积参考 + 相对容差 1e-4）全过。arm_gemm 后端布局契约
   已修复（V 按 K 主序散写，`WINO_GEMM_BTRANS=0` 可回退对照），详见「历史修复记录」末尾。
 - **性能终局（arm_gemm vs OpenBLAS，同作业）**：**59/59 形状全胜**，geomean **1.99x**，
@@ -81,13 +88,14 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
 ### 接下来要做的（给下一个 agent 的直接任务）
 
 **本机主线（2026-09-08 起，优先级序）**：
-1. **SME F32F32 FMOPA GEMM**（最大杠杆，探测已证：4-tile 循环 2.0 TFLOPS/核 ≈
-   13x KML 单核；Winograd 小切片 GEMM 现在只有 ~17 GFLOPS@t1）。**第一步不是写
-   内核，是标定**：本机 fmopa 写/mova 读的 ZA 列寻址有非直觉置换（本仓库输出
-   变换靠写读同一套约定自洽掩盖；探针实测 slot→物理列 = [0,4,2,6,10,14,3,7,11,15]+6 读空，
-   K=1 dump 方法见会话记录），做 GEMM 前必须拿到完整 P(fmopa lane→列)/Q(mova→列)
-   标定表。之后：16×16 条带内核 + U 的 16-tile 组转置写直通（Phase1 内 16×16
-   寄存器转置代价估算 ≈+0.3ms/全 U，可接受）+ V 复用 Bt-pack 缓存。
+1. **SME F32F32 FMOPA GEMM — ✅ 第一版已落地（2026-11-18，`WINO_GEMM=sme`）**。
+   完整设计/标定/踩坑见 **`docs/sme_fmopa_gemm.md`**。要点：ZA 行=16 OC、列=16 tile、
+   za0..3=4 个 OC 块；drain 直接落 M_buf 行；V/B 预打包进权重缓存。
+   **剩余优化**（按收益）：① 让输入变换直接写 K 主序，消掉 `Ust→Ug` 16×16 块转置；
+   ② OC 尾块按需选 tile 数（OC=96 用 3 tile ×2 窗，省 25% fmopa）；
+   ③ 形状感知后端选择（SME 赢小空间/深通道，KML 赢小空间大 IC）；
+   ④ drain 与下一个 K 循环交错，掩盖 `smstop` 间隙。
+   ⚠️ 改这个内核前先读文档 §6：`smstart/smstop` 的 clobber 规则（`d8–d15` + `p1–p15`）。
 2. **F44 专用展开 SVE 变换内核**（Case2 输入变换占 23%，循环开销主导：
    52 cyc/vec-op vs 理想 ~2）。ACL `sve_fp32_6x6.cpp` 为参考。
 3. Phase1/3 大 IC 通道分块（Case4 IC=384：d_tile/U_tile/tmp≈150KB > 32KB L1，
@@ -806,6 +814,8 @@ OMP_PROC_BIND=spread OMP_PLACES=cores ./bench_winograd --sve --nhwc --threads 32
 
 ## 相关文档
 
+- **项目工作总结（汇报用）**：`docs/project_summary.md` — 一页纸摘要、技术方案、关键决策、**与 ACL/oneDNN/OpenBLAS/KML/SME 的多维对比**、性能证据、局限与路线、PPT 要点
+- **SME FMOPA GEMM**：`docs/sme_fmopa_gemm.md` — 动机（Winograd 小切片 GEMM 形态）、ZA 布局标定、操作数角色选择、打包/微内核/drain、流水线集成、**`smstart/smstop` clobber 陷阱复盘**、性能与后续优化
 - **算法详解**：`docs/algorithm.md` — 当前实现的分步讲解（Winograd 数学、三步变换、数据/缓冲布局、OpenMP 并行结构、NEON/SVE/SME 内核、GEMM 选择、tile 边界、数值精度）
 - **快于 ACL 23.11 的分析**：`docs/why_faster_than_acl_23.11.md` — 独立分析：双方都是 Winograd+SVE，8/9 赢是固定开销主导的小负载微基准结果（含有效 GFLOPS 证据、3 个具体例子、6 个原因、验证清单）
 - **终局基准（arm_gemm vs OpenBLAS）**：`docs/final_benchmark_bfd6b1e.md` — 59 形状逐行表 + 散写回归验证 + E1 debug 计时陷阱

@@ -58,6 +58,8 @@ winograd_conv/
 │   └── diag_ab.sh                         ← ⚠️ 临时诊断脚本，已不再使用，可删
 └── docs/
     ├── algorithm.md                       ← 算法详解（数学、布局、缓冲、并行、ISA 内核、精度）
+    ├── project_summary.md                 ← 项目工作总结/汇报底稿（对比、证据、路线）★
+    ├── sme_fmopa_gemm.md                  ← 自研 SME FMOPA GEMM（设计、标定、踩坑、性能）★
     ├── why_faster_than_acl_23.11.md       ← 为什么比 ACL 23.11 快（独立分析，含例子）
     ├── timing_breakdown_920f.md           ← 920F 步耗时拆解与并行效率（--timing + 线程扩展实测）
     ├── final_benchmark_bfd6b1e.md         ← 终局基准：arm_gemm vs OpenBLAS（59 形状全表）
