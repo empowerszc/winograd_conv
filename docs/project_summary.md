@@ -4,6 +4,8 @@
 > 性能证据、局限与后续」。
 > **配套细节**：算法推导见 `docs/algorithm.md`；性能历程见 `PERFORMANCE_ANALYSIS.md`；
 > 与 oneDNN 的对照见 `docs/onednn_comparison.md`；SME 内核见 `docs/sme_fmopa_gemm.md`。
+> **汇报图示**：`docs/figures/index.html`（10 页自包含 HTML，离线可开；由
+> `tools/gen_report_figures.py` 从本文档与基准表生成）。
 > **日期**：2026-11-18
 
 ---

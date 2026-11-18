@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>⑥ 步耗时拆解与并行效率</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; }
+:root {
+  --ink: #0b1220; --slate: #334155; --muted: #64748b; --faint: #94a3b8;
+  --line: #e5e9f2; --bg: #f7f8fc; --card: #ffffff;
+  --indigo: #4338ca; --indigo-2: #6366f1; --indigo-soft: #eef2ff;
+  --teal: #0f766e; --teal-soft: #ecfdf5;
+  --amber: #b45309; --amber-soft: #fffbeb;
+  --rose: #be123c; --rose-soft: #fff1f2;
+  --green: #15803d;
+  --radius: 14px;
+}
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--slate);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 15px; line-height: 1.7;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+}
+.page { max-width: 1220px; margin: 0 auto; padding: 40px 32px 96px; }
+a { color: var(--indigo); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.num { font-variant-numeric: tabular-nums;
+       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+/* nav */
+.nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 34px; }
+.nav a {
+  font-size: 12.5px; padding: 6px 12px; border-radius: 999px;
+  background: #fff; border: 1px solid var(--line); color: var(--muted);
+  transition: .15s ease;
+}
+.nav a:hover { border-color: #c7d2fe; color: var(--indigo); text-decoration: none; }
+.nav a.on { background: var(--indigo); border-color: var(--indigo); color: #fff; }
+
+/* header */
+.eyebrow {
+  font-size: 11.5px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--indigo); font-weight: 700; margin-bottom: 12px;
+}
+h1 { font-size: 32px; line-height: 1.28; margin: 0 0 12px; color: var(--ink); font-weight: 750; letter-spacing: -.01em; }
+.lede { font-size: 15.5px; color: var(--muted); max-width: 78ch; margin: 0 0 22px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12.5px; color: var(--faint); margin-bottom: 44px; }
+.meta b { color: var(--slate); font-weight: 600; }
+
+/* sections */
+section { margin: 0 0 40px; }
+h2 {
+  font-size: 19px; color: var(--ink); font-weight: 700; margin: 0 0 6px;
+  display: flex; align-items: baseline; gap: 10px;
+}
+h2 .idx {
+  font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--indigo);
+  background: var(--indigo-soft); border-radius: 6px; padding: 2px 7px; font-weight: 700;
+}
+.sub { color: var(--muted); font-size: 13.5px; margin: 0 0 18px; max-width: 88ch; }
+h3 { font-size: 15px; color: var(--ink); margin: 26px 0 10px; font-weight: 650; }
+
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 24px 26px; box-shadow: 0 1px 2px rgba(15,23,42,.03), 0 18px 40px -28px rgba(15,23,42,.22);
+}
+.card + .card { margin-top: 16px; }
+.card > h3:first-child { margin-top: 0; }
+
+/* metric strip */
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+.metric {
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px;
+}
+.metric .k { font-size: 11.5px; color: var(--faint); letter-spacing: .04em; text-transform: uppercase; }
+.metric .v { font-size: 27px; font-weight: 750; color: var(--ink); line-height: 1.25; margin-top: 6px; letter-spacing: -.02em; }
+.metric .n { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.metric.hl { border-color: #c7d2fe; background: linear-gradient(180deg, #fbfbff, #fff); }
+.metric.hl .v { color: var(--indigo); }
+
+/* tables */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.tbl th, .tbl td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.tbl th { font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--faint); font-weight: 700; }
+.tbl tr:last-child td { border-bottom: 0; }
+.tbl td.c, .tbl th.c { text-align: center; }
+.tbl td.r, .tbl th.r { text-align: right; }
+.tbl tbody tr:hover { background: #fafbff; }
+.tbl .em { color: var(--indigo); font-weight: 700; }
+.tbl .warn { color: var(--rose); font-weight: 700; }
+
+.tag {
+  display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px;
+  border-radius: 999px; white-space: nowrap;
+}
+.tag.same { background: var(--teal-soft); color: var(--teal); }
+.tag.diff { background: var(--amber-soft); color: var(--amber); }
+.tag.gap  { background: var(--rose-soft); color: var(--rose); }
+.tag.n    { background: #f1f5f9; color: var(--muted); }
+
+/* chart */
+.chart { display: block; width: 100%; height: auto; }
+.diagram { display: block; width: 100%; height: auto; }
+.chart-wrap { overflow-x: auto; }
+
+/* code */
+pre.code {
+  background: #0b1220; color: #dbe4ff; border-radius: 12px; padding: 18px 20px;
+  overflow-x: auto; font-size: 12.5px; line-height: 1.65; margin: 14px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre.code .c { color: #7c8db5; }
+
+/* callout */
+.callout {
+  border-left: 3px solid var(--amber); background: var(--amber-soft);
+  border-radius: 0 10px 10px 0; padding: 16px 20px; font-size: 13.5px; color: #78350f;
+  margin: 16px 0 0;
+}
+.callout.rose { border-color: var(--rose); background: var(--rose-soft); color: #881337; }
+.callout.indigo { border-color: var(--indigo); background: var(--indigo-soft); color: #312e81; }
+.callout.teal { border-color: var(--teal); background: var(--teal-soft); color: #134e4a; }
+.callout b { font-weight: 700; }
+
+/* two-column */
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; align-items: start; }
+.cols.tight { gap: 12px; }
+
+/* footer */
+.foot { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12px; }
+
+/* index cards */
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+a.tile {
+  display: block; background: #fff; border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 22px 24px; color: inherit; transition: .16s ease; height: 100%;
+  box-shadow: 0 1px 2px rgba(15,23,42,.03);
+}
+a.tile:hover { text-decoration: none; border-color: #c7d2fe; transform: translateY(-2px);
+               box-shadow: 0 10px 30px -18px rgba(67,56,202,.45); }
+a.tile .n { font-size: 11.5px; color: var(--indigo); font-weight: 700; letter-spacing: .1em; }
+a.tile h3 { margin: 8px 0 6px; font-size: 16.5px; color: var(--ink); }
+a.tile p { margin: 0; font-size: 13px; color: var(--muted); }
+a.tile .spark { margin-top: 16px; height: 42px; }
+
+@media print {
+  body { background: #fff; }
+  .page { max-width: none; padding: 0; }
+  .nav { display: none; }
+  .card { box-shadow: none; break-inside: avoid; }
+  section { break-inside: avoid; }
+}
+@media (max-width: 720px) {
+  .page { padding: 24px 16px 64px; }
+  h1 { font-size: 25px; }
+  .card { padding: 18px 16px; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+<nav class="nav"><a href="index.html" class="">总览</a><a href="01_winograd_principles.html" class="">① Winograd 原理</a><a href="02_system_architecture.html" class="">② 系统结构</a><a href="03_sme_gemm.html" class="">③ SME 内核</a><a href="04_performance.html" class="">④ 性能结果</a><a href="05_acl_comparison.html" class="">⑤ 与 ACL 对比</a><a href="06_timing.html" class="on">⑥ 步耗时</a><a href="07_methodology.html" class="">⑦ 测量口径</a><a href="08_roadmap.html" class="">⑧ 演进路线</a><a href="09_bench_shapes.html" class="">⑨ 用例集</a></nav>
+<header>
+  <div class="eyebrow">Winograd 卷积复刻项目 · 图示</div>
+  <h1>⑥ 步耗时拆解与并行效率</h1>
+  <p class="lede">哪里真的花时间：GEMM 的份额随形状从 11% 到 74%，而 16 线程只拿到 7–13×。</p>
+</header>
+
+<section><h2><span class="idx">01</span>8 步拆解：时间到底花在哪</h2><p class="sub">条长 = 占 timing 总时间 S 的比例；「计算」= GEMM + Weight。</p><div class="card"><svg class="chart" viewBox="0 0 1140 366" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><text x="214.0" y="20.0" font-size="11" fill="#64748b" text-anchor="start" font-weight="400" >占 timing 总时间 S 的比例</text><rect x="214.0" y="46.0" width="864.0" height="16.0" rx="2" fill="#f1f5f9" /><rect x="214.0" y="46.0" width="293.0" height="16.0" rx="1" fill="#4338ca"><title>GEMM 7.55 ms（34%）</title></rect><rect x="507.0" y="46.0" width="70.6" height="16.0" rx="1" fill="#818cf8"><title>Weight 1.82 ms（8%）</title></rect><rect x="577.7" y="46.0" width="104.4" height="16.0" rx="1" fill="#0f766e"><title>InXform 2.69 ms（12%）</title></rect><rect x="682.1" y="46.0" width="79.2" height="16.0" rx="1" fill="#2dd4bf"><title>OutXform 2.04 ms（9%）</title></rect><rect x="761.3" y="46.0" width="36.5" height="16.0" rx="1" fill="#b45309"><title>TileExt 0.94 ms（4%）</title></rect><rect x="797.8" y="46.0" width="58.6" height="16.0" rx="1" fill="#f59e0b"><title>InScat 1.51 ms（7%）</title></rect><rect x="856.4" y="46.0" width="42.7" height="16.0" rx="1" fill="#be123c"><title>OutGath 1.10 ms（5%）</title></rect><rect x="899.1" y="46.0" width="19.0" height="16.0" rx="1" fill="#fb7185"><title>OutWrite 0.49 ms（2%）</title></rect><text x="202.0" y="57.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >4·192·40·40·192</text><text x="202.0" y="72.0" font-size="9.5" fill="#94a3b8" text-anchor="end" font-weight="400" >#0 · 100 tiles · IC 192</text><text x="1086.0" y="58.0" font-size="10.5" fill="#475569" text-anchor="start" font-weight="700" >计算 42%</text><rect x="214.0" y="80.0" width="864.0" height="16.0" rx="2" fill="#f1f5f9" /><rect x="214.0" y="80.0" width="637.6" height="16.0" rx="1" fill="#4338ca"><title>GEMM 29.32 ms（74%）</title></rect><rect x="851.6" y="80.0" width="204.9" height="16.0" rx="1" fill="#818cf8"><title>Weight 9.42 ms（24%）</title></rect><rect x="1056.5" y="80.0" width="7.4" height="16.0" rx="1" fill="#0f766e"><title>InXform 0.34 ms（1%）</title></rect><rect x="1063.9" y="80.0" width="6.1" height="16.0" rx="1" fill="#2dd4bf"><title>OutXform 0.28 ms（1%）</title></rect><rect x="1070.0" y="80.0" width="2.0" height="16.0" rx="1" fill="#b45309"><title>TileExt 0.09 ms（0%）</title></rect><rect x="1071.9" y="80.0" width="1.1" height="16.0" rx="1" fill="#f59e0b"><title>InScat 0.05 ms（0%）</title></rect><rect x="1073.0" y="80.0" width="3.5" height="16.0" rx="1" fill="#be123c"><title>OutGath 0.16 ms（0%）</title></rect><rect x="1076.5" y="80.0" width="0.7" height="16.0" rx="1" fill="#fb7185"><title>OutWrite 0.03 ms（0%）</title></rect><text x="202.0" y="91.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >4·512·7·7·512</text><text x="202.0" y="106.0" font-size="9.5" fill="#94a3b8" text-anchor="end" font-weight="400" >#16 · 4 tiles · IC 512</text><text x="1086.0" y="92.0" font-size="10.5" fill="#4338ca" text-anchor="start" font-weight="700" >计算 98%</text><rect x="214.0" y="114.0" width="864.0" height="16.0" rx="2" fill="#f1f5f9" /><rect x="214.0" y="114.0" width="429.7" height="16.0" rx="1" fill="#4338ca"><title>GEMM 33.96 ms（50%）</title></rect><rect x="643.7" y="114.0" width="423.7" height="16.0" rx="1" fill="#818cf8"><title>Weight 33.49 ms（49%）</title></rect><rect x="1067.4" y="114.0" width="6.1" height="16.0" rx="1" fill="#0f766e"><title>InXform 0.48 ms（1%）</title></rect><rect x="1073.4" y="114.0" width="0.9" height="16.0" rx="1" fill="#2dd4bf"><title>OutXform 0.07 ms（0%）</title></rect><rect x="1074.3" y="114.0" width="1.0" height="16.0" rx="1" fill="#b45309"><title>TileExt 0.08 ms（0%）</title></rect><rect x="1075.3" y="114.0" width="1.5" height="16.0" rx="1" fill="#f59e0b"><title>InScat 0.12 ms（0%）</title></rect><rect x="1076.9" y="114.0" width="0.5" height="16.0" rx="1" fill="#be123c"><title>OutGath 0.04 ms（0%）</title></rect><text x="202.0" y="125.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >1·2048·7·7·512</text><text x="202.0" y="140.0" font-size="9.5" fill="#94a3b8" text-anchor="end" font-weight="400" >#20 · 4 tiles · IC 2048</text><text x="1086.0" y="126.0" font-size="10.5" fill="#4338ca" text-anchor="start" font-weight="700" >计算 99%</text><rect x="214.0" y="148.0" width="864.0" height="16.0" rx="2" fill="#f1f5f9" /><rect x="214.0" y="148.0" width="550.9" height="16.0" rx="1" fill="#4338ca"><title>GEMM 35.30 ms（64%）</title></rect><rect x="764.9" y="148.0" width="137.0" height="16.0" rx="1" fill="#818cf8"><title>Weight 8.78 ms（16%）</title></rect><rect x="902.0" y="148.0" width="54.0" height="16.0" rx="1" fill="#0f766e"><title>InXform 3.46 ms（6%）</title></rect><rect x="956.0" y="148.0" width="43.9" height="16.0" rx="1" fill="#2dd4bf"><title>OutXform 2.81 ms（5%）</title></rect><rect x="999.8" y="148.0" width="19.2" height="16.0" rx="1" fill="#b45309"><title>TileExt 1.23 ms（2%）</title></rect><rect x="1019.0" y="148.0" width="24.8" height="16.0" rx="1" fill="#f59e0b"><title>InScat 1.59 ms（3%）</title></rect><rect x="1043.8" y="148.0" width="24.2" height="16.0" rx="1" fill="#be123c"><title>OutGath 1.55 ms（3%）</title></rect><rect x="1068.0" y="148.0" width="7.3" height="16.0" rx="1" fill="#fb7185"><title>OutWrite 0.47 ms（1%）</title></rect><text x="202.0" y="159.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >4·512·28·28·512</text><text x="202.0" y="174.0" font-size="9.5" fill="#94a3b8" text-anchor="end" font-weight="400" >#28 · 49 tiles · IC 512</text><text x="1086.0" y="160.0" font-size="10.5" fill="#4338ca" text-anchor="start" font-weight="700" >计算 80%</text><rect x="214.0" y="182.0" width="864.0" height="16.0" rx="2" fill="#f1f5f9" /><rect x="214.0" y="182.0" width="272.7" height="16.0" rx="1" fill="#4338ca"><title>GEMM 25.31 ms（32%）</title></rect><rect x="486.7" y="182.0" width="6.2" height="16.0" rx="1" fill="#818cf8"><title>Weight 0.58 ms（1%）</title></rect><rect x="492.9" y="182.0" width="156.3" height="16.0" rx="1" fill="#0f766e"><title>InXform 14.51 ms（18%）</title></rect><rect x="649.3" y="182.0" width="121.0" height="16.0" rx="1" fill="#2dd4bf"><title>OutXform 11.23 ms（14%）</title></rect><rect x="770.3" y="182.0" width="58.4" height="16.0" rx="1" fill="#b45309"><title>TileExt 5.42 ms（7%）</title></rect><rect x="828.7" y="182.0" width="172.4" height="16.0" rx="1" fill="#f59e0b"><title>InScat 16.00 ms（20%）</title></rect><rect x="1001.1" y="182.0" width="32.5" height="16.0" rx="1" fill="#be123c"><title>OutGath 3.02 ms（4%）</title></rect><rect x="1033.6" y="182.0" width="35.7" height="16.0" rx="1" fill="#fb7185"><title>OutWrite 3.31 ms（4%）</title></rect><text x="202.0" y="193.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >4·128·112·112·128</text><text x="202.0" y="208.0" font-size="9.5" fill="#94a3b8" text-anchor="end" font-weight="400" >#24 · 784 tiles · IC 128</text><text x="1086.0" y="194.0" font-size="10.5" fill="#0f766e" text-anchor="start" font-weight="700" >计算 32%</text><rect x="214.0" y="216.0" width="864.0" height="16.0" rx="2" fill="#f1f5f9" /><rect x="214.0" y="216.0" width="424.7" height="16.0" rx="1" fill="#4338ca"><title>GEMM 77.61 ms（49%）</title></rect><rect x="638.7" y="216.0" width="33.2" height="16.0" rx="1" fill="#818cf8"><title>Weight 6.07 ms（4%）</title></rect><rect x="671.9" y="216.0" width="113.9" height="16.0" rx="1" fill="#0f766e"><title>InXform 20.81 ms（13%）</title></rect><rect x="785.8" y="216.0" width="89.5" height="16.0" rx="1" fill="#2dd4bf"><title>OutXform 16.35 ms（10%）</title></rect><rect x="875.3" y="216.0" width="42.8" height="16.0" rx="1" fill="#b45309"><title>TileExt 7.82 ms（5%）</title></rect><rect x="918.0" y="216.0" width="67.1" height="16.0" rx="1" fill="#f59e0b"><title>InScat 12.26 ms（8%）</title></rect><rect x="985.1" y="216.0" width="45.3" height="16.0" rx="1" fill="#be123c"><title>OutGath 8.28 ms（5%）</title></rect><rect x="1030.4" y="216.0" width="16.5" height="16.0" rx="1" fill="#fb7185"><title>OutWrite 3.01 ms（2%）</title></rect><text x="202.0" y="227.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >4·384·80·80·384</text><text x="202.0" y="242.0" font-size="9.5" fill="#94a3b8" text-anchor="end" font-weight="400" >#54 · 400 tiles · IC 384</text><text x="1086.0" y="228.0" font-size="10.5" fill="#475569" text-anchor="start" font-weight="700" >计算 53%</text><rect x="214.0" y="250.0" width="864.0" height="16.0" rx="2" fill="#f1f5f9" /><rect x="214.0" y="250.0" width="415.1" height="16.0" rx="1" fill="#4338ca"><title>GEMM 253.00 ms（48%）</title></rect><rect x="629.1" y="250.0" width="5.8" height="16.0" rx="1" fill="#818cf8"><title>Weight 3.54 ms（1%）</title></rect><rect x="634.9" y="250.0" width="135.6" height="16.0" rx="1" fill="#0f766e"><title>InXform 82.64 ms（16%）</title></rect><rect x="770.5" y="250.0" width="106.9" height="16.0" rx="1" fill="#2dd4bf"><title>OutXform 65.18 ms（12%）</title></rect><rect x="877.4" y="250.0" width="48.3" height="16.0" rx="1" fill="#b45309"><title>TileExt 29.43 ms（6%）</title></rect><rect x="925.7" y="250.0" width="56.4" height="16.0" rx="1" fill="#f59e0b"><title>InScat 34.40 ms（7%）</title></rect><rect x="982.1" y="250.0" width="58.0" height="16.0" rx="1" fill="#be123c"><title>OutGath 35.33 ms（7%）</title></rect><rect x="1040.1" y="250.0" width="19.9" height="16.0" rx="1" fill="#fb7185"><title>OutWrite 12.10 ms（2%）</title></rect><text x="202.0" y="261.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >4·384·160·160·384</text><text x="202.0" y="276.0" font-size="9.5" fill="#94a3b8" text-anchor="end" font-weight="400" >#58 · 1600 tiles · IC 384</text><text x="1086.0" y="262.0" font-size="10.5" fill="#475569" text-anchor="start" font-weight="700" >计算 49%</text><rect x="214.0" y="284.0" width="864.0" height="16.0" rx="2" fill="#f1f5f9" /><rect x="214.0" y="284.0" width="93.0" height="16.0" rx="1" fill="#4338ca"><title>GEMM 1.42 ms（11%）</title></rect><rect x="307.0" y="284.0" width="2.0" height="16.0" rx="1" fill="#818cf8"><title>Weight 0.03 ms（0%）</title></rect><rect x="309.0" y="284.0" width="263.3" height="16.0" rx="1" fill="#0f766e"><title>InXform 4.02 ms（30%）</title></rect><rect x="572.3" y="284.0" width="176.2" height="16.0" rx="1" fill="#2dd4bf"><title>OutXform 2.69 ms（20%）</title></rect><rect x="748.5" y="284.0" width="46.5" height="16.0" rx="1" fill="#b45309"><title>TileExt 0.71 ms（5%）</title></rect><rect x="795.0" y="284.0" width="88.4" height="16.0" rx="1" fill="#f59e0b"><title>InScat 1.35 ms（10%）</title></rect><rect x="883.5" y="284.0" width="121.2" height="16.0" rx="1" fill="#be123c"><title>OutGath 1.85 ms（14%）</title></rect><rect x="1004.6" y="284.0" width="39.3" height="16.0" rx="1" fill="#fb7185"><title>OutWrite 0.60 ms（5%）</title></rect><text x="202.0" y="295.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >1·16·224·224·16</text><text x="202.0" y="310.0" font-size="9.5" fill="#94a3b8" text-anchor="end" font-weight="400" >#33 · 3136 tiles · IC 16</text><text x="1086.0" y="296.0" font-size="10.5" fill="#0f766e" text-anchor="start" font-weight="700" >计算 11%</text><rect x="214.0" y="334.0" width="9.0" height="9.0" rx="2" fill="#4338ca" /><text x="228.0" y="342.0" font-size="10" fill="#64748b" text-anchor="start" font-weight="400" >GEMM</text><rect x="288.0" y="334.0" width="9.0" height="9.0" rx="2" fill="#818cf8" /><text x="302.0" y="342.0" font-size="10" fill="#64748b" text-anchor="start" font-weight="400" >Weight</text><rect x="362.0" y="334.0" width="9.0" height="9.0" rx="2" fill="#0f766e" /><text x="376.0" y="342.0" font-size="10" fill="#64748b" text-anchor="start" font-weight="400" >InXform</text><rect x="436.0" y="334.0" width="9.0" height="9.0" rx="2" fill="#2dd4bf" /><text x="450.0" y="342.0" font-size="10" fill="#64748b" text-anchor="start" font-weight="400" >OutXform</text><rect x="510.0" y="334.0" width="9.0" height="9.0" rx="2" fill="#b45309" /><text x="524.0" y="342.0" font-size="10" fill="#64748b" text-anchor="start" font-weight="400" >TileExt</text><rect x="584.0" y="334.0" width="9.0" height="9.0" rx="2" fill="#f59e0b" /><text x="598.0" y="342.0" font-size="10" fill="#64748b" text-anchor="start" font-weight="400" >InScat</text><rect x="658.0" y="334.0" width="9.0" height="9.0" rx="2" fill="#be123c" /><text x="672.0" y="342.0" font-size="10" fill="#64748b" text-anchor="start" font-weight="400" >OutGath</text><rect x="732.0" y="334.0" width="9.0" height="9.0" rx="2" fill="#fb7185" /><text x="746.0" y="342.0" font-size="10" fill="#64748b" text-anchor="start" font-weight="400" >OutWrite</text><text x="1078.0" y="342.0" font-size="10" fill="#94a3b8" text-anchor="end" font-weight="400" >「计算」= GEMM + Weight</text></svg>
+<p style="margin:14px 0 0;font-size:12.5px;color:#64748b">
+数据来自 <code>bench_winograd --timing</code>（warmup 10 / repeats 50 / best-of）。
+8 个代表形状覆盖三种形态：小图深通道、均衡真实 CNN、大图浅通道。</p></div></section>
+
+<section><h2><span class="idx">02</span>三种形态</h2><p class="sub">GEMM 是第一大头，但只在特定形态里垄断；多数真实 shape 是五五开。</p><div class="cols">
+<div class="card"><h3>① 小图深通道：计算垄断</h3>
+<p style="margin:0 0 10px;font-size:13.5px">7² / 14² 且 IC、OC ≥ 512 时，GEMM + Weight 合计占 <b>97–99%</b>。
+但这不是「算得多」，而是「算得低效」——见下一节。</p>
+<p style="margin:0;font-size:12.5px;color:#64748b">代表：#15 #16 #20 #28 #29 #30</p></div>
+<div class="card"><h3>② 均衡：真实 CNN 主体</h3>
+<p style="margin:0 0 10px;font-size:13.5px">GEMM <b>33–50%</b>，变换 + 数据搬移占另一半。
+优化必须同时打两侧，只换 GEMM 库最多拿到一半收益。</p>
+<p style="margin:0;font-size:12.5px;color:#64748b">代表：#0 #2 #22 #24 #53 #54 #57 #58</p></div>
+<div class="card"><h3>③ 大图浅通道：变换主导</h3>
+<p style="margin:0 0 10px;font-size:13.5px">IC=16 的 224² 上 GEMM 只占 <b>11%</b>，
+InXform / OutXform / TileExt 才是大头——这类形状拼的是内核展开与访存。</p>
+<p style="margin:0;font-size:12.5px;color:#64748b">代表：#31 #33 #34</p></div>
+</div></section>
+
+<section><h2><span class="idx">03</span>机制：小 GEMM 的核效率崩塌</h2><p class="sub">同一个 OpenBLAS 内核，n=4 时只剩 ~7% 的核效率。</p><div class="cols">
+<div class="card"><svg class="chart" viewBox="0 0 620 190" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><text x="136.0" y="51.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >1600×384×384</text><rect x="148.0" y="39.0" width="325.4" height="20.0" rx="3" fill="#4338ca"><title>1600×384×384: 134 GFLOPS</title></rect><text x="481.4" y="54.0" font-size="11.5" fill="#4338ca" text-anchor="start" font-weight="700" >134 GFLOPS</text><text x="136.0" y="95.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >100×192×192</text><rect x="148.0" y="83.0" width="340.0" height="20.0" rx="3" fill="#4338ca"><title>100×192×192: 140 GFLOPS</title></rect><text x="496.0" y="98.0" font-size="11.5" fill="#4338ca" text-anchor="start" font-weight="700" >140 GFLOPS</text><text x="136.0" y="139.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >4×512×512</text><rect x="148.0" y="127.0" width="25.0" height="20.0" rx="3" fill="#be123c"><title>4×512×512: 10.3 GFLOPS</title></rect><text x="181.0" y="142.0" font-size="11.5" fill="#be123c" text-anchor="start" font-weight="700" >10.3 GFLOPS</text><text x="148.0" y="184.0" font-size="11.5" fill="#be123c" text-anchor="start" font-weight="600" >n=4 时只有 ~7% 的核效率：单次调用开销 + 分块失效</text></svg></div>
+<div class="card">
+<p style="margin:0 0 12px;font-size:13.5px">Winograd 把一次卷积拆成 36 个独立 GEMM，每个形状是
+<code>n_tiles × OC × IC</code>。当图像只有 7×7 时，<code>n_tiles = 4</code>，
+GEMM 退化成「4 行」的瘦条：单次调用开销、分块与 pack 成本全部摊不薄。</p>
+<p style="margin:0;font-size:13.5px">这解释了为什么深通道小图 case 里 GEMM 占比高达 74%：
+<b>不是工作量集中，而是效率坍塌</b>。对策是换 JIT 内核（arm_gemm）或让矩阵扩展
+（SME）直接吃掉整个小切片。</p>
+<div class="callout" style="margin-top:14px">最大形状的反例：1600×384×384 达到 134 GFLOPS，
+说明同一内核在大 n 上并不慢——瓶颈是形状，不是库。</div>
+</div>
+</div></section>
+
+<section><h2><span class="idx">04</span>Weight transform：最高性价比的固定开销</h2><p class="sub">权重与图像无关，却每次调用都重算一遍。</p><div class="card">
+<table class="tbl">
+<thead><tr><th>row</th><th>shape</th><th class="r">S (ms)</th><th class="r">T16 (ms)</th>
+<th class="r">Weight 占比</th><th class="r">GEMM 占比</th></tr></thead>
+<tbody><tr><td class="num">#15</td><td>1·512·7·7·512</td><td class="r num">17.32</td><td class="r num">1.527</td><td class="r num em">55%</td><td class="r num">44%</td></tr><tr><td class="num">#13</td><td>1·256·14·14·256</td><td class="r num">3.76</td><td class="r num">0.364</td><td class="r num em">49%</td><td class="r num">37%</td></tr><tr><td class="num">#19</td><td>1·1024·14·14·256</td><td class="r num">18.99</td><td class="r num">1.507</td><td class="r num em">49%</td><td class="r num">44%</td></tr><tr><td class="num">#20</td><td>1·2048·7·7·512</td><td class="r num">68.29</td><td class="r num">5.562</td><td class="r num em">49%</td><td class="r num">50%</td></tr><tr><td class="num">#30</td><td>1·512·7·7·512</td><td class="r num">14.77</td><td class="r num">1.518</td><td class="r num em">48%</td><td class="r num">50%</td></tr><tr><td class="num">#29</td><td>1·512·14·14·512</td><td class="r num">14.83</td><td class="r num">1.542</td><td class="r num em">44%</td><td class="r num">50%</td></tr><tr><td class="num">#27</td><td>1·512·28·28·512</td><td class="r num">18.57</td><td class="r num">1.909</td><td class="r num em">35%</td><td class="r num">49%</td></tr><tr><td class="num">#42</td><td>1·48·20·20·48</td><td class="r num">0.36</td><td class="r num">0.066</td><td class="r num em">28%</td><td class="r num">28%</td></tr></tbody></table>
+<div class="callout teal" style="margin-top:16px">
+<b>V 跨调用缓存已落地：</b>按「权重指针 + 64 点内容指纹 + shape + F44 + ISA」做 key，
+KML t16 几何平均 <b>1.07x</b>、最高 <b>1.74x</b>；<code>WINO_V_CACHE=0</code> 可关闭。
+剩余问题：<code>kMaxEntries = 24</code> 且无淘汰，59 层的网络从第 25 层起不再命中——
+这就是路线图里「V 缓存加 LRU」的由来。</div>
+</div></section>
+
+<section><h2><span class="idx">05</span>并行效率：16 线程拿不到 16×</h2><p class="sub">eff = (T1/16) / T16；1.0 表示完美线性扩展。</p><div class="cols">
+<div class="card"><svg class="chart" viewBox="0 0 700 330" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><line x1="56.0" y1="278.0" x2="676.0" y2="278.0" stroke="#e6eaf2" stroke-width="1.0" /><text x="48.0" y="282.0" font-size="10" fill="#94a3b8" text-anchor="end" font-weight="400" >0.0</text><line x1="56.0" y1="228.4" x2="676.0" y2="228.4" stroke="#e6eaf2" stroke-width="1.0" /><text x="48.0" y="232.4" font-size="10" fill="#94a3b8" text-anchor="end" font-weight="400" >0.2</text><line x1="56.0" y1="178.8" x2="676.0" y2="178.8" stroke="#e6eaf2" stroke-width="1.0" /><text x="48.0" y="182.8" font-size="10" fill="#94a3b8" text-anchor="end" font-weight="400" >0.4</text><line x1="56.0" y1="129.2" x2="676.0" y2="129.2" stroke="#e6eaf2" stroke-width="1.0" /><text x="48.0" y="133.2" font-size="10" fill="#94a3b8" text-anchor="end" font-weight="400" >0.6</text><line x1="56.0" y1="79.6" x2="676.0" y2="79.6" stroke="#e6eaf2" stroke-width="1.0" /><text x="48.0" y="83.6" font-size="10" fill="#94a3b8" text-anchor="end" font-weight="400" >0.8</text><line x1="56.0" y1="30.0" x2="676.0" y2="30.0" stroke="#cbd5e1" stroke-width="1.3" stroke-dasharray="4 4" /><text x="48.0" y="34.0" font-size="10" fill="#94a3b8" text-anchor="end" font-weight="400" >1.0</text><line x1="124.9" y1="30.0" x2="124.9" y2="278.0" stroke="#e6eaf2" stroke-width="0.7" /><text x="124.9" y="294.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >16</text><line x1="236.1" y1="30.0" x2="236.1" y2="278.0" stroke="#e6eaf2" stroke-width="0.7" /><text x="236.1" y="294.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >49</text><line x1="307.0" y1="30.0" x2="307.0" y2="278.0" stroke="#e6eaf2" stroke-width="0.7" /><text x="307.0" y="294.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >100</text><line x1="373.9" y1="30.0" x2="373.9" y2="278.0" stroke="#e6eaf2" stroke-width="0.7" /><text x="373.9" y="294.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >196</text><line x1="444.8" y1="30.0" x2="444.8" y2="278.0" stroke="#e6eaf2" stroke-width="0.7" /><text x="444.8" y="294.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >400</text><line x1="511.7" y1="30.0" x2="511.7" y2="278.0" stroke="#e6eaf2" stroke-width="0.7" /><text x="511.7" y="294.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >784</text><line x1="582.6" y1="30.0" x2="582.6" y2="278.0" stroke="#e6eaf2" stroke-width="0.7" /><text x="582.6" y="294.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >1600</text><line x1="649.5" y1="30.0" x2="649.5" y2="278.0" stroke="#e6eaf2" stroke-width="0.7" /><text x="649.5" y="294.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >3136</text><circle cx="307.0" cy="134.2" r="4.2" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#0 4·192·40·40·192
+tiles=100  eff=0.58  16T×=9.2
+S=22.26 ms  GEMM=34%</title></circle><circle cx="444.8" cy="111.8" r="4.3" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#1 4·96·80·80·96
+tiles=400  eff=0.67  16T×=10.7
+S=29.25 ms  GEMM=29%</title></circle><circle cx="582.6" cy="84.6" r="4.8" fill="#0f766e" fill-opacity="0.62" stroke="#0f766e" stroke-width="1"><title>#2 4·48·160·160·48
+tiles=1600  eff=0.78  16T×=12.4
+S=66.22 ms  GEMM=34%</title></circle><circle cx="169.2" cy="124.2" r="3.9" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#3 4·192·20·20·192
+tiles=25  eff=0.62  16T×=9.9
+S=8.33 ms  GEMM=58%</title></circle><circle cx="444.8" cy="82.1" r="4.8" fill="#0f766e" fill-opacity="0.62" stroke="#0f766e" stroke-width="1"><title>#4 4·384·80·80·96
+tiles=400  eff=0.79  16T×=12.6
+S=74.2 ms  GEMM=42%</title></circle><circle cx="307.0" cy="119.3" r="4.5" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#5 4·768·40·40·96
+tiles=100  eff=0.64  16T×=10.2
+S=42.12 ms  GEMM=45%</title></circle><circle cx="169.2" cy="129.2" r="4.1" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#6 4·768·20·20·96
+tiles=25  eff=0.60  16T×=9.7
+S=19.85 ms  GEMM=63%</title></circle><circle cx="307.0" cy="126.7" r="3.9" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#7 4·96·40·40·96
+tiles=100  eff=0.61  16T×=9.7
+S=9.16 ms  GEMM=42%</title></circle><circle cx="169.2" cy="163.9" r="3.7" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#8 4·96·20·20·96
+tiles=25  eff=0.46  16T×=7.4
+S=2.89 ms  GEMM=45%</title></circle><circle cx="373.9" cy="126.7" r="3.7" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#9 1·64·56·56·64
+tiles=196  eff=0.61  16T×=9.7
+S=2.49 ms  GEMM=29%</title></circle><circle cx="373.9" cy="111.8" r="3.9" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#10 4·64·56·56·64
+tiles=196  eff=0.67  16T×=10.7
+S=10.62 ms  GEMM=34%</title></circle><circle cx="236.1" cy="154.0" r="3.7" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#11 1·128·28·28·128
+tiles=49  eff=0.50  16T×=8.0
+S=2.38 ms  GEMM=38%</title></circle><circle cx="236.1" cy="141.6" r="3.9" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#12 4·128·28·28·128
+tiles=49  eff=0.55  16T×=8.9
+S=7.74 ms  GEMM=49%</title></circle><circle cx="124.9" cy="151.5" r="3.7" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#13 1·256·14·14·256
+tiles=16  eff=0.51  16T×=8.2
+S=3.76 ms  GEMM=37%</title></circle><circle cx="124.9" cy="146.6" r="3.9" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#14 4·256·14·14·256
+tiles=16  eff=0.53  16T×=8.5
+S=9.13 ms  GEMM=60%</title></circle><circle cx="56.0" cy="134.2" r="4.1" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#15 1·512·7·7·512
+tiles=4  eff=0.58  16T×=9.2
+S=17.32 ms  GEMM=44%</title></circle><circle cx="56.0" cy="124.2" r="4.5" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#16 4·512·7·7·512
+tiles=4  eff=0.62  16T×=10.0
+S=39.73 ms  GEMM=74%</title></circle><circle cx="373.9" cy="126.7" r="3.9" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#17 1·256·56·56·64
+tiles=196  eff=0.61  16T×=9.7
+S=7.36 ms  GEMM=33%</title></circle><circle cx="236.1" cy="139.1" r="3.8" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#18 1·512·28·28·128
+tiles=49  eff=0.56  16T×=8.9
+S=6.58 ms  GEMM=43%</title></circle><circle cx="124.9" cy="134.2" r="4.1" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#19 1·1024·14·14·256
+tiles=16  eff=0.58  16T×=9.3
+S=18.99 ms  GEMM=44%</title></circle><circle cx="56.0" cy="111.8" r="4.8" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#20 1·2048·7·7·512
+tiles=4  eff=0.67  16T×=10.6
+S=68.29 ms  GEMM=50%</title></circle><circle cx="649.5" cy="74.6" r="4.5" fill="#0f766e" fill-opacity="0.62" stroke="#0f766e" stroke-width="1"><title>#21 1·64·224·224·64
+tiles=3136  eff=0.82  16T×=13.0
+S=42.53 ms  GEMM=28%</title></circle><circle cx="649.5" cy="74.6" r="5.4" fill="#0f766e" fill-opacity="0.62" stroke="#0f766e" stroke-width="1"><title>#22 4·64·224·224·64
+tiles=3136  eff=0.82  16T×=13.2
+S=143.38 ms  GEMM=32%</title></circle><circle cx="511.7" cy="89.5" r="4.2" fill="#0f766e" fill-opacity="0.62" stroke="#0f766e" stroke-width="1"><title>#23 1·128·112·112·128
+tiles=784  eff=0.76  16T×=12.1
+S=20.87 ms  GEMM=31%</title></circle><circle cx="511.7" cy="84.6" r="4.9" fill="#0f766e" fill-opacity="0.62" stroke="#0f766e" stroke-width="1"><title>#24 4·128·112·112·128
+tiles=784  eff=0.78  16T×=12.5
+S=80.19 ms  GEMM=32%</title></circle><circle cx="373.9" cy="111.8" r="4.0" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#25 1·256·56·56·256
+tiles=196  eff=0.67  16T×=10.6
+S=12.85 ms  GEMM=44%</title></circle><circle cx="373.9" cy="106.9" r="4.5" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#26 4·256·56·56·256
+tiles=196  eff=0.69  16T×=11.0
+S=45.05 ms  GEMM=50%</title></circle><circle cx="236.1" cy="134.2" r="4.1" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#27 1·512·28·28·512
+tiles=49  eff=0.58  16T×=9.2
+S=18.57 ms  GEMM=49%</title></circle><circle cx="236.1" cy="124.2" r="4.6" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#28 4·512·28·28·512
+tiles=49  eff=0.62  16T×=9.9
+S=55.36 ms  GEMM=64%</title></circle><circle cx="124.9" cy="131.7" r="4.0" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#29 1·512·14·14·512
+tiles=16  eff=0.59  16T×=9.4
+S=14.83 ms  GEMM=50%</title></circle><circle cx="56.0" cy="131.7" r="4.0" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#30 1·512·7·7·512
+tiles=4  eff=0.59  16T×=9.4
+S=14.77 ms  GEMM=50%</title></circle><circle cx="511.7" cy="97.0" r="3.8" fill="#0f766e" fill-opacity="0.62" stroke="#0f766e" stroke-width="1"><title>#31 1·32·112·112·32
+tiles=784  eff=0.73  16T×=11.7
+S=6.91 ms  GEMM=11%</title></circle><circle cx="373.9" cy="126.7" r="3.6" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#32 1·64·56·56·32
+tiles=196  eff=0.61  16T×=9.7
+S=1.98 ms  GEMM=21%</title></circle><circle cx="649.5" cy="84.6" r="4.0" fill="#0f766e" fill-opacity="0.62" stroke="#0f766e" stroke-width="1"><title>#33 1·16·224·224·16
+tiles=3136  eff=0.78  16T×=12.5
+S=13.19 ms  GEMM=11%</title></circle><circle cx="400.4" cy="119.3" r="3.6" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#34 1·32·64·64·32
+tiles=256  eff=0.64  16T×=10.3
+S=2.22 ms  GEMM=12%</title></circle><circle cx="373.9" cy="104.4" r="5.0" fill="#0f766e" fill-opacity="0.62" stroke="#0f766e" stroke-width="1"><title>#35 32·64·56·56·64
+tiles=196  eff=0.70  16T×=11.3
+S=89.09 ms  GEMM=38%</title></circle><circle cx="236.1" cy="126.7" r="4.3" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#36 16·128·28·28·128
+tiles=49  eff=0.61  16T×=9.7
+S=27.22 ms  GEMM=58%</title></circle><circle cx="307.0" cy="136.6" r="4.4" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#37 8·192·40·40·192
+tiles=100  eff=0.57  16T×=9.1
+S=35.64 ms  GEMM=41%</title></circle><circle cx="307.0" cy="139.1" r="4.3" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#38 32·48·40·40·48
+tiles=100  eff=0.56  16T×=8.9
+S=31.38 ms  GEMM=31%</title></circle><circle cx="124.9" cy="245.8" r="3.4" fill="#be123c" fill-opacity="0.62" stroke="#be123c" stroke-width="1"><title>#39 1·8·16·16·8
+tiles=16  eff=0.13  16T×=2.1
+S=0.08 ms  GEMM=13%</title></circle><circle cx="262.7" cy="225.9" r="3.5" fill="#be123c" fill-opacity="0.62" stroke="#be123c" stroke-width="1"><title>#40 1·16·32·32·16
+tiles=64  eff=0.21  16T×=3.4
+S=0.22 ms  GEMM=9%</title></circle><circle cx="262.7" cy="188.7" r="3.5" fill="#be123c" fill-opacity="0.62" stroke="#be123c" stroke-width="1"><title>#41 1·32·32·32·32
+tiles=64  eff=0.36  16T×=5.7
+S=0.57 ms  GEMM=12%</title></circle><circle cx="169.2" cy="198.6" r="3.5" fill="#be123c" fill-opacity="0.62" stroke="#be123c" stroke-width="1"><title>#42 1·48·20·20·48
+tiles=25  eff=0.32  16T×=5.1
+S=0.36 ms  GEMM=28%</title></circle><circle cx="169.2" cy="196.2" r="3.6" fill="#be123c" fill-opacity="0.62" stroke="#be123c" stroke-width="1"><title>#43 4·48·20·20·48
+tiles=25  eff=0.33  16T×=5.3
+S=1.07 ms  GEMM=36%</title></circle><circle cx="169.2" cy="159.0" r="3.7" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#44 4·96·20·20·96
+tiles=25  eff=0.48  16T×=7.7
+S=2.81 ms  GEMM=44%</title></circle><circle cx="169.2" cy="126.7" r="3.9" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#45 4·192·20·20·192
+tiles=25  eff=0.61  16T×=9.8
+S=8.15 ms  GEMM=60%</title></circle><circle cx="169.2" cy="121.8" r="4.2" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#46 4·384·20·20·384
+tiles=25  eff=0.63  16T×=10.1
+S=22.94 ms  GEMM=64%</title></circle><circle cx="307.0" cy="141.6" r="3.7" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#47 4·48·40·40·48
+tiles=100  eff=0.55  16T×=8.8
+S=4.35 ms  GEMM=38%</title></circle><circle cx="307.0" cy="124.2" r="3.9" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#48 4·96·40·40·96
+tiles=100  eff=0.62  16T×=9.9
+S=9.91 ms  GEMM=44%</title></circle><circle cx="307.0" cy="136.6" r="4.1" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#49 4·192·40·40·192
+tiles=100  eff=0.57  16T×=9.2
+S=18.36 ms  GEMM=40%</title></circle><circle cx="307.0" cy="116.8" r="4.5" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#50 4·384·40·40·384
+tiles=100  eff=0.65  16T×=10.4
+S=45.97 ms  GEMM=58%</title></circle><circle cx="444.8" cy="94.5" r="4.1" fill="#0f766e" fill-opacity="0.62" stroke="#0f766e" stroke-width="1"><title>#51 4·48·80·80·48
+tiles=400  eff=0.74  16T×=11.8
+S=17.02 ms  GEMM=34%</title></circle><circle cx="444.8" cy="111.8" r="4.3" fill="#818cf8" fill-opacity="0.62" stroke="#818cf8" stroke-width="1"><title>#52 4·96·80·80·96
+tiles=400  eff=0.67  16T×=10.8
+S=29.44 ms  GEMM=29%</title></circle><circle cx="444.8" cy="94.5" r="4.8" fill="#0f766e" fill-opacity="0.62" stroke="#0f766e" stroke-width="1"><title>#53 4·192·80·80·192
+tiles=400  eff=0.74  16T×=11.9
+S=67.2 ms  GEMM=39%</title></circle><circle cx="444.8" cy="87.0" r="5.5" fill="#0f766e" fill-opacity="0.62" stroke="#0f766e" stroke-width="1"><title>#54 4·384·80·80·384
+tiles=400  eff=0.77  16T×=12.3
+S=157.89 ms  GEMM=49%</title></circle><circle cx="582.6" cy="84.6" r="4.8" fill="#0f766e" fill-opacity="0.62" stroke="#0f766e" stroke-width="1"><title>#55 4·48·160·160·48
+tiles=1600  eff=0.78  16T×=12.5
+S=67.75 ms  GEMM=33%</title></circle><circle cx="582.6" cy="72.2" r="5.1" fill="#0f766e" fill-opacity="0.62" stroke="#0f766e" stroke-width="1"><title>#56 4·96·160·160·96
+tiles=1600  eff=0.83  16T×=13.3
+S=106.25 ms  GEMM=36%</title></circle><circle cx="582.6" cy="77.1" r="6.0" fill="#0f766e" fill-opacity="0.62" stroke="#0f766e" stroke-width="1"><title>#57 4·192·160·160·192
+tiles=1600  eff=0.81  16T×=13.0
+S=247.18 ms  GEMM=39%</title></circle><circle cx="582.6" cy="77.1" r="7.2" fill="#0f766e" fill-opacity="0.62" stroke="#0f766e" stroke-width="1"><title>#58 4·384·160·160·384
+tiles=1600  eff=0.81  16T×=12.9
+S=526.63 ms  GEMM=48%</title></circle><text x="672.0" y="44.0" font-size="9.5" fill="#94a3b8" text-anchor="end" font-weight="400" >理想 = 1.0（16 线程线性扩展）</text><text x="676.0" y="322.0" font-size="10.5" fill="#94a3b8" text-anchor="end" font-weight="400" >tile 数（对数轴）· 点径 ∝ √S</text><text x="56.0" y="18.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="700" >16 线程并行效率</text><rect x="486.0" y="10.0" width="9.0" height="9.0" rx="2" fill="#0f766e" /><text x="499.0" y="18.0" font-size="9.5" fill="#475569" text-anchor="start" font-weight="400" >≥0.70</text><rect x="548.0" y="10.0" width="9.0" height="9.0" rx="2" fill="#818cf8" /><text x="561.0" y="18.0" font-size="9.5" fill="#475569" text-anchor="start" font-weight="400" >0.40–0.70</text><rect x="632.0" y="10.0" width="9.0" height="9.0" rx="2" fill="#be123c" /><text x="645.0" y="18.0" font-size="9.5" fill="#475569" text-anchor="start" font-weight="400" >&lt;0.40</text></svg></div>
+<div class="card">
+<p style="margin:0 0 12px;font-size:13.5px">59 个形状的 eff 落在 <b>0.13–0.83</b>：
+大形状 0.77–0.83，小形状 0.46–0.58，微负载（#39，S=0.08 ms）只有 0.13。</p>
+<p style="margin:0 0 12px;font-size:13.5px">净并行开销 <code>T16 − T1/16</code> 占 T16 的
+<b>19–42%</b>：粗粒度 OpenMP + 2 次 barrier + 无 L3 的 NUMA 流量，都不是免费的。</p>
+<div class="callout">
+<b>判读提醒：</b>「我们的调度比 oneDNN 便宜」这类结论，必须用<b>同 shape 的双方线程扩展曲线</b>
+作对照；只看自己这组 eff 不足以归因。</div>
+</div>
+</div></section>
+
+<section><h2><span class="idx">06</span>两处必须知道的测量偏差</h2><p class="sub">占比结构可信；绝对耗时以 T1 为准；内存步的重复测量差异可达 88%。</p><div class="cols">
+<div class="card"><h3>S（timing）vs T1（真实单线程）</h3>
+<table class="tbl">
+<thead><tr><th>row</th><th class="r">S</th><th class="r">T1</th><th class="r">残差</th><th class="r">残差/S</th></tr></thead>
+<tbody>
+<tr><td class="num">#0</td><td class="r num">22.26</td><td class="r num">17.55</td><td class="r num">4.7</td><td class="r num warn">27%</td></tr>
+<tr><td class="num">#54</td><td class="r num">157.89</td><td class="r num">141.67</td><td class="r num">16.2</td><td class="r num">11%</td></tr>
+<tr><td class="num">#58</td><td class="r num">526.63</td><td class="r num">498.69</td><td class="r num">27.9</td><td class="r num">5.6%</td></tr>
+</tbody></table>
+<p style="margin:12px 0 0;font-size:12.5px;color:#64748b">残差来自 timing 复刻的逐 tile
+<code>std::fill(0)</code>（#58 约 1.2 GB 流量）、每调用 <code>std::vector</code> 分配与 V/U/M 清零。
+<b>大 shape 高估 5–10%，小 shape 高估 ~27%。</b></p></div>
+<div class="card"><h3>同一 shape 的重复测量（#0 vs #49）</h3>
+<table class="tbl">
+<thead><tr><th>步</th><th class="r">#0</th><th class="r">#49</th><th class="r">差异</th></tr></thead>
+<tbody>
+<tr><td>S Total</td><td class="r num">22.26</td><td class="r num">18.36</td><td class="r num warn">21%</td></tr>
+<tr><td>GEMM</td><td class="r num">7.55</td><td class="r num">7.32</td><td class="r num">3%</td></tr>
+<tr><td>InScat</td><td class="r num">1.51</td><td class="r num">2.50</td><td class="r num warn">65%</td></tr>
+<tr><td>Weight</td><td class="r num">1.82</td><td class="r num">0.97</td><td class="r num warn">88%</td></tr>
+</tbody></table>
+<p style="margin:12px 0 0;font-size:12.5px;color:#64748b">两行是同一 shape（4,192,40²,192）。
+<b>GEMM 是稳定列</b>，内存步与 Weight 噪声大；行 0 是进程内首个 shape，冷启动系统性偏高。</p></div>
+</div></section>
+
+<div class="foot">
+  
+  数据来源：<code>docs/final_benchmark_bfd6b1e.md</code>（vs OpenBLAS）、
+  <code>docs/sme_fmopa_gemm.md</code>（SME vs KML）。
+  生成脚本：<code>tools/gen_report_figures.py</code>（本页为静态 HTML，无外部依赖）。
+</div>
+</div>
+</body>
+</html>

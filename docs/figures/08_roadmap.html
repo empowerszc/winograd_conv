@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>⑧ 演进路线与已证伪方向</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; }
+:root {
+  --ink: #0b1220; --slate: #334155; --muted: #64748b; --faint: #94a3b8;
+  --line: #e5e9f2; --bg: #f7f8fc; --card: #ffffff;
+  --indigo: #4338ca; --indigo-2: #6366f1; --indigo-soft: #eef2ff;
+  --teal: #0f766e; --teal-soft: #ecfdf5;
+  --amber: #b45309; --amber-soft: #fffbeb;
+  --rose: #be123c; --rose-soft: #fff1f2;
+  --green: #15803d;
+  --radius: 14px;
+}
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--slate);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 15px; line-height: 1.7;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+}
+.page { max-width: 1220px; margin: 0 auto; padding: 40px 32px 96px; }
+a { color: var(--indigo); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.num { font-variant-numeric: tabular-nums;
+       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+/* nav */
+.nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 34px; }
+.nav a {
+  font-size: 12.5px; padding: 6px 12px; border-radius: 999px;
+  background: #fff; border: 1px solid var(--line); color: var(--muted);
+  transition: .15s ease;
+}
+.nav a:hover { border-color: #c7d2fe; color: var(--indigo); text-decoration: none; }
+.nav a.on { background: var(--indigo); border-color: var(--indigo); color: #fff; }
+
+/* header */
+.eyebrow {
+  font-size: 11.5px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--indigo); font-weight: 700; margin-bottom: 12px;
+}
+h1 { font-size: 32px; line-height: 1.28; margin: 0 0 12px; color: var(--ink); font-weight: 750; letter-spacing: -.01em; }
+.lede { font-size: 15.5px; color: var(--muted); max-width: 78ch; margin: 0 0 22px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12.5px; color: var(--faint); margin-bottom: 44px; }
+.meta b { color: var(--slate); font-weight: 600; }
+
+/* sections */
+section { margin: 0 0 40px; }
+h2 {
+  font-size: 19px; color: var(--ink); font-weight: 700; margin: 0 0 6px;
+  display: flex; align-items: baseline; gap: 10px;
+}
+h2 .idx {
+  font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--indigo);
+  background: var(--indigo-soft); border-radius: 6px; padding: 2px 7px; font-weight: 700;
+}
+.sub { color: var(--muted); font-size: 13.5px; margin: 0 0 18px; max-width: 88ch; }
+h3 { font-size: 15px; color: var(--ink); margin: 26px 0 10px; font-weight: 650; }
+
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 24px 26px; box-shadow: 0 1px 2px rgba(15,23,42,.03), 0 18px 40px -28px rgba(15,23,42,.22);
+}
+.card + .card { margin-top: 16px; }
+.card > h3:first-child { margin-top: 0; }
+
+/* metric strip */
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+.metric {
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px;
+}
+.metric .k { font-size: 11.5px; color: var(--faint); letter-spacing: .04em; text-transform: uppercase; }
+.metric .v { font-size: 27px; font-weight: 750; color: var(--ink); line-height: 1.25; margin-top: 6px; letter-spacing: -.02em; }
+.metric .n { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.metric.hl { border-color: #c7d2fe; background: linear-gradient(180deg, #fbfbff, #fff); }
+.metric.hl .v { color: var(--indigo); }
+
+/* tables */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.tbl th, .tbl td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.tbl th { font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--faint); font-weight: 700; }
+.tbl tr:last-child td { border-bottom: 0; }
+.tbl td.c, .tbl th.c { text-align: center; }
+.tbl td.r, .tbl th.r { text-align: right; }
+.tbl tbody tr:hover { background: #fafbff; }
+.tbl .em { color: var(--indigo); font-weight: 700; }
+.tbl .warn { color: var(--rose); font-weight: 700; }
+
+.tag {
+  display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px;
+  border-radius: 999px; white-space: nowrap;
+}
+.tag.same { background: var(--teal-soft); color: var(--teal); }
+.tag.diff { background: var(--amber-soft); color: var(--amber); }
+.tag.gap  { background: var(--rose-soft); color: var(--rose); }
+.tag.n    { background: #f1f5f9; color: var(--muted); }
+
+/* chart */
+.chart { display: block; width: 100%; height: auto; }
+.diagram { display: block; width: 100%; height: auto; }
+.chart-wrap { overflow-x: auto; }
+
+/* code */
+pre.code {
+  background: #0b1220; color: #dbe4ff; border-radius: 12px; padding: 18px 20px;
+  overflow-x: auto; font-size: 12.5px; line-height: 1.65; margin: 14px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre.code .c { color: #7c8db5; }
+
+/* callout */
+.callout {
+  border-left: 3px solid var(--amber); background: var(--amber-soft);
+  border-radius: 0 10px 10px 0; padding: 16px 20px; font-size: 13.5px; color: #78350f;
+  margin: 16px 0 0;
+}
+.callout.rose { border-color: var(--rose); background: var(--rose-soft); color: #881337; }
+.callout.indigo { border-color: var(--indigo); background: var(--indigo-soft); color: #312e81; }
+.callout.teal { border-color: var(--teal); background: var(--teal-soft); color: #134e4a; }
+.callout b { font-weight: 700; }
+
+/* two-column */
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; align-items: start; }
+.cols.tight { gap: 12px; }
+
+/* footer */
+.foot { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12px; }
+
+/* index cards */
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+a.tile {
+  display: block; background: #fff; border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 22px 24px; color: inherit; transition: .16s ease; height: 100%;
+  box-shadow: 0 1px 2px rgba(15,23,42,.03);
+}
+a.tile:hover { text-decoration: none; border-color: #c7d2fe; transform: translateY(-2px);
+               box-shadow: 0 10px 30px -18px rgba(67,56,202,.45); }
+a.tile .n { font-size: 11.5px; color: var(--indigo); font-weight: 700; letter-spacing: .1em; }
+a.tile h3 { margin: 8px 0 6px; font-size: 16.5px; color: var(--ink); }
+a.tile p { margin: 0; font-size: 13px; color: var(--muted); }
+a.tile .spark { margin-top: 16px; height: 42px; }
+
+@media print {
+  body { background: #fff; }
+  .page { max-width: none; padding: 0; }
+  .nav { display: none; }
+  .card { box-shadow: none; break-inside: avoid; }
+  section { break-inside: avoid; }
+}
+@media (max-width: 720px) {
+  .page { padding: 24px 16px 64px; }
+  h1 { font-size: 25px; }
+  .card { padding: 18px 16px; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+<nav class="nav"><a href="index.html" class="">总览</a><a href="01_winograd_principles.html" class="">① Winograd 原理</a><a href="02_system_architecture.html" class="">② 系统结构</a><a href="03_sme_gemm.html" class="">③ SME 内核</a><a href="04_performance.html" class="">④ 性能结果</a><a href="05_acl_comparison.html" class="">⑤ 与 ACL 对比</a><a href="06_timing.html" class="">⑥ 步耗时</a><a href="07_methodology.html" class="">⑦ 测量口径</a><a href="08_roadmap.html" class="on">⑧ 演进路线</a><a href="09_bench_shapes.html" class="">⑨ 用例集</a></nav>
+<header>
+  <div class="eyebrow">Winograd 卷积复刻项目 · 图示</div>
+  <h1>⑧ 演进路线与已证伪方向</h1>
+  <p class="lede">从 0.896 到 0.85、从小形状 0.09x 到 0.95x：每条路线都带做法、判据和失败处理。</p>
+</header>
+
+<section><h2><span class="idx">01</span>三阶段路线</h2><p class="sub">先做低风险确定性收益，再做结构性改造，最后才是探索。</p><div class="card"><svg class="diagram" viewBox="0 0 1040 300" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><rect x="22.0" y="26.0" width="316.0" height="232.0" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-width="1.4"/><text x="42.0" y="56.0" font-size="14" fill="#0f766e" text-anchor="start" font-weight="700" >第一阶段</text><text x="42.0" y="76.0" font-size="11" fill="#64748b" text-anchor="start" font-weight="400" >低风险 · 先做</text><circle cx="48" cy="100" r="2.6" fill="#0f766e"/><text x="60.0" y="104.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="400" >SME 打包消掉 16×16 转置</text><circle cx="48" cy="126" r="2.6" fill="#0f766e"/><text x="60.0" y="130.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="400" >OC 尾块选 tile 数</text><circle cx="48" cy="152" r="2.6" fill="#0f766e"/><text x="60.0" y="156.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="400" >大 IC 通道分块</text><circle cx="48" cy="178" r="2.6" fill="#0f766e"/><text x="60.0" y="182.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="400" >V 缓存加 LRU</text><line x1="40.0" y1="216.0" x2="320.0" y2="216.0" stroke="#e2e8f0" stroke-width="1" /><text x="42.0" y="238.0" font-size="10.5" fill="#475569" text-anchor="start" font-weight="600" >59 形状无回退；SME 合计比 0.896 → ≤0.85</text><path d="M344 142 l10 0 m-3 -4 l4 4 -4 4" stroke="#94a3b8" stroke-width="1.6" fill="none"/><rect x="360.0" y="26.0" width="316.0" height="232.0" rx="12" fill="#eef2ff" stroke="#4338ca" stroke-width="1.4"/><text x="380.0" y="56.0" font-size="14" fill="#4338ca" text-anchor="start" font-weight="700" >第二阶段</text><text x="380.0" y="76.0" font-size="11" fill="#64748b" text-anchor="start" font-weight="400" >结构性改造</text><circle cx="386" cy="100" r="2.6" fill="#4338ca"/><text x="398.0" y="104.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="400" >小形状 hybrid 调度</text><circle cx="386" cy="126" r="2.6" fill="#4338ca"/><text x="398.0" y="130.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="400" >drain 与 K 循环交错</text><circle cx="386" cy="152" r="2.6" fill="#4338ca"/><text x="398.0" y="156.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="400" >形状感知选后端</text><line x1="378.0" y1="216.0" x2="658.0" y2="216.0" stroke="#e2e8f0" stroke-width="1" /><text x="380.0" y="238.0" font-size="10.5" fill="#475569" text-anchor="start" font-weight="600" >小形状 ≥0.95x；SME 在 90% 形状不劣于 KML</text><path d="M682 142 l10 0 m-3 -4 l4 4 -4 4" stroke="#94a3b8" stroke-width="1.6" fill="none"/><rect x="698.0" y="26.0" width="316.0" height="232.0" rx="12" fill="#fffbeb" stroke="#b45309" stroke-width="1.4"/><text x="718.0" y="56.0" font-size="14" fill="#b45309" text-anchor="start" font-weight="700" >第三阶段</text><text x="718.0" y="76.0" font-size="11" fill="#64748b" text-anchor="start" font-weight="400" >探索</text><circle cx="724" cy="100" r="2.6" fill="#b45309"/><text x="736.0" y="104.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="400" >F(4,4) 专用展开变换</text><circle cx="724" cy="126" r="2.6" fill="#b45309"/><text x="736.0" y="130.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="400" >bf16 / fp16 外积</text><line x1="716.0" y1="216.0" x2="996.0" y2="216.0" stroke="#e2e8f0" stroke-width="1" /><text x="718.0" y="238.0" font-size="10.5" fill="#475569" text-anchor="start" font-weight="600" >变换占比降 30%；低精度误差在 1e-4 门限内</text></svg></div></section>
+
+<section><h2><span class="idx">02</span>九项任务：做法 / 预期 / 风险</h2><p class="sub">每一项都能落到一个可测的数字上，而不是「继续优化」。</p><div class="card"><table class="tbl">
+<thead><tr><th>#</th><th>方向</th><th>具体做法</th><th>预期收益</th><th>风险</th></tr></thead>
+<tbody><tr><td class="num">1</td><td><b>小形状 hybrid 调度</b></td><td>按 IC×OH×OW 与 n_tiles 走 im2col + arm_gemm 直接卷积</td><td class="num">小形状 0.09–0.91x → ~1.0x</td><td><span class="tag diff">中</span></td></tr><tr><td class="num">2</td><td><b>SME：消掉 Ust→Ug 转置</b></td><td>输入变换按 16 tile 一组输出，寄存器内做 16×16 转置写 K 主序</td><td class="num">大 IC 场景 U 流量减半</td><td><span class="tag same">低</span></td></tr><tr><td class="num">3</td><td><b>SME：OC 尾块选 tile 数</b></td><td>按 OC%64 选 2/3/4 个 ZA tile（如 OC=96 → 3 tile × 2 窗）</td><td class="num">尾块省最多 25% fmopa</td><td><span class="tag same">低</span></td></tr><tr><td class="num">4</td><td><b>SME：drain 与 K 循环交错</b></td><td>上一个 window 的 drain overlap 下一组 K</td><td class="num">小 K 形状 5–15%</td><td><span class="tag diff">中</span></td></tr><tr><td class="num">5</td><td><b>形状感知的后端选择</b></td><td>按 n_tiles%16 / OC%64 / IC 运行时选 SME / KML / arm_gemm</td><td class="num">拼接三者优势区间</td><td><span class="tag diff">中</span></td></tr><tr><td class="num">6</td><td><b>F(4,4) 专用展开 SVE 变换</b></td><td>按 Bᵀ/Aᵀ 零系数模式全展开，去掉循环与分支</td><td class="num">变换 −30~50%</td><td><span class="tag diff">中</span></td></tr><tr><td class="num">7</td><td><b>大 IC 通道分块</b></td><td>按 L1 32 KB 切 IC 段（IC=384 时缓冲 ~150 KB）</td><td class="num">TileExt / InXform 改善 10–25%</td><td><span class="tag same">低</span></td></tr><tr><td class="num">8</td><td><b>V 缓存淘汰策略</b></td><td>kMaxEntries=24 → LRU + 更大上限</td><td class="num">大 OC 小空间省 2–15%</td><td><span class="tag same">低</span></td></tr><tr><td class="num">9</td><td><b>SME 低精度外积（探索）</b></td><td>smeb16f32 / smef16f32：bf16 输入 + fp32 累加</td><td class="num">精度可接受则 GEMM 翻倍</td><td><span class="tag gap">高</span></td></tr></tbody></table></div></section>
+
+<section><h2><span class="idx">03</span>为什么第一阶段先做这四项</h2><p class="sub">只动局部实现、不引入新路径，收益立刻可验。</p><div class="cols">
+<div class="card"><h3>它们是纯实现改动</h3>
+<p style="margin:0 0 10px;font-size:13.5px">#2 / #3 / #7 / #8 都不改变执行路径与调度结构：
+转置在寄存器里做、尾块换 tile 数、IC 分块调循环、缓存加淘汰。
+失败可以逐项回退，不会污染主路径。</p>
+<p style="margin:0;font-size:13.5px">验收只有一个判据：<b>59 形状无回退</b>，
+并且 SME 合计时间比从当前的 <b>0.896</b> 降到 <b>≤0.85</b>。</p></div>
+<div class="card"><h3>结构改造留到第二阶段</h3>
+<p style="margin:0 0 10px;font-size:13.5px">hybrid 调度会引入第二条执行路径（im2col + 直接卷积），
+需要阈值 sweep 与回归集，风险和标定成本都高于第一阶段的四项。</p>
+<p style="margin:0;font-size:13.5px">判据：小形状 <b>≥0.95x</b>，
+且 SME 在 <b>90%</b> 的形状上不劣于 KML——先补短板，再谈全面领先。</p></div>
+</div></section>
+
+<section><h2><span class="idx">04</span>已被数据证伪的方向</h2><p class="sub">这些不是「没试过」，而是试过并测出退化；重试前先读结论。</p><div class="card"><table class="tbl">
+<thead><tr><th>方向</th><th>实测结果</th><th>原因</th></tr></thead>
+<tbody><tr><td><b>tile-major U/M 布局（消灭 scatter/gather）</b></td><td class="num warn">KML −14% / arm_gemm −16%</td><td>GEMM 的 lda 从 IC 变成 36·IC，局部性损失大于拷贝收益</td></tr><tr><td><b>transform_1d_sve 寄存器分块</b></td><td class="num warn">IC≥96 慢 20%</td><td>IC=48 时快 1.4x，但收益面太窄</td></tr><tr><td><b>M=25 时强选 GEMM 内核（6x4VL/8x1VL/inter）</b></td><td class="num warn">auto 已最优，强选 ±5%</td><td>大形状反而慢 1.2–1.45x</td></tr><tr><td><b>展平 N 个 batch 减少 barrier</b></td><td class="num warn">小内存 −14%，大内存 +76%</td><td>U/M 内存放大 N 倍，无 L3 直接 cache thrashing</td></tr></tbody></table>
+<div class="callout" style="margin-top:16px"><b>方法论意义：</b>四条里三条是「看起来能省一次内存遍历」的直觉优化。
+本仓库的规则是：<b>任何布局/结构改动先在 59 形状上 A/B</b>，
+用几何平均和合计一起看，避免被单一形状的收益误导。</div></div></section>
+
+<section><h2><span class="idx">05</span>下一步的判定标准</h2><p class="sub">每条路线都要先写清楚「什么算成功」。</p><div class="card"><table class="tbl">
+<thead><tr><th>动作</th><th>成功判据</th><th>失败处理</th></tr></thead>
+<tbody>
+<tr><td>第二阶段完成后</td><td>SME 合计比 ≤0.85；小形状 ≥0.95x</td><td>保留 KML 作为默认后端，SME 只按形状启用</td></tr>
+<tr><td>第三阶段完成后</td><td>变换占比 −30%；低精度相对误差 &lt; 1e-4</td><td>精度不达标则低精度只用于非关键层</td></tr>
+<tr><td>任何改动</td><td>59 形状无回退 + <code>--verify</code> 全过</td><td>回退该项，不合并</td></tr>
+</tbody></table></div></section>
+
+<div class="foot">
+  
+  数据来源：<code>docs/final_benchmark_bfd6b1e.md</code>（vs OpenBLAS）、
+  <code>docs/sme_fmopa_gemm.md</code>（SME vs KML）。
+  生成脚本：<code>tools/gen_report_figures.py</code>（本页为静态 HTML，无外部依赖）。
+</div>
+</div>
+</body>
+</html>

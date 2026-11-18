@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>③ SME FMOPA GEMM</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; }
+:root {
+  --ink: #0b1220; --slate: #334155; --muted: #64748b; --faint: #94a3b8;
+  --line: #e5e9f2; --bg: #f7f8fc; --card: #ffffff;
+  --indigo: #4338ca; --indigo-2: #6366f1; --indigo-soft: #eef2ff;
+  --teal: #0f766e; --teal-soft: #ecfdf5;
+  --amber: #b45309; --amber-soft: #fffbeb;
+  --rose: #be123c; --rose-soft: #fff1f2;
+  --green: #15803d;
+  --radius: 14px;
+}
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--slate);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 15px; line-height: 1.7;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+}
+.page { max-width: 1220px; margin: 0 auto; padding: 40px 32px 96px; }
+a { color: var(--indigo); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.num { font-variant-numeric: tabular-nums;
+       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+/* nav */
+.nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 34px; }
+.nav a {
+  font-size: 12.5px; padding: 6px 12px; border-radius: 999px;
+  background: #fff; border: 1px solid var(--line); color: var(--muted);
+  transition: .15s ease;
+}
+.nav a:hover { border-color: #c7d2fe; color: var(--indigo); text-decoration: none; }
+.nav a.on { background: var(--indigo); border-color: var(--indigo); color: #fff; }
+
+/* header */
+.eyebrow {
+  font-size: 11.5px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--indigo); font-weight: 700; margin-bottom: 12px;
+}
+h1 { font-size: 32px; line-height: 1.28; margin: 0 0 12px; color: var(--ink); font-weight: 750; letter-spacing: -.01em; }
+.lede { font-size: 15.5px; color: var(--muted); max-width: 78ch; margin: 0 0 22px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12.5px; color: var(--faint); margin-bottom: 44px; }
+.meta b { color: var(--slate); font-weight: 600; }
+
+/* sections */
+section { margin: 0 0 40px; }
+h2 {
+  font-size: 19px; color: var(--ink); font-weight: 700; margin: 0 0 6px;
+  display: flex; align-items: baseline; gap: 10px;
+}
+h2 .idx {
+  font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--indigo);
+  background: var(--indigo-soft); border-radius: 6px; padding: 2px 7px; font-weight: 700;
+}
+.sub { color: var(--muted); font-size: 13.5px; margin: 0 0 18px; max-width: 88ch; }
+h3 { font-size: 15px; color: var(--ink); margin: 26px 0 10px; font-weight: 650; }
+
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 24px 26px; box-shadow: 0 1px 2px rgba(15,23,42,.03), 0 18px 40px -28px rgba(15,23,42,.22);
+}
+.card + .card { margin-top: 16px; }
+.card > h3:first-child { margin-top: 0; }
+
+/* metric strip */
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+.metric {
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px;
+}
+.metric .k { font-size: 11.5px; color: var(--faint); letter-spacing: .04em; text-transform: uppercase; }
+.metric .v { font-size: 27px; font-weight: 750; color: var(--ink); line-height: 1.25; margin-top: 6px; letter-spacing: -.02em; }
+.metric .n { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.metric.hl { border-color: #c7d2fe; background: linear-gradient(180deg, #fbfbff, #fff); }
+.metric.hl .v { color: var(--indigo); }
+
+/* tables */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.tbl th, .tbl td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.tbl th { font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--faint); font-weight: 700; }
+.tbl tr:last-child td { border-bottom: 0; }
+.tbl td.c, .tbl th.c { text-align: center; }
+.tbl td.r, .tbl th.r { text-align: right; }
+.tbl tbody tr:hover { background: #fafbff; }
+.tbl .em { color: var(--indigo); font-weight: 700; }
+.tbl .warn { color: var(--rose); font-weight: 700; }
+
+.tag {
+  display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px;
+  border-radius: 999px; white-space: nowrap;
+}
+.tag.same { background: var(--teal-soft); color: var(--teal); }
+.tag.diff { background: var(--amber-soft); color: var(--amber); }
+.tag.gap  { background: var(--rose-soft); color: var(--rose); }
+.tag.n    { background: #f1f5f9; color: var(--muted); }
+
+/* chart */
+.chart { display: block; width: 100%; height: auto; }
+.diagram { display: block; width: 100%; height: auto; }
+.chart-wrap { overflow-x: auto; }
+
+/* code */
+pre.code {
+  background: #0b1220; color: #dbe4ff; border-radius: 12px; padding: 18px 20px;
+  overflow-x: auto; font-size: 12.5px; line-height: 1.65; margin: 14px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre.code .c { color: #7c8db5; }
+
+/* callout */
+.callout {
+  border-left: 3px solid var(--amber); background: var(--amber-soft);
+  border-radius: 0 10px 10px 0; padding: 16px 20px; font-size: 13.5px; color: #78350f;
+  margin: 16px 0 0;
+}
+.callout.rose { border-color: var(--rose); background: var(--rose-soft); color: #881337; }
+.callout.indigo { border-color: var(--indigo); background: var(--indigo-soft); color: #312e81; }
+.callout.teal { border-color: var(--teal); background: var(--teal-soft); color: #134e4a; }
+.callout b { font-weight: 700; }
+
+/* two-column */
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; align-items: start; }
+.cols.tight { gap: 12px; }
+
+/* footer */
+.foot { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12px; }
+
+/* index cards */
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+a.tile {
+  display: block; background: #fff; border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 22px 24px; color: inherit; transition: .16s ease; height: 100%;
+  box-shadow: 0 1px 2px rgba(15,23,42,.03);
+}
+a.tile:hover { text-decoration: none; border-color: #c7d2fe; transform: translateY(-2px);
+               box-shadow: 0 10px 30px -18px rgba(67,56,202,.45); }
+a.tile .n { font-size: 11.5px; color: var(--indigo); font-weight: 700; letter-spacing: .1em; }
+a.tile h3 { margin: 8px 0 6px; font-size: 16.5px; color: var(--ink); }
+a.tile p { margin: 0; font-size: 13px; color: var(--muted); }
+a.tile .spark { margin-top: 16px; height: 42px; }
+
+@media print {
+  body { background: #fff; }
+  .page { max-width: none; padding: 0; }
+  .nav { display: none; }
+  .card { box-shadow: none; break-inside: avoid; }
+  section { break-inside: avoid; }
+}
+@media (max-width: 720px) {
+  .page { padding: 24px 16px 64px; }
+  h1 { font-size: 25px; }
+  .card { padding: 18px 16px; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+<nav class="nav"><a href="index.html" class="">总览</a><a href="01_winograd_principles.html" class="">① Winograd 原理</a><a href="02_system_architecture.html" class="">② 系统结构</a><a href="03_sme_gemm.html" class="on">③ SME 内核</a><a href="04_performance.html" class="">④ 性能结果</a><a href="05_acl_comparison.html" class="">⑤ 与 ACL 对比</a><a href="06_timing.html" class="">⑥ 步耗时</a><a href="07_methodology.html" class="">⑦ 测量口径</a><a href="08_roadmap.html" class="">⑧ 演进路线</a><a href="09_bench_shapes.html" class="">⑨ 用例集</a></nav>
+<header>
+  <div class="eyebrow">Winograd 卷积复刻项目 · 图示</div>
+  <h1>③ SME FMOPA GEMM</h1>
+  <p class="lede">把 36 个小切片直接映射到 ZA 二维累加器：行 = 16 个 OC、列 = 16 个 tile、4 个 tile = 64 个 OC。</p>
+</header>
+
+<section><h2><span class="idx">01</span>为什么需要专用内核</h2><p class="sub">Winograd 把卷积变成 36 个「M 小、K 短、调用密」的小 GEMM，通用 BLAS 的固定开销在这里被放大。</p><div class="card"><table class="tbl">
+<thead><tr><th>切片特征</th><th class="r">59 形状集范围</th><th>对通用 GEMM 的影响</th></tr></thead>
+<tbody>
+<tr><td>切片数 <code>n_multis</code></td><td class="r num">36（固定）</td><td>每次调用都有进入/退出 + 打包开销</td></tr>
+<tr><td>M = tile 数</td><td class="r num">4 … 3136</td><td>7² 图像只有 4 个 tile，分块填不满</td></tr>
+<tr><td>N = OC</td><td class="r num">16 … 512</td><td>小 OC 时不足一个向量宽度</td></tr>
+<tr><td>K = IC</td><td class="r num">16 … 2048</td><td>小 IC 时流水线填不满</td></tr>
+</tbody></table>
+<div class="callout" style="margin-top:16px">
+t1 下这类小切片的有效吞吐只有几十 GFLOPS，而单核 SME <code>fmopa</code> 探针能到约 2 TFLOPS/核。
+差距不在「GEMM 写得快不快」，而在<b>执行模型是否匹配矩阵形态</b>。
+</div></div></section>
+
+<section><h2><span class="idx">02</span>布局：行 = OC，列 = tile</h2><p class="sub">这个方向不是随手选的 —— 它决定 drain 出来的 64 B 能不能直接写进 M_buf。</p><div class="card"><svg class="diagram" viewBox="0 0 900 470" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><text x="24.0" y="26.0" font-size="12.5" fill="#334155" text-anchor="start" font-weight="700" >ZA 的 4 个 tile：行 = 16 个 OC，列 = 16 个 tile</text><rect x="92.0" y="78.0" width="152.0" height="152.0" rx="4" fill="#eef2ff" /><line x1="92.0" y1="78.0" x2="92.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="78.0" x2="244.0" y2="78.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="101.5" y1="78.0" x2="101.5" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="87.5" x2="244.0" y2="87.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="111.0" y1="78.0" x2="111.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="97.0" x2="244.0" y2="97.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="120.5" y1="78.0" x2="120.5" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="106.5" x2="244.0" y2="106.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="130.0" y1="78.0" x2="130.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="116.0" x2="244.0" y2="116.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="139.5" y1="78.0" x2="139.5" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="125.5" x2="244.0" y2="125.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="149.0" y1="78.0" x2="149.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="135.0" x2="244.0" y2="135.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="158.5" y1="78.0" x2="158.5" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="144.5" x2="244.0" y2="144.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="168.0" y1="78.0" x2="168.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="154.0" x2="244.0" y2="154.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="177.5" y1="78.0" x2="177.5" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="163.5" x2="244.0" y2="163.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="187.0" y1="78.0" x2="187.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="173.0" x2="244.0" y2="173.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="196.5" y1="78.0" x2="196.5" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="182.5" x2="244.0" y2="182.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="206.0" y1="78.0" x2="206.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="192.0" x2="244.0" y2="192.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="215.5" y1="78.0" x2="215.5" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="201.5" x2="244.0" y2="201.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="225.0" y1="78.0" x2="225.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="211.0" x2="244.0" y2="211.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="234.5" y1="78.0" x2="234.5" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="220.5" x2="244.0" y2="220.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="244.0" y1="78.0" x2="244.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="230.0" x2="244.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><text x="84.0" y="158.0" font-size="11" fill="#4338ca" text-anchor="end" font-weight="700" font-family="ui-monospace, Menlo, monospace" >za0</text><text x="168.0" y="70.0" font-size="10" fill="#7c3aed" text-anchor="middle" font-weight="600" >OC 块 0</text><text x="168.0" y="244.0" font-size="9" fill="#94a3b8" text-anchor="middle" font-weight="400" >16 tile →</text><rect x="310.0" y="78.0" width="152.0" height="152.0" rx="4" fill="#f5f3ff" /><line x1="310.0" y1="78.0" x2="310.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="78.0" x2="462.0" y2="78.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="319.5" y1="78.0" x2="319.5" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="87.5" x2="462.0" y2="87.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="329.0" y1="78.0" x2="329.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="97.0" x2="462.0" y2="97.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="338.5" y1="78.0" x2="338.5" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="106.5" x2="462.0" y2="106.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="348.0" y1="78.0" x2="348.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="116.0" x2="462.0" y2="116.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="357.5" y1="78.0" x2="357.5" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="125.5" x2="462.0" y2="125.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="367.0" y1="78.0" x2="367.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="135.0" x2="462.0" y2="135.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="376.5" y1="78.0" x2="376.5" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="144.5" x2="462.0" y2="144.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="386.0" y1="78.0" x2="386.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="154.0" x2="462.0" y2="154.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="395.5" y1="78.0" x2="395.5" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="163.5" x2="462.0" y2="163.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="405.0" y1="78.0" x2="405.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="173.0" x2="462.0" y2="173.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="414.5" y1="78.0" x2="414.5" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="182.5" x2="462.0" y2="182.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="424.0" y1="78.0" x2="424.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="192.0" x2="462.0" y2="192.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="433.5" y1="78.0" x2="433.5" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="201.5" x2="462.0" y2="201.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="443.0" y1="78.0" x2="443.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="211.0" x2="462.0" y2="211.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="452.5" y1="78.0" x2="452.5" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="220.5" x2="462.0" y2="220.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="462.0" y1="78.0" x2="462.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="230.0" x2="462.0" y2="230.0" stroke="#c7d2fe" stroke-width="0.5" /><text x="302.0" y="158.0" font-size="11" fill="#4338ca" text-anchor="end" font-weight="700" font-family="ui-monospace, Menlo, monospace" >za1</text><text x="386.0" y="70.0" font-size="10" fill="#7c3aed" text-anchor="middle" font-weight="600" >OC 块 1</text><text x="386.0" y="244.0" font-size="9" fill="#94a3b8" text-anchor="middle" font-weight="400" >16 tile →</text><rect x="92.0" y="292.0" width="152.0" height="152.0" rx="4" fill="#eef2ff" /><line x1="92.0" y1="292.0" x2="92.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="292.0" x2="244.0" y2="292.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="101.5" y1="292.0" x2="101.5" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="301.5" x2="244.0" y2="301.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="111.0" y1="292.0" x2="111.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="311.0" x2="244.0" y2="311.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="120.5" y1="292.0" x2="120.5" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="320.5" x2="244.0" y2="320.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="130.0" y1="292.0" x2="130.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="330.0" x2="244.0" y2="330.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="139.5" y1="292.0" x2="139.5" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="339.5" x2="244.0" y2="339.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="149.0" y1="292.0" x2="149.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="349.0" x2="244.0" y2="349.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="158.5" y1="292.0" x2="158.5" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="358.5" x2="244.0" y2="358.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="168.0" y1="292.0" x2="168.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="368.0" x2="244.0" y2="368.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="177.5" y1="292.0" x2="177.5" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="377.5" x2="244.0" y2="377.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="187.0" y1="292.0" x2="187.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="387.0" x2="244.0" y2="387.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="196.5" y1="292.0" x2="196.5" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="396.5" x2="244.0" y2="396.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="206.0" y1="292.0" x2="206.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="406.0" x2="244.0" y2="406.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="215.5" y1="292.0" x2="215.5" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="415.5" x2="244.0" y2="415.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="225.0" y1="292.0" x2="225.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="425.0" x2="244.0" y2="425.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="234.5" y1="292.0" x2="234.5" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="434.5" x2="244.0" y2="434.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="244.0" y1="292.0" x2="244.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="92.0" y1="444.0" x2="244.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><text x="84.0" y="372.0" font-size="11" fill="#4338ca" text-anchor="end" font-weight="700" font-family="ui-monospace, Menlo, monospace" >za2</text><text x="168.0" y="284.0" font-size="10" fill="#7c3aed" text-anchor="middle" font-weight="600" >OC 块 2</text><text x="168.0" y="458.0" font-size="9" fill="#94a3b8" text-anchor="middle" font-weight="400" >16 tile →</text><rect x="310.0" y="292.0" width="152.0" height="152.0" rx="4" fill="#f5f3ff" /><line x1="310.0" y1="292.0" x2="310.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="292.0" x2="462.0" y2="292.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="319.5" y1="292.0" x2="319.5" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="301.5" x2="462.0" y2="301.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="329.0" y1="292.0" x2="329.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="311.0" x2="462.0" y2="311.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="338.5" y1="292.0" x2="338.5" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="320.5" x2="462.0" y2="320.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="348.0" y1="292.0" x2="348.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="330.0" x2="462.0" y2="330.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="357.5" y1="292.0" x2="357.5" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="339.5" x2="462.0" y2="339.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="367.0" y1="292.0" x2="367.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="349.0" x2="462.0" y2="349.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="376.5" y1="292.0" x2="376.5" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="358.5" x2="462.0" y2="358.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="386.0" y1="292.0" x2="386.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="368.0" x2="462.0" y2="368.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="395.5" y1="292.0" x2="395.5" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="377.5" x2="462.0" y2="377.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="405.0" y1="292.0" x2="405.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="387.0" x2="462.0" y2="387.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="414.5" y1="292.0" x2="414.5" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="396.5" x2="462.0" y2="396.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="424.0" y1="292.0" x2="424.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="406.0" x2="462.0" y2="406.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="433.5" y1="292.0" x2="433.5" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="415.5" x2="462.0" y2="415.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="443.0" y1="292.0" x2="443.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="425.0" x2="462.0" y2="425.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="452.5" y1="292.0" x2="452.5" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="434.5" x2="462.0" y2="434.5" stroke="#c7d2fe" stroke-width="0.5" /><line x1="462.0" y1="292.0" x2="462.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><line x1="310.0" y1="444.0" x2="462.0" y2="444.0" stroke="#c7d2fe" stroke-width="0.5" /><text x="302.0" y="372.0" font-size="11" fill="#4338ca" text-anchor="end" font-weight="700" font-family="ui-monospace, Menlo, monospace" >za3</text><text x="386.0" y="284.0" font-size="10" fill="#7c3aed" text-anchor="middle" font-weight="600" >OC 块 3</text><text x="386.0" y="458.0" font-size="9" fill="#94a3b8" text-anchor="middle" font-weight="400" >16 tile →</text><text x="168.0" y="48.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >16 列 = 16 个 tile</text><text x="66.0" y="252.0" font-size="9.5" fill="#94a3b8" text-anchor="start" font-weight="400" >↑ 16 行 = 16 OC</text><rect x="506.0" y="78.0" width="3.0" height="46.0" rx="2" fill="#4338ca" /><text x="520.0" y="93.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="700" >一行 = 一条 fmopa</text><text x="520.0" y="112.0" font-size="10.5" fill="#64748b" text-anchor="start" font-weight="400" >za[r][c] += Zm[r] · Zn[c]</text><rect x="506.0" y="162.0" width="3.0" height="46.0" rx="2" fill="#0f766e" /><text x="520.0" y="177.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="700" >一条 fmopa = 16×16 次 FMA</text><text x="520.0" y="196.0" font-size="10.5" fill="#64748b" text-anchor="start" font-weight="400" >SVE-512 下 256 次乘加</text><rect x="506.0" y="246.0" width="3.0" height="46.0" rx="2" fill="#b45309" /><text x="520.0" y="261.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="700" >drain 一次 = 64 B</text><text x="520.0" y="280.0" font-size="10.5" fill="#64748b" text-anchor="start" font-weight="400" >16 个连续 OC（M_buf 一行的一段）</text><text x="506.0" y="336.0" font-size="10.5" fill="#475569" text-anchor="start" font-weight="600" >4 个 tile 并行 → 一次窗口覆盖</text><text x="506.0" y="356.0" font-size="11.5" fill="#4338ca" text-anchor="start" font-weight="700" font-family="ui-monospace, Menlo, monospace" >16 tile × 64 OC</text></svg></div></section>
+
+<section><h2><span class="idx">03</span>drain：64 条切片，零转置</h2><div class="card"><svg class="diagram" viewBox="0 0 720 356" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><text x="24.0" y="26.0" font-size="12.5" fill="#334155" text-anchor="start" font-weight="700" >drain：64 条 str za 切片直接落进 M_buf 的行</text><rect x="60.0" y="66.0" width="28.0" height="28.0" rx="3" fill="#e0e7ff"><title>slice 0 → za0 的第 0 列 → M_buf[ts][tile=0][oc 0..15]</title></rect><text x="74.0" y="84.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >0</text><rect x="90.0" y="66.0" width="28.0" height="28.0" rx="3" fill="#ccfbf1"><title>slice 1 → za1 的第 0 列 → M_buf[ts][tile=0][oc 16..31]</title></rect><text x="104.0" y="84.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >1</text><rect x="120.0" y="66.0" width="28.0" height="28.0" rx="3" fill="#fef3c7"><title>slice 2 → za2 的第 0 列 → M_buf[ts][tile=0][oc 32..47]</title></rect><text x="134.0" y="84.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >2</text><rect x="150.0" y="66.0" width="28.0" height="28.0" rx="3" fill="#fee2e2"><title>slice 3 → za3 的第 0 列 → M_buf[ts][tile=0][oc 48..63]</title></rect><text x="164.0" y="84.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >3</text><rect x="180.0" y="66.0" width="28.0" height="28.0" rx="3" fill="#e0e7ff"><title>slice 4 → za0 的第 1 列 → M_buf[ts][tile=1][oc 0..15]</title></rect><text x="194.0" y="84.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >4</text><rect x="210.0" y="66.0" width="28.0" height="28.0" rx="3" fill="#ccfbf1"><title>slice 5 → za1 的第 1 列 → M_buf[ts][tile=1][oc 16..31]</title></rect><text x="224.0" y="84.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >5</text><rect x="240.0" y="66.0" width="28.0" height="28.0" rx="3" fill="#fef3c7"><title>slice 6 → za2 的第 1 列 → M_buf[ts][tile=1][oc 32..47]</title></rect><text x="254.0" y="84.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >6</text><rect x="270.0" y="66.0" width="28.0" height="28.0" rx="3" fill="#fee2e2"><title>slice 7 → za3 的第 1 列 → M_buf[ts][tile=1][oc 48..63]</title></rect><text x="284.0" y="84.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >7</text><rect x="60.0" y="98.0" width="28.0" height="28.0" rx="3" fill="#e0e7ff"><title>slice 8 → za0 的第 2 列 → M_buf[ts][tile=2][oc 0..15]</title></rect><text x="74.0" y="116.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >8</text><rect x="90.0" y="98.0" width="28.0" height="28.0" rx="3" fill="#ccfbf1"><title>slice 9 → za1 的第 2 列 → M_buf[ts][tile=2][oc 16..31]</title></rect><text x="104.0" y="116.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >9</text><rect x="120.0" y="98.0" width="28.0" height="28.0" rx="3" fill="#fef3c7"><title>slice 10 → za2 的第 2 列 → M_buf[ts][tile=2][oc 32..47]</title></rect><text x="134.0" y="116.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >10</text><rect x="150.0" y="98.0" width="28.0" height="28.0" rx="3" fill="#fee2e2"><title>slice 11 → za3 的第 2 列 → M_buf[ts][tile=2][oc 48..63]</title></rect><text x="164.0" y="116.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >11</text><rect x="180.0" y="98.0" width="28.0" height="28.0" rx="3" fill="#e0e7ff"><title>slice 12 → za0 的第 3 列 → M_buf[ts][tile=3][oc 0..15]</title></rect><text x="194.0" y="116.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >12</text><rect x="210.0" y="98.0" width="28.0" height="28.0" rx="3" fill="#ccfbf1"><title>slice 13 → za1 的第 3 列 → M_buf[ts][tile=3][oc 16..31]</title></rect><text x="224.0" y="116.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >13</text><rect x="240.0" y="98.0" width="28.0" height="28.0" rx="3" fill="#fef3c7"><title>slice 14 → za2 的第 3 列 → M_buf[ts][tile=3][oc 32..47]</title></rect><text x="254.0" y="116.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >14</text><rect x="270.0" y="98.0" width="28.0" height="28.0" rx="3" fill="#fee2e2"><title>slice 15 → za3 的第 3 列 → M_buf[ts][tile=3][oc 48..63]</title></rect><text x="284.0" y="116.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >15</text><rect x="60.0" y="130.0" width="28.0" height="28.0" rx="3" fill="#e0e7ff"><title>slice 16 → za0 的第 4 列 → M_buf[ts][tile=4][oc 0..15]</title></rect><text x="74.0" y="148.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >16</text><rect x="90.0" y="130.0" width="28.0" height="28.0" rx="3" fill="#ccfbf1"><title>slice 17 → za1 的第 4 列 → M_buf[ts][tile=4][oc 16..31]</title></rect><text x="104.0" y="148.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >17</text><rect x="120.0" y="130.0" width="28.0" height="28.0" rx="3" fill="#fef3c7"><title>slice 18 → za2 的第 4 列 → M_buf[ts][tile=4][oc 32..47]</title></rect><text x="134.0" y="148.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >18</text><rect x="150.0" y="130.0" width="28.0" height="28.0" rx="3" fill="#fee2e2"><title>slice 19 → za3 的第 4 列 → M_buf[ts][tile=4][oc 48..63]</title></rect><text x="164.0" y="148.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >19</text><rect x="180.0" y="130.0" width="28.0" height="28.0" rx="3" fill="#e0e7ff"><title>slice 20 → za0 的第 5 列 → M_buf[ts][tile=5][oc 0..15]</title></rect><text x="194.0" y="148.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >20</text><rect x="210.0" y="130.0" width="28.0" height="28.0" rx="3" fill="#ccfbf1"><title>slice 21 → za1 的第 5 列 → M_buf[ts][tile=5][oc 16..31]</title></rect><text x="224.0" y="148.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >21</text><rect x="240.0" y="130.0" width="28.0" height="28.0" rx="3" fill="#fef3c7"><title>slice 22 → za2 的第 5 列 → M_buf[ts][tile=5][oc 32..47]</title></rect><text x="254.0" y="148.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >22</text><rect x="270.0" y="130.0" width="28.0" height="28.0" rx="3" fill="#fee2e2"><title>slice 23 → za3 的第 5 列 → M_buf[ts][tile=5][oc 48..63]</title></rect><text x="284.0" y="148.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >23</text><rect x="60.0" y="162.0" width="28.0" height="28.0" rx="3" fill="#e0e7ff"><title>slice 24 → za0 的第 6 列 → M_buf[ts][tile=6][oc 0..15]</title></rect><text x="74.0" y="180.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >24</text><rect x="90.0" y="162.0" width="28.0" height="28.0" rx="3" fill="#ccfbf1"><title>slice 25 → za1 的第 6 列 → M_buf[ts][tile=6][oc 16..31]</title></rect><text x="104.0" y="180.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >25</text><rect x="120.0" y="162.0" width="28.0" height="28.0" rx="3" fill="#fef3c7"><title>slice 26 → za2 的第 6 列 → M_buf[ts][tile=6][oc 32..47]</title></rect><text x="134.0" y="180.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >26</text><rect x="150.0" y="162.0" width="28.0" height="28.0" rx="3" fill="#fee2e2"><title>slice 27 → za3 的第 6 列 → M_buf[ts][tile=6][oc 48..63]</title></rect><text x="164.0" y="180.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >27</text><rect x="180.0" y="162.0" width="28.0" height="28.0" rx="3" fill="#e0e7ff"><title>slice 28 → za0 的第 7 列 → M_buf[ts][tile=7][oc 0..15]</title></rect><text x="194.0" y="180.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >28</text><rect x="210.0" y="162.0" width="28.0" height="28.0" rx="3" fill="#ccfbf1"><title>slice 29 → za1 的第 7 列 → M_buf[ts][tile=7][oc 16..31]</title></rect><text x="224.0" y="180.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >29</text><rect x="240.0" y="162.0" width="28.0" height="28.0" rx="3" fill="#fef3c7"><title>slice 30 → za2 的第 7 列 → M_buf[ts][tile=7][oc 32..47]</title></rect><text x="254.0" y="180.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >30</text><rect x="270.0" y="162.0" width="28.0" height="28.0" rx="3" fill="#fee2e2"><title>slice 31 → za3 的第 7 列 → M_buf[ts][tile=7][oc 48..63]</title></rect><text x="284.0" y="180.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >31</text><rect x="60.0" y="194.0" width="28.0" height="28.0" rx="3" fill="#e0e7ff"><title>slice 32 → za0 的第 8 列 → M_buf[ts][tile=8][oc 0..15]</title></rect><text x="74.0" y="212.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >32</text><rect x="90.0" y="194.0" width="28.0" height="28.0" rx="3" fill="#ccfbf1"><title>slice 33 → za1 的第 8 列 → M_buf[ts][tile=8][oc 16..31]</title></rect><text x="104.0" y="212.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >33</text><rect x="120.0" y="194.0" width="28.0" height="28.0" rx="3" fill="#fef3c7"><title>slice 34 → za2 的第 8 列 → M_buf[ts][tile=8][oc 32..47]</title></rect><text x="134.0" y="212.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >34</text><rect x="150.0" y="194.0" width="28.0" height="28.0" rx="3" fill="#fee2e2"><title>slice 35 → za3 的第 8 列 → M_buf[ts][tile=8][oc 48..63]</title></rect><text x="164.0" y="212.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >35</text><rect x="180.0" y="194.0" width="28.0" height="28.0" rx="3" fill="#e0e7ff"><title>slice 36 → za0 的第 9 列 → M_buf[ts][tile=9][oc 0..15]</title></rect><text x="194.0" y="212.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >36</text><rect x="210.0" y="194.0" width="28.0" height="28.0" rx="3" fill="#ccfbf1"><title>slice 37 → za1 的第 9 列 → M_buf[ts][tile=9][oc 16..31]</title></rect><text x="224.0" y="212.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >37</text><rect x="240.0" y="194.0" width="28.0" height="28.0" rx="3" fill="#fef3c7"><title>slice 38 → za2 的第 9 列 → M_buf[ts][tile=9][oc 32..47]</title></rect><text x="254.0" y="212.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >38</text><rect x="270.0" y="194.0" width="28.0" height="28.0" rx="3" fill="#fee2e2"><title>slice 39 → za3 的第 9 列 → M_buf[ts][tile=9][oc 48..63]</title></rect><text x="284.0" y="212.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >39</text><rect x="60.0" y="226.0" width="28.0" height="28.0" rx="3" fill="#e0e7ff"><title>slice 40 → za0 的第 10 列 → M_buf[ts][tile=10][oc 0..15]</title></rect><text x="74.0" y="244.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >40</text><rect x="90.0" y="226.0" width="28.0" height="28.0" rx="3" fill="#ccfbf1"><title>slice 41 → za1 的第 10 列 → M_buf[ts][tile=10][oc 16..31]</title></rect><text x="104.0" y="244.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >41</text><rect x="120.0" y="226.0" width="28.0" height="28.0" rx="3" fill="#fef3c7"><title>slice 42 → za2 的第 10 列 → M_buf[ts][tile=10][oc 32..47]</title></rect><text x="134.0" y="244.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >42</text><rect x="150.0" y="226.0" width="28.0" height="28.0" rx="3" fill="#fee2e2"><title>slice 43 → za3 的第 10 列 → M_buf[ts][tile=10][oc 48..63]</title></rect><text x="164.0" y="244.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >43</text><rect x="180.0" y="226.0" width="28.0" height="28.0" rx="3" fill="#e0e7ff"><title>slice 44 → za0 的第 11 列 → M_buf[ts][tile=11][oc 0..15]</title></rect><text x="194.0" y="244.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >44</text><rect x="210.0" y="226.0" width="28.0" height="28.0" rx="3" fill="#ccfbf1"><title>slice 45 → za1 的第 11 列 → M_buf[ts][tile=11][oc 16..31]</title></rect><text x="224.0" y="244.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >45</text><rect x="240.0" y="226.0" width="28.0" height="28.0" rx="3" fill="#fef3c7"><title>slice 46 → za2 的第 11 列 → M_buf[ts][tile=11][oc 32..47]</title></rect><text x="254.0" y="244.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >46</text><rect x="270.0" y="226.0" width="28.0" height="28.0" rx="3" fill="#fee2e2"><title>slice 47 → za3 的第 11 列 → M_buf[ts][tile=11][oc 48..63]</title></rect><text x="284.0" y="244.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >47</text><rect x="60.0" y="258.0" width="28.0" height="28.0" rx="3" fill="#e0e7ff"><title>slice 48 → za0 的第 12 列 → M_buf[ts][tile=12][oc 0..15]</title></rect><text x="74.0" y="276.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >48</text><rect x="90.0" y="258.0" width="28.0" height="28.0" rx="3" fill="#ccfbf1"><title>slice 49 → za1 的第 12 列 → M_buf[ts][tile=12][oc 16..31]</title></rect><text x="104.0" y="276.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >49</text><rect x="120.0" y="258.0" width="28.0" height="28.0" rx="3" fill="#fef3c7"><title>slice 50 → za2 的第 12 列 → M_buf[ts][tile=12][oc 32..47]</title></rect><text x="134.0" y="276.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >50</text><rect x="150.0" y="258.0" width="28.0" height="28.0" rx="3" fill="#fee2e2"><title>slice 51 → za3 的第 12 列 → M_buf[ts][tile=12][oc 48..63]</title></rect><text x="164.0" y="276.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >51</text><rect x="180.0" y="258.0" width="28.0" height="28.0" rx="3" fill="#e0e7ff"><title>slice 52 → za0 的第 13 列 → M_buf[ts][tile=13][oc 0..15]</title></rect><text x="194.0" y="276.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >52</text><rect x="210.0" y="258.0" width="28.0" height="28.0" rx="3" fill="#ccfbf1"><title>slice 53 → za1 的第 13 列 → M_buf[ts][tile=13][oc 16..31]</title></rect><text x="224.0" y="276.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >53</text><rect x="240.0" y="258.0" width="28.0" height="28.0" rx="3" fill="#fef3c7"><title>slice 54 → za2 的第 13 列 → M_buf[ts][tile=13][oc 32..47]</title></rect><text x="254.0" y="276.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >54</text><rect x="270.0" y="258.0" width="28.0" height="28.0" rx="3" fill="#fee2e2"><title>slice 55 → za3 的第 13 列 → M_buf[ts][tile=13][oc 48..63]</title></rect><text x="284.0" y="276.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >55</text><rect x="60.0" y="290.0" width="28.0" height="28.0" rx="3" fill="#e0e7ff"><title>slice 56 → za0 的第 14 列 → M_buf[ts][tile=14][oc 0..15]</title></rect><text x="74.0" y="308.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >56</text><rect x="90.0" y="290.0" width="28.0" height="28.0" rx="3" fill="#ccfbf1"><title>slice 57 → za1 的第 14 列 → M_buf[ts][tile=14][oc 16..31]</title></rect><text x="104.0" y="308.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >57</text><rect x="120.0" y="290.0" width="28.0" height="28.0" rx="3" fill="#fef3c7"><title>slice 58 → za2 的第 14 列 → M_buf[ts][tile=14][oc 32..47]</title></rect><text x="134.0" y="308.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >58</text><rect x="150.0" y="290.0" width="28.0" height="28.0" rx="3" fill="#fee2e2"><title>slice 59 → za3 的第 14 列 → M_buf[ts][tile=14][oc 48..63]</title></rect><text x="164.0" y="308.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >59</text><rect x="180.0" y="290.0" width="28.0" height="28.0" rx="3" fill="#e0e7ff"><title>slice 60 → za0 的第 15 列 → M_buf[ts][tile=15][oc 0..15]</title></rect><text x="194.0" y="308.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >60</text><rect x="210.0" y="290.0" width="28.0" height="28.0" rx="3" fill="#ccfbf1"><title>slice 61 → za1 的第 15 列 → M_buf[ts][tile=15][oc 16..31]</title></rect><text x="224.0" y="308.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >61</text><rect x="240.0" y="290.0" width="28.0" height="28.0" rx="3" fill="#fef3c7"><title>slice 62 → za2 的第 15 列 → M_buf[ts][tile=15][oc 32..47]</title></rect><text x="254.0" y="308.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >62</text><rect x="270.0" y="290.0" width="28.0" height="28.0" rx="3" fill="#fee2e2"><title>slice 63 → za3 的第 15 列 → M_buf[ts][tile=15][oc 48..63]</title></rect><text x="284.0" y="308.0" font-size="8.5" fill="#475569" text-anchor="middle" font-weight="400" >63</text><text x="60.0" y="344.0" font-size="11" fill="#475569" text-anchor="start" font-weight="400" >slice 编号 v：oc_block = v &amp; 3，tile = v &gt;&gt; 2（64 条覆盖 16 tile × 4 个 OC 块）</text><rect x="354.0" y="62.0" width="300.0" height="122.0" rx="10" fill="#0f172a" /><text x="372.0" y="88.0" font-size="10.5" fill="#94a3b8" text-anchor="start" font-weight="400" >目标地址（无需转置）</text><text x="372.0" y="116.0" font-size="11.5" fill="#e2e8f0" text-anchor="start" font-weight="400" font-family="ui-monospace, Menlo, monospace" >M0 + (ts*16 + tile) * OC</text><text x="372.0" y="138.0" font-size="11.5" fill="#e2e8f0" text-anchor="start" font-weight="400" font-family="ui-monospace, Menlo, monospace" >     + oc_block * 16</text><text x="372.0" y="166.0" font-size="10.5" fill="#5eead4" text-anchor="start" font-weight="400" >→ 每个 slice 都是一段 16 连续 OC</text><text x="354.0" y="210.0" font-size="10.5" fill="#64748b" text-anchor="start" font-weight="400" >若把 OC 放在 ZA 的列方向，</text><text x="354.0" y="228.0" font-size="10.5" fill="#64748b" text-anchor="start" font-weight="400" >drain 出来的是跨行数据，必须再转置一次。</text><text x="354.0" y="252.0" font-size="10.5" fill="#4338ca" text-anchor="start" font-weight="600" >这是「行 = OC、列 = tile」的直接理由。</text></svg></div></section>
+
+<section><h2><span class="idx">04</span>微内核</h2><p class="sub">每轮 4 条 fmopa = 4 × 256 = 1024 次 FMA，配 5 次 64 B 加载 → 约 6.4 FLOP/byte。</p><div class="card"><pre class="code"><code>; 一次窗口：4 个 ZA tile，K 循环每轮 4 条 fmopa
+smstart
+ptrue   p0.s
+zero    {za0.s, za1.s, za2.s, za3.s}
+1:
+ld1w    {z16.s}, p0/z, [x9]          ; A: 16 个 tile 在同一个 ic 上的 U
+ld1w    {z17.s}, p0/z, [x10]         ; B: OC 块 0 @ ic
+ld1w    {z18.s}, p0/z, [x10, #1, MUL VL]
+ld1w    {z19.s}, p0/z, [x10, #2, MUL VL]
+ld1w    {z20.s}, p0/z, [x10, #3, MUL VL]
+fmopa   za0.s, p0/m, p0/m, z16.s, z17.s
+fmopa   za1.s, p0/m, p0/m, z16.s, z18.s
+fmopa   za2.s, p0/m, p0/m, z16.s, z19.s
+fmopa   za3.s, p0/m, p0/m, z16.s, z20.s
+add     x9,  x9,  #64               ; A 的 k 步进 = 16 tile × 4 B
+add     x10, x10, bstep             ; B 的 k 步进 = OC64 × 4 B
+cmp / add / b.lt
+; drain: 64 条 str za → 直接落 M_buf 的行</code></pre></div></section>
+
+<section><h2><span class="idx">05</span>结果与边界</h2><p class="sub">绑核口径，59 形状，同一二进制只切环境变量。</p><div class="card">
+<div class="chart-wrap"><svg class="chart" viewBox="0 0 1180 300" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><line x1="54.0" y1="252.0" x2="1156.0" y2="252.0" stroke="#e6eaf2" stroke-width="1.0" /><text x="46.0" y="256.0" font-size="10.5" fill="#94a3b8" text-anchor="end" font-weight="400" >0.25x</text><line x1="54.0" y1="193.1" x2="1156.0" y2="193.1" stroke="#e6eaf2" stroke-width="1.0" /><text x="46.0" y="197.1" font-size="10.5" fill="#94a3b8" text-anchor="end" font-weight="400" >0.5x</text><line x1="54.0" y1="134.2" x2="1156.0" y2="134.2" stroke="#cbd5e1" stroke-width="1.4" /><text x="46.0" y="138.2" font-size="10.5" fill="#94a3b8" text-anchor="end" font-weight="400" >1x</text><line x1="54.0" y1="75.2" x2="1156.0" y2="75.2" stroke="#e6eaf2" stroke-width="1.0" /><text x="46.0" y="79.2" font-size="10.5" fill="#94a3b8" text-anchor="end" font-weight="400" >2x</text><line x1="54.0" y1="40.8" x2="1156.0" y2="40.8" stroke="#e6eaf2" stroke-width="1.0" /><text x="46.0" y="44.8" font-size="10.5" fill="#94a3b8" text-anchor="end" font-weight="400" >3x</text><rect x="57.2" y="134.2" width="12.3" height="3.2" rx="2" fill="#be123c"><title>#0  4,192,40²,192
+SME 22.501 ms  ·  KML 21.658 ms
+speedup 0.96x</title></rect><rect x="75.9" y="134.2" width="12.3" height="6.3" rx="2" fill="#be123c"><title>#1  4,96,80²,96
+SME 36.736 ms  ·  KML 34.097 ms
+speedup 0.93x</title></rect><rect x="94.5" y="124.8" width="12.3" height="9.4" rx="2" fill="#0f766e"><title>#2  4,48,160²,48
+SME 70.687 ms  ·  KML 78.954 ms
+speedup 1.12x</title></rect><rect x="113.2" y="109.8" width="12.3" height="24.4" rx="2" fill="#0f766e"><title>#3  4,192,20²,192
+SME 6.655 ms  ·  KML 8.869 ms
+speedup 1.33x</title></rect><rect x="131.9" y="117.5" width="12.3" height="16.7" rx="2" fill="#0f766e"><title>#4  4,384,80²,96
+SME 100.796 ms  ·  KML 122.680 ms
+speedup 1.22x</title></rect><rect x="150.6" y="128.4" width="12.3" height="5.8" rx="2" fill="#0f766e"><title>#5  4,768,40²,96
+SME 52.400 ms  ·  KML 56.100 ms
+speedup 1.07x</title></rect><rect x="169.2" y="130.2" width="12.3" height="3.9" rx="2" fill="#0f766e"><title>#6  4,768,20²,96
+SME 18.271 ms  ·  KML 19.139 ms
+speedup 1.05x</title></rect><rect x="187.9" y="126.2" width="12.3" height="8.0" rx="2" fill="#0f766e"><title>#7  4,96,40²,96
+SME 9.819 ms  ·  KML 10.786 ms
+speedup 1.10x</title></rect><rect x="206.6" y="134.2" width="12.3" height="1.0" rx="2" fill="#be123c"><title>#8  4,96,20²,96
+SME 3.094 ms  ·  KML 3.059 ms
+speedup 0.99x</title></rect><rect x="225.3" y="121.7" width="12.3" height="12.5" rx="2" fill="#0f766e"><title>#9  1,64,56²,64
+SME 2.581 ms  ·  KML 2.989 ms
+speedup 1.16x</title></rect><rect x="244.0" y="122.4" width="12.3" height="11.8" rx="2" fill="#0f766e"><title>#10  4,64,56²,64
+SME 10.468 ms  ·  KML 12.020 ms
+speedup 1.15x</title></rect><rect x="262.6" y="117.0" width="12.3" height="17.2" rx="2" fill="#0f766e"><title>#11  1,128,28²,128
+SME 1.708 ms  ·  KML 2.090 ms
+speedup 1.22x</title></rect><rect x="281.3" y="118.3" width="12.3" height="15.8" rx="2" fill="#0f766e"><title>#12  4,128,28²,128
+SME 6.915 ms  ·  KML 8.331 ms
+speedup 1.20x</title></rect><rect x="300.0" y="100.6" width="12.3" height="33.5" rx="2" fill="#0f766e"><title>#13  1,256,14²,256
+SME 1.490 ms  ·  KML 2.211 ms
+speedup 1.48x</title></rect><rect x="318.7" y="99.7" width="12.3" height="34.4" rx="2" fill="#0f766e"><title>#14  4,256,14²,256
+SME 5.907 ms  ·  KML 8.858 ms
+speedup 1.50x</title></rect><rect x="337.3" y="68.4" width="12.3" height="65.8" rx="2" fill="#0f766e"><title>#15  1,512,7²,512
+SME 4.740 ms  ·  KML 10.274 ms
+speedup 2.17x</title></rect><rect x="356.0" y="70.5" width="12.3" height="63.7" rx="2" fill="#0f766e"><title>#16  4,512,7²,512
+SME 19.666 ms  ·  KML 41.589 ms
+speedup 2.11x</title></rect><rect x="374.7" y="132.4" width="12.3" height="1.7" rx="2" fill="#0f766e"><title>#17  1,256,56²,64
+SME 7.649 ms  ·  KML 7.807 ms
+speedup 1.02x</title></rect><rect x="393.4" y="122.0" width="12.3" height="12.2" rx="2" fill="#0f766e"><title>#18  1,512,28²,128
+SME 5.542 ms  ·  KML 6.394 ms
+speedup 1.15x</title></rect><rect x="412.1" y="72.5" width="12.3" height="61.6" rx="2" fill="#0f766e"><title>#19  1,1024,14²,256
+SME 5.898 ms  ·  KML 12.179 ms
+speedup 2.06x</title></rect><rect x="430.7" y="66.2" width="12.3" height="68.0" rx="2" fill="#0f766e"><title>#20  1,2048,7²,512
+SME 20.862 ms  ·  KML 46.410 ms
+speedup 2.22x</title></rect><rect x="449.4" y="109.3" width="12.3" height="24.8" rx="2" fill="#0f766e"><title>#21  1,64,224²,64
+SME 38.511 ms  ·  KML 51.571 ms
+speedup 1.34x</title></rect><rect x="468.1" y="110.2" width="12.3" height="24.0" rx="2" fill="#0f766e"><title>#22  4,64,224²,64
+SME 154.810 ms  ·  KML 205.202 ms
+speedup 1.33x</title></rect><rect x="486.8" y="119.9" width="12.3" height="14.2" rx="2" fill="#0f766e"><title>#23  1,128,112²,128
+SME 20.706 ms  ·  KML 24.484 ms
+speedup 1.18x</title></rect><rect x="505.4" y="127.4" width="12.3" height="6.8" rx="2" fill="#0f766e"><title>#24  4,128,112²,128
+SME 89.866 ms  ·  KML 97.343 ms
+speedup 1.08x</title></rect><rect x="524.1" y="134.2" width="12.3" height="19.1" rx="2" fill="#be123c"><title>#25  1,256,56²,256
+SME 20.669 ms  ·  KML 16.506 ms
+speedup 0.80x</title></rect><rect x="542.8" y="134.2" width="12.3" height="17.9" rx="2" fill="#be123c"><title>#26  4,256,56²,256
+SME 75.111 ms  ·  KML 60.862 ms
+speedup 0.81x</title></rect><rect x="561.5" y="134.2" width="12.3" height="46.7" rx="2" fill="#be123c"><title>#27  1,512,28²,512
+SME 43.206 ms  ·  KML 24.937 ms
+speedup 0.58x</title></rect><rect x="580.2" y="134.2" width="12.3" height="58.9" rx="2" fill="#be123c"><title>#28  4,512,28²,512
+SME 147.864 ms  ·  KML 73.906 ms
+speedup 0.50x</title></rect><rect x="598.8" y="134.2" width="12.3" height="32.2" rx="2" fill="#be123c"><title>#29  1,512,14²,512
+SME 27.031 ms  ·  KML 18.505 ms
+speedup 0.68x</title></rect><rect x="617.5" y="134.2" width="12.3" height="29.3" rx="2" fill="#be123c"><title>#30  1,512,7²,512
+SME 26.038 ms  ·  KML 18.454 ms
+speedup 0.71x</title></rect><rect x="636.2" y="134.2" width="12.3" height="2.2" rx="2" fill="#be123c"><title>#31  1,32,112²,32
+SME 8.097 ms  ·  KML 7.890 ms
+speedup 0.97x</title></rect><rect x="654.9" y="134.2" width="12.3" height="10.5" rx="2" fill="#be123c"><title>#32  1,64,56²,32
+SME 2.820 ms  ·  KML 2.493 ms
+speedup 0.88x</title></rect><rect x="673.5" y="134.2" width="12.3" height="4.6" rx="2" fill="#be123c"><title>#33  1,16,224²,16
+SME 18.647 ms  ·  KML 17.666 ms
+speedup 0.95x</title></rect><rect x="692.2" y="134.2" width="12.3" height="6.9" rx="2" fill="#be123c"><title>#34  1,32,64²,32
+SME 2.900 ms  ·  KML 2.674 ms
+speedup 0.92x</title></rect><rect x="710.9" y="126.5" width="12.3" height="7.7" rx="2" fill="#0f766e"><title>#35  32,64,56²,64
+SME 89.758 ms  ·  KML 98.218 ms
+speedup 1.09x</title></rect><rect x="729.6" y="134.2" width="12.3" height="8.2" rx="2" fill="#be123c"><title>#36  16,128,28²,128
+SME 38.578 ms  ·  KML 35.023 ms
+speedup 0.91x</title></rect><rect x="748.3" y="134.2" width="12.3" height="25.2" rx="2" fill="#be123c"><title>#37  8,192,40²,192
+SME 58.151 ms  ·  KML 43.237 ms
+speedup 0.74x</title></rect><rect x="766.9" y="131.4" width="12.3" height="2.7" rx="2" fill="#0f766e"><title>#38  32,48,40²,48
+SME 41.153 ms  ·  KML 42.505 ms
+speedup 1.03x</title></rect><rect x="785.6" y="133.3" width="12.3" height="0.9" rx="2" fill="#0f766e"><title>#39  1,8,16²,8
+SME 0.099 ms  ·  KML 0.100 ms
+speedup 1.01x</title></rect><rect x="804.3" y="134.2" width="12.3" height="18.7" rx="2" fill="#be123c"><title>#40  1,16,32²,16
+SME 0.426 ms  ·  KML 0.342 ms
+speedup 0.80x</title></rect><rect x="823.0" y="134.2" width="12.3" height="10.9" rx="2" fill="#be123c"><title>#41  1,32,32²,32
+SME 0.901 ms  ·  KML 0.793 ms
+speedup 0.88x</title></rect><rect x="841.6" y="134.2" width="12.3" height="26.3" rx="2" fill="#be123c"><title>#42  1,48,20²,48
+SME 0.586 ms  ·  KML 0.430 ms
+speedup 0.73x</title></rect><rect x="860.3" y="134.2" width="12.3" height="31.4" rx="2" fill="#be123c"><title>#43  4,48,20²,48
+SME 1.988 ms  ·  KML 1.374 ms
+speedup 0.69x</title></rect><rect x="879.0" y="134.2" width="12.3" height="33.7" rx="2" fill="#be123c"><title>#44  4,96,20²,96
+SME 5.296 ms  ·  KML 3.561 ms
+speedup 0.67x</title></rect><rect x="897.7" y="134.2" width="12.3" height="33.3" rx="2" fill="#be123c"><title>#45  4,192,20²,192
+SME 15.099 ms  ·  KML 10.203 ms
+speedup 0.68x</title></rect><rect x="916.4" y="134.2" width="12.3" height="54.2" rx="2" fill="#be123c"><title>#46  4,384,20²,384
+SME 54.671 ms  ·  KML 28.905 ms
+speedup 0.53x</title></rect><rect x="935.0" y="133.0" width="12.3" height="1.2" rx="2" fill="#0f766e"><title>#47  4,48,40²,48
+SME 5.184 ms  ·  KML 5.257 ms
+speedup 1.01x</title></rect><rect x="953.7" y="134.2" width="12.3" height="6.8" rx="2" fill="#be123c"><title>#48  4,96,40²,96
+SME 11.898 ms  ·  KML 10.989 ms
+speedup 0.92x</title></rect><rect x="972.4" y="134.2" width="12.3" height="24.4" rx="2" fill="#be123c"><title>#49  4,192,40²,192
+SME 30.147 ms  ·  KML 22.630 ms
+speedup 0.75x</title></rect><rect x="991.1" y="134.2" width="12.3" height="34.3" rx="2" fill="#be123c"><title>#50  4,384,40²,384
+SME 98.928 ms  ·  KML 66.077 ms
+speedup 0.67x</title></rect><rect x="1009.8" y="127.2" width="12.3" height="7.0" rx="2" fill="#0f766e"><title>#51  4,48,80²,48
+SME 18.045 ms  ·  KML 19.596 ms
+speedup 1.09x</title></rect><rect x="1028.4" y="134.2" width="12.3" height="10.4" rx="2" fill="#be123c"><title>#52  4,96,80²,96
+SME 38.005 ms  ·  KML 33.633 ms
+speedup 0.88x</title></rect><rect x="1047.1" y="134.2" width="12.3" height="0.0" rx="2" fill="#be123c"><title>#53  4,192,80²,192
+SME 86.864 ms  ·  KML 86.852 ms
+speedup 1.00x</title></rect><rect x="1065.8" y="134.2" width="12.3" height="1.1" rx="2" fill="#be123c"><title>#54  4,384,80²,384
+SME 251.700 ms  ·  KML 248.506 ms
+speedup 0.99x</title></rect><rect x="1084.5" y="122.5" width="12.3" height="11.7" rx="2" fill="#0f766e"><title>#55  4,48,160²,48
+SME 66.606 ms  ·  KML 76.426 ms
+speedup 1.15x</title></rect><rect x="1103.1" y="128.1" width="12.3" height="6.1" rx="2" fill="#0f766e"><title>#56  4,96,160²,96
+SME 142.963 ms  ·  KML 153.548 ms
+speedup 1.07x</title></rect><rect x="1121.8" y="116.5" width="12.3" height="17.7" rx="2" fill="#0f766e"><title>#57  4,192,160²,192
+SME 317.792 ms  ·  KML 391.220 ms
+speedup 1.23x</title></rect><rect x="1140.5" y="131.0" width="12.3" height="3.2" rx="2" fill="#0f766e"><title>#58  4,384,160²,384
+SME 852.391 ms  ·  KML 884.921 ms
+speedup 1.04x</title></rect><text x="586.3" y="207.1" font-size="10" fill="#be123c" text-anchor="middle" font-weight="700" >0.5x</text><text x="922.5" y="202.3" font-size="10" fill="#be123c" text-anchor="middle" font-weight="700" >0.5x</text><text x="567.6" y="194.9" font-size="10" fill="#be123c" text-anchor="middle" font-weight="700" >0.6x</text><text x="436.9" y="60.2" font-size="10" fill="#0f766e" text-anchor="middle" font-weight="700" >2.2x</text><text x="343.5" y="62.4" font-size="10" fill="#0f766e" text-anchor="middle" font-weight="700" >2.2x</text><text x="362.2" y="64.5" font-size="10" fill="#0f766e" text-anchor="middle" font-weight="700" >2.1x</text><text x="63.3" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >0</text><text x="138.1" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >4</text><text x="212.8" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >8</text><text x="287.5" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >12</text><text x="362.2" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >16</text><text x="436.9" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >20</text><text x="511.6" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >24</text><text x="586.3" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >28</text><text x="661.0" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >32</text><text x="735.7" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >36</text><text x="810.5" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >40</text><text x="885.2" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >44</text><text x="959.9" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >48</text><text x="1034.6" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >52</text><text x="1109.3" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >56</text><text x="1156.0" y="292.0" font-size="10.5" fill="#94a3b8" text-anchor="end" font-weight="400" >shape index</text><text x="54.0" y="20.0" font-size="12" fill="#334155" text-anchor="start" font-weight="700" >t1（taskset -c 3 固定单核）</text><text x="1156.0" y="20.0" font-size="10.5" fill="#64748b" text-anchor="end" font-weight="400" >合计时间比 0.975（SME 快 2.5%） · 几何 1.007 · 算数 1.060 · 中位 1.014 · 胜 31/59</text></svg></div>
+<div class="chart-wrap" style="margin-top:14px"><svg class="chart" viewBox="0 0 1180 300" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><line x1="54.0" y1="252.0" x2="1156.0" y2="252.0" stroke="#e6eaf2" stroke-width="1.0" /><text x="46.0" y="256.0" font-size="10.5" fill="#94a3b8" text-anchor="end" font-weight="400" >0.25x</text><line x1="54.0" y1="193.1" x2="1156.0" y2="193.1" stroke="#e6eaf2" stroke-width="1.0" /><text x="46.0" y="197.1" font-size="10.5" fill="#94a3b8" text-anchor="end" font-weight="400" >0.5x</text><line x1="54.0" y1="134.2" x2="1156.0" y2="134.2" stroke="#cbd5e1" stroke-width="1.4" /><text x="46.0" y="138.2" font-size="10.5" fill="#94a3b8" text-anchor="end" font-weight="400" >1x</text><line x1="54.0" y1="75.2" x2="1156.0" y2="75.2" stroke="#e6eaf2" stroke-width="1.0" /><text x="46.0" y="79.2" font-size="10.5" fill="#94a3b8" text-anchor="end" font-weight="400" >2x</text><line x1="54.0" y1="40.8" x2="1156.0" y2="40.8" stroke="#e6eaf2" stroke-width="1.0" /><text x="46.0" y="44.8" font-size="10.5" fill="#94a3b8" text-anchor="end" font-weight="400" >3x</text><rect x="57.2" y="134.2" width="12.3" height="12.9" rx="2" fill="#be123c"><title>#0  4,192,40²,192
+SME 3.009 ms  ·  KML 2.585 ms
+speedup 0.86x</title></rect><rect x="75.9" y="127.0" width="12.3" height="7.1" rx="2" fill="#0f766e"><title>#1  4,96,80²,96
+SME 3.746 ms  ·  KML 4.074 ms
+speedup 1.09x</title></rect><rect x="94.5" y="127.9" width="12.3" height="6.3" rx="2" fill="#0f766e"><title>#2  4,48,160²,48
+SME 6.224 ms  ·  KML 6.702 ms
+speedup 1.08x</title></rect><rect x="113.2" y="134.2" width="12.3" height="67.5" rx="2" fill="#be123c"><title>#3  4,192,20²,192
+SME 2.226 ms  ·  KML 1.006 ms
+speedup 0.45x</title></rect><rect x="131.9" y="102.4" width="12.3" height="31.8" rx="2" fill="#0f766e"><title>#4  4,384,80²,96
+SME 9.524 ms  ·  KML 13.845 ms
+speedup 1.45x</title></rect><rect x="150.6" y="131.2" width="12.3" height="2.9" rx="2" fill="#0f766e"><title>#5  4,768,40²,96
+SME 7.493 ms  ·  KML 7.755 ms
+speedup 1.03x</title></rect><rect x="169.2" y="134.2" width="12.3" height="105.1" rx="2" fill="#be123c"><title>#6  4,768,20²,96
+SME 6.763 ms  ·  KML 1.963 ms
+speedup 0.29x</title></rect><rect x="187.9" y="134.2" width="12.3" height="16.8" rx="2" fill="#be123c"><title>#7  4,96,40²,96
+SME 1.584 ms  ·  KML 1.300 ms
+speedup 0.82x</title></rect><rect x="206.6" y="134.2" width="12.3" height="56.4" rx="2" fill="#be123c"><title>#8  4,96,20²,96
+SME 1.161 ms  ·  KML 0.598 ms
+speedup 0.52x</title></rect><rect x="225.3" y="126.6" width="12.3" height="7.6" rx="2" fill="#0f766e"><title>#9  1,64,56²,64
+SME 0.387 ms  ·  KML 0.423 ms
+speedup 1.09x</title></rect><rect x="244.0" y="129.5" width="12.3" height="4.7" rx="2" fill="#0f766e"><title>#10  4,64,56²,64
+SME 1.625 ms  ·  KML 1.717 ms
+speedup 1.06x</title></rect><rect x="262.6" y="134.2" width="12.3" height="39.7" rx="2" fill="#be123c"><title>#11  1,128,28²,128
+SME 0.434 ms  ·  KML 0.272 ms
+speedup 0.63x</title></rect><rect x="281.3" y="134.2" width="12.3" height="46.4" rx="2" fill="#be123c"><title>#12  4,128,28²,128
+SME 1.710 ms  ·  KML 0.991 ms
+speedup 0.58x</title></rect><rect x="300.0" y="104.9" width="12.3" height="29.3" rx="2" fill="#0f766e"><title>#13  1,256,14²,256
+SME 0.741 ms  ·  KML 1.046 ms
+speedup 1.41x</title></rect><rect x="318.7" y="134.2" width="12.3" height="65.5" rx="2" fill="#be123c"><title>#14  4,256,14²,256
+SME 2.756 ms  ·  KML 1.276 ms
+speedup 0.46x</title></rect><rect x="337.3" y="124.5" width="12.3" height="9.6" rx="2" fill="#0f766e"><title>#15  1,512,7²,512
+SME 1.119 ms  ·  KML 1.253 ms
+speedup 1.12x</title></rect><rect x="356.0" y="134.2" width="12.3" height="8.3" rx="2" fill="#be123c"><title>#16  4,512,7²,512
+SME 4.540 ms  ·  KML 4.117 ms
+speedup 0.91x</title></rect><rect x="374.7" y="111.3" width="12.3" height="22.8" rx="2" fill="#0f766e"><title>#17  1,256,56²,64
+SME 0.759 ms  ·  KML 0.993 ms
+speedup 1.31x</title></rect><rect x="393.4" y="134.2" width="12.3" height="16.5" rx="2" fill="#be123c"><title>#18  1,512,28²,128
+SME 1.272 ms  ·  KML 1.047 ms
+speedup 0.82x</title></rect><rect x="412.1" y="134.2" width="12.3" height="67.4" rx="2" fill="#be123c"><title>#19  1,1024,14²,256
+SME 3.168 ms  ·  KML 1.433 ms
+speedup 0.45x</title></rect><rect x="430.7" y="130.4" width="12.3" height="3.8" rx="2" fill="#0f766e"><title>#20  1,2048,7²,512
+SME 4.849 ms  ·  KML 5.069 ms
+speedup 1.05x</title></rect><rect x="449.4" y="84.7" width="12.3" height="49.4" rx="2" fill="#0f766e"><title>#21  1,64,224²,64
+SME 3.143 ms  ·  KML 5.623 ms
+speedup 1.79x</title></rect><rect x="468.1" y="83.8" width="12.3" height="50.4" rx="2" fill="#0f766e"><title>#22  4,64,224²,64
+SME 12.167 ms  ·  KML 22.009 ms
+speedup 1.81x</title></rect><rect x="486.8" y="106.6" width="12.3" height="27.6" rx="2" fill="#0f766e"><title>#23  1,128,112²,128
+SME 1.784 ms  ·  KML 2.467 ms
+speedup 1.38x</title></rect><rect x="505.4" y="118.0" width="12.3" height="16.2" rx="2" fill="#0f766e"><title>#24  4,128,112²,128
+SME 7.971 ms  ·  KML 9.639 ms
+speedup 1.21x</title></rect><rect x="524.1" y="132.2" width="12.3" height="2.0" rx="2" fill="#0f766e"><title>#25  1,256,56²,256
+SME 1.976 ms  ·  KML 2.023 ms
+speedup 1.02x</title></rect><rect x="542.8" y="134.2" width="12.3" height="11.8" rx="2" fill="#be123c"><title>#26  4,256,56²,256
+SME 8.322 ms  ·  KML 7.245 ms
+speedup 0.87x</title></rect><rect x="561.5" y="134.2" width="12.3" height="52.2" rx="2" fill="#be123c"><title>#27  1,512,28²,512
+SME 5.392 ms  ·  KML 2.919 ms
+speedup 0.54x</title></rect><rect x="580.2" y="134.2" width="12.3" height="60.2" rx="2" fill="#be123c"><title>#28  4,512,28²,512
+SME 18.829 ms  ·  KML 9.274 ms
+speedup 0.49x</title></rect><rect x="598.8" y="134.2" width="12.3" height="65.5" rx="2" fill="#be123c"><title>#29  1,512,14²,512
+SME 3.782 ms  ·  KML 1.750 ms
+speedup 0.46x</title></rect><rect x="617.5" y="134.2" width="12.3" height="60.2" rx="2" fill="#be123c"><title>#30  1,512,7²,512
+SME 3.473 ms  ·  KML 1.711 ms
+speedup 0.49x</title></rect><rect x="636.2" y="132.4" width="12.3" height="1.8" rx="2" fill="#0f766e"><title>#31  1,32,112²,32
+SME 0.979 ms  ·  KML 1.000 ms
+speedup 1.02x</title></rect><rect x="654.9" y="131.2" width="12.3" height="3.0" rx="2" fill="#0f766e"><title>#32  1,64,56²,32
+SME 0.361 ms  ·  KML 0.374 ms
+speedup 1.04x</title></rect><rect x="673.5" y="134.2" width="12.3" height="2.0" rx="2" fill="#be123c"><title>#33  1,16,224²,16
+SME 1.512 ms  ·  KML 1.476 ms
+speedup 0.98x</title></rect><rect x="692.2" y="119.4" width="12.3" height="14.8" rx="2" fill="#0f766e"><title>#34  1,32,64²,32
+SME 0.343 ms  ·  KML 0.408 ms
+speedup 1.19x</title></rect><rect x="710.9" y="122.3" width="12.3" height="11.9" rx="2" fill="#0f766e"><title>#35  32,64,56²,64
+SME 10.793 ms  ·  KML 12.412 ms
+speedup 1.15x</title></rect><rect x="729.6" y="134.2" width="12.3" height="50.3" rx="2" fill="#be123c"><title>#36  16,128,28²,128
+SME 7.564 ms  ·  KML 4.188 ms
+speedup 0.55x</title></rect><rect x="748.3" y="134.2" width="12.3" height="37.3" rx="2" fill="#be123c"><title>#37  8,192,40²,192
+SME 8.539 ms  ·  KML 5.504 ms
+speedup 0.64x</title></rect><rect x="766.9" y="133.6" width="12.3" height="0.6" rx="2" fill="#0f766e"><title>#38  32,48,40²,48
+SME 7.630 ms  ·  KML 7.680 ms
+speedup 1.01x</title></rect><rect x="785.6" y="47.9" width="12.3" height="86.3" rx="2" fill="#0f766e"><title>#39  1,8,16²,8
+SME 0.050 ms  ·  KML 0.138 ms
+speedup 2.76x</title></rect><rect x="804.3" y="102.3" width="12.3" height="31.9" rx="2" fill="#0f766e"><title>#40  1,16,32²,16
+SME 0.123 ms  ·  KML 0.179 ms
+speedup 1.46x</title></rect><rect x="823.0" y="125.6" width="12.3" height="8.6" rx="2" fill="#0f766e"><title>#41  1,32,32²,32
+SME 0.188 ms  ·  KML 0.208 ms
+speedup 1.11x</title></rect><rect x="841.6" y="134.2" width="12.3" height="5.6" rx="2" fill="#be123c"><title>#42  1,48,20²,48
+SME 0.187 ms  ·  KML 0.175 ms
+speedup 0.94x</title></rect><rect x="860.3" y="134.2" width="12.3" height="6.2" rx="2" fill="#be123c"><title>#43  4,48,20²,48
+SME 0.627 ms  ·  KML 0.583 ms
+speedup 0.93x</title></rect><rect x="879.0" y="134.2" width="12.3" height="43.2" rx="2" fill="#be123c"><title>#44  4,96,20²,96
+SME 1.271 ms  ·  KML 0.765 ms
+speedup 0.60x</title></rect><rect x="897.7" y="134.2" width="12.3" height="74.5" rx="2" fill="#be123c"><title>#45  4,192,20²,192
+SME 2.843 ms  ·  KML 1.183 ms
+speedup 0.42x</title></rect><rect x="916.4" y="134.2" width="12.3" height="84.5" rx="2" fill="#be123c"><title>#46  4,384,20²,384
+SME 8.230 ms  ·  KML 3.046 ms
+speedup 0.37x</title></rect><rect x="935.0" y="132.6" width="12.3" height="1.6" rx="2" fill="#0f766e"><title>#47  4,48,40²,48
+SME 0.970 ms  ·  KML 0.988 ms
+speedup 1.02x</title></rect><rect x="953.7" y="134.2" width="12.3" height="19.9" rx="2" fill="#be123c"><title>#48  4,96,40²,96
+SME 1.755 ms  ·  KML 1.388 ms
+speedup 0.79x</title></rect><rect x="972.4" y="134.2" width="12.3" height="8.1" rx="2" fill="#be123c"><title>#49  4,192,40²,192
+SME 4.055 ms  ·  KML 3.685 ms
+speedup 0.91x</title></rect><rect x="991.1" y="134.2" width="12.3" height="27.6" rx="2" fill="#be123c"><title>#50  4,384,40²,384
+SME 10.972 ms  ·  KML 7.932 ms
+speedup 0.72x</title></rect><rect x="1009.8" y="131.2" width="12.3" height="3.0" rx="2" fill="#0f766e"><title>#51  4,48,80²,48
+SME 2.125 ms  ·  KML 2.201 ms
+speedup 1.04x</title></rect><rect x="1028.4" y="125.0" width="12.3" height="9.1" rx="2" fill="#0f766e"><title>#52  4,96,80²,96
+SME 3.692 ms  ·  KML 4.111 ms
+speedup 1.11x</title></rect><rect x="1047.1" y="126.8" width="12.3" height="7.3" rx="2" fill="#0f766e"><title>#53  4,192,80²,192
+SME 7.988 ms  ·  KML 8.709 ms
+speedup 1.09x</title></rect><rect x="1065.8" y="118.8" width="12.3" height="15.3" rx="2" fill="#0f766e"><title>#54  4,384,80²,384
+SME 22.355 ms  ·  KML 26.775 ms
+speedup 1.20x</title></rect><rect x="1084.5" y="119.0" width="12.3" height="15.1" rx="2" fill="#0f766e"><title>#55  4,48,160²,48
+SME 5.753 ms  ·  KML 6.875 ms
+speedup 1.20x</title></rect><rect x="1103.1" y="109.0" width="12.3" height="25.2" rx="2" fill="#0f766e"><title>#56  4,96,160²,96
+SME 11.999 ms  ·  KML 16.138 ms
+speedup 1.34x</title></rect><rect x="1121.8" y="87.6" width="12.3" height="46.5" rx="2" fill="#0f766e"><title>#57  4,192,160²,192
+SME 24.702 ms  ·  KML 42.705 ms
+speedup 1.73x</title></rect><rect x="1140.5" y="98.3" width="12.3" height="35.9" rx="2" fill="#0f766e"><title>#58  4,384,160²,384
+SME 66.405 ms  ·  KML 101.306 ms
+speedup 1.53x</title></rect><text x="175.4" y="253.3" font-size="10" fill="#be123c" text-anchor="middle" font-weight="700" >0.3x</text><text x="922.5" y="232.7" font-size="10" fill="#be123c" text-anchor="middle" font-weight="700" >0.4x</text><text x="903.8" y="222.7" font-size="10" fill="#be123c" text-anchor="middle" font-weight="700" >0.4x</text><text x="791.8" y="41.9" font-size="10" fill="#0f766e" text-anchor="middle" font-weight="700" >2.8x</text><text x="474.3" y="77.8" font-size="10" fill="#0f766e" text-anchor="middle" font-weight="700" >1.8x</text><text x="455.6" y="78.7" font-size="10" fill="#0f766e" text-anchor="middle" font-weight="700" >1.8x</text><text x="63.3" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >0</text><text x="138.1" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >4</text><text x="212.8" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >8</text><text x="287.5" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >12</text><text x="362.2" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >16</text><text x="436.9" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >20</text><text x="511.6" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >24</text><text x="586.3" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >28</text><text x="661.0" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >32</text><text x="735.7" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >36</text><text x="810.5" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >40</text><text x="885.2" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >44</text><text x="959.9" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >48</text><text x="1034.6" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >52</text><text x="1109.3" y="268.0" font-size="10" fill="#94a3b8" text-anchor="middle" font-weight="400" >56</text><text x="1156.0" y="292.0" font-size="10.5" fill="#94a3b8" text-anchor="end" font-weight="400" >shape index</text><text x="54.0" y="20.0" font-size="12" fill="#334155" text-anchor="start" font-weight="700" >t16（OMP_PROC_BIND=close 绑 16 核）</text><text x="1156.0" y="20.0" font-size="10.5" fill="#64748b" text-anchor="end" font-weight="400" >合计时间比 0.896（SME 快 10.4%） · 几何 0.901 · 算数 0.989 · 中位 1.021 · 胜 32/59</text></svg></div>
+<p style="margin:10px 0 0;font-size:12.5px;color:#64748b">
+纵轴为 log₂ 刻度，基准线 1.0；绿色 = SME 更快，红色 = KML 更快。逐形状数值与胜负归因见
+<code>docs/sme_fmopa_gemm.md</code> §5。</p>
+</div>
+<div class="cols" style="margin-top:16px">
+  <div class="card"><h3>优势区间</h3>
+  <p style="font-size:13.5px;margin:0;color:#475569">
+  小空间 + 深通道（7²/14²）：M 再小也不损失外积利用率，KML 在 M=4 时只剩 20–22 GFLOPS，
+  SME 最高 <b>2.2x</b>；大空间（160²/224²）在 t16 下最高 <b>1.7x</b>。</p></div>
+  <div class="card"><h3>劣势区间</h3>
+  <p style="font-size:13.5px;margin:0;color:#475569">
+  小空间 + 大 OC/IC：<code>28²</code> 的尾组只有 1 个有效 tile（ZN 利用率 6%），
+  每个窗口固定 64 条 drain，浪费与 K 无关；t16 下 tile 少的形状并行度只来自 36 个切片。</p></div>
+</div></section>
+
+<section><h2><span class="idx">06</span>一个代价高昂的 ABI 陷阱</h2><p class="sub">现象极具误导性：数据完全正确，但计时输出 inf。</p><div class="card">
+<p style="margin:0 0 12px;font-size:13.5px">
+<code>smstart</code>/<code>smstop</code> 切换流式模式时，<b>所有</b> SVE z 寄存器与谓词都变成 UNPREDICTABLE；
+而 AAPCS64 的 callee-saved 约定是 <code>d8–d15</code>。当时的 clobber 列表只写了实际用到的
+<code>z16–z20</code> 与 <code>p0</code>，编译器以为 <code>d11</code> 里活着的常量 <code>1e6</code> 仍然有效 ——
+一次调用返回后它被清零，<code>ticks / 1e6</code> 变成 <code>inf</code>。
+<code>-O0</code> 不复现，独立的 <code>minwin</code> 小程序也不复现。</p>
+<div class="callout rose">
+<b>规则：</b>任何内含 <code>smstart</code>/<code>smstop</code> 的内联汇编，
+clobber 必须覆盖 <code>d8–d15</code> 与 <code>p1–p15</code>；只写「自己用到的寄存器」是不够的。
+完整定位过程见 <code>docs/sme_fmopa_gemm.md</code> §6。
+</div></div></section>
+
+<div class="foot">
+  
+  数据来源：<code>docs/final_benchmark_bfd6b1e.md</code>（vs OpenBLAS）、
+  <code>docs/sme_fmopa_gemm.md</code>（SME vs KML）。
+  生成脚本：<code>tools/gen_report_figures.py</code>（本页为静态 HTML，无外部依赖）。
+</div>
+</div>
+</body>
+</html>

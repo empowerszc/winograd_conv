@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>⑨ 基准用例集：59 个形状</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; }
+:root {
+  --ink: #0b1220; --slate: #334155; --muted: #64748b; --faint: #94a3b8;
+  --line: #e5e9f2; --bg: #f7f8fc; --card: #ffffff;
+  --indigo: #4338ca; --indigo-2: #6366f1; --indigo-soft: #eef2ff;
+  --teal: #0f766e; --teal-soft: #ecfdf5;
+  --amber: #b45309; --amber-soft: #fffbeb;
+  --rose: #be123c; --rose-soft: #fff1f2;
+  --green: #15803d;
+  --radius: 14px;
+}
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--slate);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 15px; line-height: 1.7;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+}
+.page { max-width: 1220px; margin: 0 auto; padding: 40px 32px 96px; }
+a { color: var(--indigo); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.num { font-variant-numeric: tabular-nums;
+       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+/* nav */
+.nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 34px; }
+.nav a {
+  font-size: 12.5px; padding: 6px 12px; border-radius: 999px;
+  background: #fff; border: 1px solid var(--line); color: var(--muted);
+  transition: .15s ease;
+}
+.nav a:hover { border-color: #c7d2fe; color: var(--indigo); text-decoration: none; }
+.nav a.on { background: var(--indigo); border-color: var(--indigo); color: #fff; }
+
+/* header */
+.eyebrow {
+  font-size: 11.5px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--indigo); font-weight: 700; margin-bottom: 12px;
+}
+h1 { font-size: 32px; line-height: 1.28; margin: 0 0 12px; color: var(--ink); font-weight: 750; letter-spacing: -.01em; }
+.lede { font-size: 15.5px; color: var(--muted); max-width: 78ch; margin: 0 0 22px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12.5px; color: var(--faint); margin-bottom: 44px; }
+.meta b { color: var(--slate); font-weight: 600; }
+
+/* sections */
+section { margin: 0 0 40px; }
+h2 {
+  font-size: 19px; color: var(--ink); font-weight: 700; margin: 0 0 6px;
+  display: flex; align-items: baseline; gap: 10px;
+}
+h2 .idx {
+  font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--indigo);
+  background: var(--indigo-soft); border-radius: 6px; padding: 2px 7px; font-weight: 700;
+}
+.sub { color: var(--muted); font-size: 13.5px; margin: 0 0 18px; max-width: 88ch; }
+h3 { font-size: 15px; color: var(--ink); margin: 26px 0 10px; font-weight: 650; }
+
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 24px 26px; box-shadow: 0 1px 2px rgba(15,23,42,.03), 0 18px 40px -28px rgba(15,23,42,.22);
+}
+.card + .card { margin-top: 16px; }
+.card > h3:first-child { margin-top: 0; }
+
+/* metric strip */
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+.metric {
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px;
+}
+.metric .k { font-size: 11.5px; color: var(--faint); letter-spacing: .04em; text-transform: uppercase; }
+.metric .v { font-size: 27px; font-weight: 750; color: var(--ink); line-height: 1.25; margin-top: 6px; letter-spacing: -.02em; }
+.metric .n { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.metric.hl { border-color: #c7d2fe; background: linear-gradient(180deg, #fbfbff, #fff); }
+.metric.hl .v { color: var(--indigo); }
+
+/* tables */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.tbl th, .tbl td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.tbl th { font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--faint); font-weight: 700; }
+.tbl tr:last-child td { border-bottom: 0; }
+.tbl td.c, .tbl th.c { text-align: center; }
+.tbl td.r, .tbl th.r { text-align: right; }
+.tbl tbody tr:hover { background: #fafbff; }
+.tbl .em { color: var(--indigo); font-weight: 700; }
+.tbl .warn { color: var(--rose); font-weight: 700; }
+
+.tag {
+  display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px;
+  border-radius: 999px; white-space: nowrap;
+}
+.tag.same { background: var(--teal-soft); color: var(--teal); }
+.tag.diff { background: var(--amber-soft); color: var(--amber); }
+.tag.gap  { background: var(--rose-soft); color: var(--rose); }
+.tag.n    { background: #f1f5f9; color: var(--muted); }
+
+/* chart */
+.chart { display: block; width: 100%; height: auto; }
+.diagram { display: block; width: 100%; height: auto; }
+.chart-wrap { overflow-x: auto; }
+
+/* code */
+pre.code {
+  background: #0b1220; color: #dbe4ff; border-radius: 12px; padding: 18px 20px;
+  overflow-x: auto; font-size: 12.5px; line-height: 1.65; margin: 14px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre.code .c { color: #7c8db5; }
+
+/* callout */
+.callout {
+  border-left: 3px solid var(--amber); background: var(--amber-soft);
+  border-radius: 0 10px 10px 0; padding: 16px 20px; font-size: 13.5px; color: #78350f;
+  margin: 16px 0 0;
+}
+.callout.rose { border-color: var(--rose); background: var(--rose-soft); color: #881337; }
+.callout.indigo { border-color: var(--indigo); background: var(--indigo-soft); color: #312e81; }
+.callout.teal { border-color: var(--teal); background: var(--teal-soft); color: #134e4a; }
+.callout b { font-weight: 700; }
+
+/* two-column */
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; align-items: start; }
+.cols.tight { gap: 12px; }
+
+/* footer */
+.foot { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12px; }
+
+/* index cards */
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+a.tile {
+  display: block; background: #fff; border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 22px 24px; color: inherit; transition: .16s ease; height: 100%;
+  box-shadow: 0 1px 2px rgba(15,23,42,.03);
+}
+a.tile:hover { text-decoration: none; border-color: #c7d2fe; transform: translateY(-2px);
+               box-shadow: 0 10px 30px -18px rgba(67,56,202,.45); }
+a.tile .n { font-size: 11.5px; color: var(--indigo); font-weight: 700; letter-spacing: .1em; }
+a.tile h3 { margin: 8px 0 6px; font-size: 16.5px; color: var(--ink); }
+a.tile p { margin: 0; font-size: 13px; color: var(--muted); }
+a.tile .spark { margin-top: 16px; height: 42px; }
+
+@media print {
+  body { background: #fff; }
+  .page { max-width: none; padding: 0; }
+  .nav { display: none; }
+  .card { box-shadow: none; break-inside: avoid; }
+  section { break-inside: avoid; }
+}
+@media (max-width: 720px) {
+  .page { padding: 24px 16px 64px; }
+  h1 { font-size: 25px; }
+  .card { padding: 18px 16px; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+<nav class="nav"><a href="index.html" class="">总览</a><a href="01_winograd_principles.html" class="">① Winograd 原理</a><a href="02_system_architecture.html" class="">② 系统结构</a><a href="03_sme_gemm.html" class="">③ SME 内核</a><a href="04_performance.html" class="">④ 性能结果</a><a href="05_acl_comparison.html" class="">⑤ 与 ACL 对比</a><a href="06_timing.html" class="">⑥ 步耗时</a><a href="07_methodology.html" class="">⑦ 测量口径</a><a href="08_roadmap.html" class="">⑧ 演进路线</a><a href="09_bench_shapes.html" class="on">⑨ 用例集</a></nav>
+<header>
+  <div class="eyebrow">Winograd 卷积复刻项目 · 图示</div>
+  <h1>⑨ 基准用例集：59 个形状</h1>
+  <p class="lede">七个小节、59 行；每个小节对应一个待验证的假设，而不是随机堆形状。</p>
+</header>
+
+<section><h2><span class="idx">01</span>59 个形状怎么来的</h2><p class="sub">不是随机采样：七个小节各自回答一个假设。</p><div class="cols">
+<div class="card"><svg class="chart" viewBox="0 0 640 270" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><text x="198.0" y="50.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >Case 0-8（历史 9 case）</text><rect x="210.0" y="39.0" width="202.5" height="16.0" rx="3" fill="#4338ca" /><text x="420.5" y="52.0" font-size="11.5" fill="#4338ca" text-anchor="start" font-weight="700" >9</text><text x="198.0" y="80.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >ResNet50 3×3 s1</text><rect x="210.0" y="69.0" width="270.0" height="16.0" rx="3" fill="#818cf8" /><text x="488.0" y="82.0" font-size="11.5" fill="#818cf8" text-anchor="start" font-weight="700" >12</text><text x="198.0" y="110.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >VGG16 3×3 s1</text><rect x="210.0" y="99.0" width="225.0" height="16.0" rx="3" fill="#0f766e" /><text x="443.0" y="112.0" font-size="11.5" fill="#0f766e" text-anchor="start" font-weight="700" >10</text><text x="198.0" y="140.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >Lightweight / 小图</text><rect x="210.0" y="129.0" width="90.0" height="16.0" rx="3" fill="#2dd4bf" /><text x="308.0" y="142.0" font-size="11.5" fill="#2dd4bf" text-anchor="start" font-weight="700" >4</text><text x="198.0" y="170.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >Large batch</text><rect x="210.0" y="159.0" width="90.0" height="16.0" rx="3" fill="#b45309" /><text x="308.0" y="172.0" font-size="11.5" fill="#b45309" text-anchor="start" font-weight="700" >4</text><text x="198.0" y="200.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >Fixed-overhead 隔离</text><rect x="210.0" y="189.0" width="90.0" height="16.0" rx="3" fill="#f59e0b" /><text x="308.0" y="202.0" font-size="11.5" fill="#f59e0b" text-anchor="start" font-weight="700" >4</text><text x="198.0" y="230.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >tiles × IC 网格</text><rect x="210.0" y="219.0" width="360.0" height="16.0" rx="3" fill="#be123c" /><text x="578.0" y="232.0" font-size="11.5" fill="#be123c" text-anchor="start" font-weight="700" >16</text><text x="210.0" y="260.0" font-size="10" fill="#94a3b8" text-anchor="start" font-weight="400" >合计 59 行（4 个格点与 Case 0-8 刻意重叠，用于噪声交叉验证）</text></svg></div>
+<div class="card"><table class="tbl">
+<thead><tr><th>节</th><th>验证什么</th></tr></thead>
+<tbody>
+<tr><td>Case 0-8</td><td>与历史 F44/F22 的 9 case 数据直接接轨</td></tr>
+<tr><td>ResNet50 3×3 s1</td><td>真实 CNN：mb=1 小负载 + mb=4；含降维 bottleneck 与 2048 深通道</td></tr>
+<tr><td>VGG16 3×3 s1</td><td>224² 大图小通道、14²/7² 深通道</td></tr>
+<tr><td>Lightweight</td><td>轻量网络常见形状，最小负载区间</td></tr>
+<tr><td>Large batch</td><td>mb=8–32：若大负载仍赢，说明是系统性优势而非固定开销摊薄</td></tr>
+<tr><td>Fixed-overhead</td><td>极小负载 + 高 iteration，隔离固定开销与调度成本</td></tr>
+<tr><td>tiles × IC 网格</td><td>mb=4、OC=IC、tiles∈{25,100,400,1600} × IC∈{48,96,192,384} 的全组合</td></tr>
+</tbody></table></div>
+</div></section>
+
+<section><h2><span class="idx">02</span>tiles × IC 网格：加速比的空间结构</h2><p class="sub">颜色 = 对 OpenBLAS 的加速比；越靠右下越高。</p><div class="card"><svg class="chart" viewBox="0 0 700 340" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><text x="96.0" y="26.0" font-size="11" fill="#64748b" text-anchor="start" font-weight="400" >颜色 = 对 OpenBLAS 的加速比（同一作业内 A/B，t16）</text><text x="162.0" y="46.0" font-size="11" fill="#334155" text-anchor="middle" font-weight="400" >IC=48</text><text x="294.0" y="46.0" font-size="11" fill="#334155" text-anchor="middle" font-weight="400" >IC=96</text><text x="426.0" y="46.0" font-size="11" fill="#334155" text-anchor="middle" font-weight="400" >IC=192</text><text x="558.0" y="46.0" font-size="11" fill="#334155" text-anchor="middle" font-weight="400" >IC=384</text><text x="84.0" y="90.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >25 tiles</text><text x="84.0" y="104.0" font-size="9.5" fill="#94a3b8" text-anchor="end" font-weight="400" >20²</text><rect x="100.0" y="62.0" width="124.0" height="48.0" rx="6" fill="rgb(212,217,250)"><title>#43 4·48·20²·48
+ours 0.21 ms · OB 0.25 ms · 1.19x</title></rect><text x="162.0" y="92.0" font-size="13" fill="#1e1b4b" text-anchor="middle" font-weight="700" >1.19x</text><text x="162.0" y="108.0" font-size="9" fill="#1e1b4b" text-anchor="middle" font-weight="400" >#43</text><rect x="232.0" y="62.0" width="124.0" height="48.0" rx="6" fill="rgb(181,182,238)"><title>#44 4·96·20²·96
+ours 0.45 ms · OB 0.74 ms · 1.66x
+重复格点：#8 1.64x / #44 1.66x</title></rect><text x="294.0" y="92.0" font-size="13" fill="#1e1b4b" text-anchor="middle" font-weight="700" >1.66x</text><text x="294.0" y="108.0" font-size="9" fill="#1e1b4b" text-anchor="middle" font-weight="400" >#44</text><rect x="364.0" y="62.0" width="124.0" height="48.0" rx="6" fill="rgb(207,212,248)"><title>#45 4·192·20²·192
+ours 1.88 ms · OB 2.36 ms · 1.26x
+重复格点：#3 1.31x / #45 1.26x</title></rect><text x="426.0" y="92.0" font-size="13" fill="#1e1b4b" text-anchor="middle" font-weight="700" >1.26x</text><text x="426.0" y="108.0" font-size="9" fill="#1e1b4b" text-anchor="middle" font-weight="400" >#45</text><rect x="496.0" y="62.0" width="124.0" height="48.0" rx="6" fill="rgb(182,183,238)"><title>#46 4·384·20²·384
+ours 6.33 ms · OB 10.45 ms · 1.65x</title></rect><text x="558.0" y="92.0" font-size="13" fill="#1e1b4b" text-anchor="middle" font-weight="700" >1.65x</text><text x="558.0" y="108.0" font-size="9" fill="#1e1b4b" text-anchor="middle" font-weight="400" >#46</text><text x="84.0" y="146.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >100 tiles</text><text x="84.0" y="160.0" font-size="9.5" fill="#94a3b8" text-anchor="end" font-weight="400" >40²</text><rect x="100.0" y="118.0" width="124.0" height="48.0" rx="6" fill="rgb(185,187,240)"><title>#47 4·48·40²·48
+ours 0.51 ms · OB 0.81 ms · 1.59x</title></rect><text x="162.0" y="148.0" font-size="13" fill="#1e1b4b" text-anchor="middle" font-weight="700" >1.59x</text><text x="162.0" y="164.0" font-size="9" fill="#1e1b4b" text-anchor="middle" font-weight="400" >#47</text><rect x="232.0" y="118.0" width="124.0" height="48.0" rx="6" fill="rgb(178,179,237)"><title>#48 4·96·40²·96
+ours 1.10 ms · OB 1.88 ms · 1.71x
+重复格点：#7 1.71x / #48 1.71x</title></rect><text x="294.0" y="148.0" font-size="13" fill="#1e1b4b" text-anchor="middle" font-weight="700" >1.71x</text><text x="294.0" y="164.0" font-size="9" fill="#1e1b4b" text-anchor="middle" font-weight="400" >#48</text><rect x="364.0" y="118.0" width="124.0" height="48.0" rx="6" fill="rgb(169,169,233)"><title>#49 4·192·40²·192
+ours 3.18 ms · OB 5.87 ms · 1.85x
+重复格点：#0 1.90x / #49 1.85x</title></rect><text x="426.0" y="148.0" font-size="13" fill="#1e1b4b" text-anchor="middle" font-weight="700" >1.85x</text><text x="426.0" y="164.0" font-size="9" fill="#1e1b4b" text-anchor="middle" font-weight="400" >#49</text><rect x="496.0" y="118.0" width="124.0" height="48.0" rx="6" fill="rgb(141,137,222)"><title>#50 4·384·40²·384
+ours 9.52 ms · OB 21.75 ms · 2.29x</title></rect><text x="558.0" y="148.0" font-size="13" fill="#1e1b4b" text-anchor="middle" font-weight="700" >2.29x</text><text x="558.0" y="164.0" font-size="9" fill="#1e1b4b" text-anchor="middle" font-weight="400" >#50</text><text x="84.0" y="202.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >400 tiles</text><text x="84.0" y="216.0" font-size="9.5" fill="#94a3b8" text-anchor="end" font-weight="400" >80²</text><rect x="100.0" y="174.0" width="124.0" height="48.0" rx="6" fill="rgb(181,183,238)"><title>#51 4·48·80²·48
+ours 1.45 ms · OB 2.40 ms · 1.66x</title></rect><text x="162.0" y="204.0" font-size="13" fill="#1e1b4b" text-anchor="middle" font-weight="700" >1.66x</text><text x="162.0" y="220.0" font-size="9" fill="#1e1b4b" text-anchor="middle" font-weight="400" >#51</text><rect x="232.0" y="174.0" width="124.0" height="48.0" rx="6" fill="rgb(174,175,236)"><title>#52 4·96·80²·96
+ours 3.41 ms · OB 6.00 ms · 1.76x
+重复格点：#1 1.77x / #52 1.76x</title></rect><text x="294.0" y="204.0" font-size="13" fill="#1e1b4b" text-anchor="middle" font-weight="700" >1.76x</text><text x="294.0" y="220.0" font-size="9" fill="#1e1b4b" text-anchor="middle" font-weight="400" >#52</text><rect x="364.0" y="174.0" width="124.0" height="48.0" rx="6" fill="rgb(142,139,223)"><title>#53 4·192·80²·192
+ours 7.75 ms · OB 17.47 ms · 2.26x</title></rect><text x="426.0" y="204.0" font-size="13" fill="#1e1b4b" text-anchor="middle" font-weight="700" >2.26x</text><text x="426.0" y="220.0" font-size="9" fill="#1e1b4b" text-anchor="middle" font-weight="400" >#53</text><rect x="496.0" y="174.0" width="124.0" height="48.0" rx="6" fill="rgb(112,105,211)"><title>#54 4·384·80²·384
+ours 22.37 ms · OB 60.96 ms · 2.73x</title></rect><text x="558.0" y="204.0" font-size="13" fill="#ffffff" text-anchor="middle" font-weight="700" >2.73x</text><text x="558.0" y="220.0" font-size="9" fill="#ffffff" text-anchor="middle" font-weight="400" >#54</text><text x="84.0" y="258.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >1600 tiles</text><text x="84.0" y="272.0" font-size="9.5" fill="#94a3b8" text-anchor="end" font-weight="400" >160²</text><rect x="100.0" y="230.0" width="124.0" height="48.0" rx="6" fill="rgb(178,179,237)"><title>#55 4·48·160²·48
+ours 5.04 ms · OB 8.60 ms · 1.71x
+重复格点：#2 1.73x / #55 1.71x</title></rect><text x="162.0" y="260.0" font-size="13" fill="#1e1b4b" text-anchor="middle" font-weight="700" >1.71x</text><text x="162.0" y="276.0" font-size="9" fill="#1e1b4b" text-anchor="middle" font-weight="400" >#55</text><rect x="232.0" y="230.0" width="124.0" height="48.0" rx="6" fill="rgb(174,175,235)"><title>#56 4·96·160²·96
+ours 12.03 ms · OB 21.18 ms · 1.76x</title></rect><text x="294.0" y="260.0" font-size="13" fill="#1e1b4b" text-anchor="middle" font-weight="700" >1.76x</text><text x="294.0" y="276.0" font-size="9" fill="#1e1b4b" text-anchor="middle" font-weight="400" >#56</text><rect x="364.0" y="230.0" width="124.0" height="48.0" rx="6" fill="rgb(154,152,227)"><title>#57 4·192·160²·192
+ours 30.23 ms · OB 62.95 ms · 2.08x</title></rect><text x="426.0" y="260.0" font-size="13" fill="#1e1b4b" text-anchor="middle" font-weight="700" >2.08x</text><text x="426.0" y="276.0" font-size="9" fill="#1e1b4b" text-anchor="middle" font-weight="400" >#57</text><rect x="496.0" y="230.0" width="124.0" height="48.0" rx="6" fill="rgb(93,84,204)"><title>#58 4·384·160²·384
+ours 72.00 ms · OB 217.11 ms · 3.02x</title></rect><text x="558.0" y="260.0" font-size="13" fill="#ffffff" text-anchor="middle" font-weight="700" >3.02x</text><text x="558.0" y="276.0" font-size="9" fill="#ffffff" text-anchor="middle" font-weight="400" >#58</text><text x="96.0" y="326.0" font-size="10" fill="#64748b" text-anchor="start" font-weight="400" >越靠右下「tile 多 × 通道深」，加速比越高；左上角是小空间浅通道，最接近 1.0x。</text></svg>
+<div class="callout indigo" style="margin-top:16px">
+<b>读图：</b>左上角（25 tiles、IC=48）只有 <b>1.19x</b>，右下角（1600 tiles、IC=384）达到 <b>3.02x</b>；
+沿「tile 数↑」方向（固定 IC=48）从 1.19 → 1.59 → 1.66 → 1.71，
+沿「IC↑」方向（固定 25 tiles）从 1.19 → 1.66 → 1.26 → 1.65。
+两个方向都能抬升，说明收益来自<b>摊薄固定开销 + GEMM 规模变大</b>，而不是某个单一形状的偶然读数。
+悬停可看到重复格点的两次测量值。</div></div></section>
+
+<section><h2><span class="idx">03</span>形状参数的含义</h2><p class="sub">所有行都是 stride=1、group=1、3×3、pad=1——这是 F(4,4,3,3) 的适用域。</p><div class="card"><table class="tbl">
+<thead><tr><th>量</th><th>计算</th><th>为什么重要</th></tr></thead>
+<tbody>
+<tr><td>tile 数</td><td><code>ceil(ih/4)² × mb</code></td><td>每 tile 做 36 个 GEMM；tile 越多，GEMM 的 n 越大、固定开销越摊薄</td></tr>
+<tr><td>IC</td><td>输入通道</td><td>GEMM 的 K 维；也是输入变换的数据量，决定 SVE 谓词利用率（IC=48 只用到 3/4 个寄存器）</td></tr>
+<tr><td>OC</td><td>输出通道</td><td>GEMM 的 N 维；SME 路径按 64 一块（4 个 ZA tile），OC%64 决定尾块浪费</td></tr>
+<tr><td>mb</td><td>batch</td><td>线性放大 tile 数，是「大负载」的主要来源</td></tr>
+</tbody></table>
+<div class="callout" style="margin-top:16px"><b>注意：</b>59 行里 4 个格点与 Case 0-8 刻意重叠
+（如 4,192,40²,192 出现两次）。它们的 GEMM 读数一致、内存步可差 65%+，
+是本套用例自带的噪声探针。</div></div></section>
+
+<section><h2><span class="idx">04</span>怎么跑这套用例</h2><p class="sub">同一条 CSV 同时喂给我们、oneDNN e2e 与 benchdnn。</p><div class="card"><pre class="code"><code># 正确性门（FAIL 即中止）
+./build/bench_winograd --sve --nhwc --verify --threads 16 shapes/conv_all.csv
+
+# 全量计时：1/8/16/32/38 线程
+./build/bench_winograd --sve --nhwc --threads 1,8,16,32,38 shapes/conv_all.csv
+
+# 转成 benchdnn 描述符（mb4_ic192_ih40iw40_oc192_oh40ow40_kh3kw3_sh1sw1_ph1pw1）
+bash tools/gen_benchdnn_list.sh
+
+# oneDNN 侧两列：强制 WINO 与 auto
+bash tools/onednn/run_benchdnn.sh --winograd
+bash tools/onednn/run_benchdnn.sh</code></pre>
+<p style="margin:14px 0 0;font-size:12.5px;color:#64748b">
+CSV 全表：<code>shapes/conv_all.csv</code>；分节说明：<code>shapes/README.md</code>；
+对照工具：<code>tools/onednn/</code>。</p></div></section>
+
+<div class="foot">
+  
+  数据来源：<code>docs/final_benchmark_bfd6b1e.md</code>（vs OpenBLAS）、
+  <code>docs/sme_fmopa_gemm.md</code>（SME vs KML）。
+  生成脚本：<code>tools/gen_report_figures.py</code>（本页为静态 HTML，无外部依赖）。
+</div>
+</div>
+</body>
+</html>

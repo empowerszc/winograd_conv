@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>⑦ 测量方法与判读口径</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; }
+:root {
+  --ink: #0b1220; --slate: #334155; --muted: #64748b; --faint: #94a3b8;
+  --line: #e5e9f2; --bg: #f7f8fc; --card: #ffffff;
+  --indigo: #4338ca; --indigo-2: #6366f1; --indigo-soft: #eef2ff;
+  --teal: #0f766e; --teal-soft: #ecfdf5;
+  --amber: #b45309; --amber-soft: #fffbeb;
+  --rose: #be123c; --rose-soft: #fff1f2;
+  --green: #15803d;
+  --radius: 14px;
+}
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--slate);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 15px; line-height: 1.7;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+}
+.page { max-width: 1220px; margin: 0 auto; padding: 40px 32px 96px; }
+a { color: var(--indigo); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.num { font-variant-numeric: tabular-nums;
+       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+/* nav */
+.nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 34px; }
+.nav a {
+  font-size: 12.5px; padding: 6px 12px; border-radius: 999px;
+  background: #fff; border: 1px solid var(--line); color: var(--muted);
+  transition: .15s ease;
+}
+.nav a:hover { border-color: #c7d2fe; color: var(--indigo); text-decoration: none; }
+.nav a.on { background: var(--indigo); border-color: var(--indigo); color: #fff; }
+
+/* header */
+.eyebrow {
+  font-size: 11.5px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--indigo); font-weight: 700; margin-bottom: 12px;
+}
+h1 { font-size: 32px; line-height: 1.28; margin: 0 0 12px; color: var(--ink); font-weight: 750; letter-spacing: -.01em; }
+.lede { font-size: 15.5px; color: var(--muted); max-width: 78ch; margin: 0 0 22px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12.5px; color: var(--faint); margin-bottom: 44px; }
+.meta b { color: var(--slate); font-weight: 600; }
+
+/* sections */
+section { margin: 0 0 40px; }
+h2 {
+  font-size: 19px; color: var(--ink); font-weight: 700; margin: 0 0 6px;
+  display: flex; align-items: baseline; gap: 10px;
+}
+h2 .idx {
+  font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--indigo);
+  background: var(--indigo-soft); border-radius: 6px; padding: 2px 7px; font-weight: 700;
+}
+.sub { color: var(--muted); font-size: 13.5px; margin: 0 0 18px; max-width: 88ch; }
+h3 { font-size: 15px; color: var(--ink); margin: 26px 0 10px; font-weight: 650; }
+
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 24px 26px; box-shadow: 0 1px 2px rgba(15,23,42,.03), 0 18px 40px -28px rgba(15,23,42,.22);
+}
+.card + .card { margin-top: 16px; }
+.card > h3:first-child { margin-top: 0; }
+
+/* metric strip */
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+.metric {
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px;
+}
+.metric .k { font-size: 11.5px; color: var(--faint); letter-spacing: .04em; text-transform: uppercase; }
+.metric .v { font-size: 27px; font-weight: 750; color: var(--ink); line-height: 1.25; margin-top: 6px; letter-spacing: -.02em; }
+.metric .n { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.metric.hl { border-color: #c7d2fe; background: linear-gradient(180deg, #fbfbff, #fff); }
+.metric.hl .v { color: var(--indigo); }
+
+/* tables */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.tbl th, .tbl td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.tbl th { font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--faint); font-weight: 700; }
+.tbl tr:last-child td { border-bottom: 0; }
+.tbl td.c, .tbl th.c { text-align: center; }
+.tbl td.r, .tbl th.r { text-align: right; }
+.tbl tbody tr:hover { background: #fafbff; }
+.tbl .em { color: var(--indigo); font-weight: 700; }
+.tbl .warn { color: var(--rose); font-weight: 700; }
+
+.tag {
+  display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px;
+  border-radius: 999px; white-space: nowrap;
+}
+.tag.same { background: var(--teal-soft); color: var(--teal); }
+.tag.diff { background: var(--amber-soft); color: var(--amber); }
+.tag.gap  { background: var(--rose-soft); color: var(--rose); }
+.tag.n    { background: #f1f5f9; color: var(--muted); }
+
+/* chart */
+.chart { display: block; width: 100%; height: auto; }
+.diagram { display: block; width: 100%; height: auto; }
+.chart-wrap { overflow-x: auto; }
+
+/* code */
+pre.code {
+  background: #0b1220; color: #dbe4ff; border-radius: 12px; padding: 18px 20px;
+  overflow-x: auto; font-size: 12.5px; line-height: 1.65; margin: 14px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre.code .c { color: #7c8db5; }
+
+/* callout */
+.callout {
+  border-left: 3px solid var(--amber); background: var(--amber-soft);
+  border-radius: 0 10px 10px 0; padding: 16px 20px; font-size: 13.5px; color: #78350f;
+  margin: 16px 0 0;
+}
+.callout.rose { border-color: var(--rose); background: var(--rose-soft); color: #881337; }
+.callout.indigo { border-color: var(--indigo); background: var(--indigo-soft); color: #312e81; }
+.callout.teal { border-color: var(--teal); background: var(--teal-soft); color: #134e4a; }
+.callout b { font-weight: 700; }
+
+/* two-column */
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; align-items: start; }
+.cols.tight { gap: 12px; }
+
+/* footer */
+.foot { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12px; }
+
+/* index cards */
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+a.tile {
+  display: block; background: #fff; border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 22px 24px; color: inherit; transition: .16s ease; height: 100%;
+  box-shadow: 0 1px 2px rgba(15,23,42,.03);
+}
+a.tile:hover { text-decoration: none; border-color: #c7d2fe; transform: translateY(-2px);
+               box-shadow: 0 10px 30px -18px rgba(67,56,202,.45); }
+a.tile .n { font-size: 11.5px; color: var(--indigo); font-weight: 700; letter-spacing: .1em; }
+a.tile h3 { margin: 8px 0 6px; font-size: 16.5px; color: var(--ink); }
+a.tile p { margin: 0; font-size: 13px; color: var(--muted); }
+a.tile .spark { margin-top: 16px; height: 42px; }
+
+@media print {
+  body { background: #fff; }
+  .page { max-width: none; padding: 0; }
+  .nav { display: none; }
+  .card { box-shadow: none; break-inside: avoid; }
+  section { break-inside: avoid; }
+}
+@media (max-width: 720px) {
+  .page { padding: 24px 16px 64px; }
+  h1 { font-size: 25px; }
+  .card { padding: 18px 16px; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+<nav class="nav"><a href="index.html" class="">总览</a><a href="01_winograd_principles.html" class="">① Winograd 原理</a><a href="02_system_architecture.html" class="">② 系统结构</a><a href="03_sme_gemm.html" class="">③ SME 内核</a><a href="04_performance.html" class="">④ 性能结果</a><a href="05_acl_comparison.html" class="">⑤ 与 ACL 对比</a><a href="06_timing.html" class="">⑥ 步耗时</a><a href="07_methodology.html" class="on">⑦ 测量口径</a><a href="08_roadmap.html" class="">⑧ 演进路线</a><a href="09_bench_shapes.html" class="">⑨ 用例集</a></nav>
+<header>
+  <div class="eyebrow">Winograd 卷积复刻项目 · 图示</div>
+  <h1>⑦ 测量方法与判读口径</h1>
+  <p class="lede">怎么证明「快」不是测量假象：同作业 A/B、绑核、四种平均、方向约定与已知陷阱。</p>
+</header>
+
+<section><h2><span class="idx">01</span>第一原则：比较必须在同一作业内</h2><p class="sub">跨作业的毫秒数一律作废——不是保守，是实测有 3–7x 的性能态差。</p><div class="card"><svg class="diagram" viewBox="0 0 980 330" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><rect x="24.0" y="18.0" width="452.0" height="128.0" rx="10" fill="#fff1f2" /><text x="44.0" y="46.0" font-size="14" fill="#be123c" text-anchor="start" font-weight="700" >跨作业比较 · 作废</text><text x="44.0" y="66.0" font-size="11" fill="#9f1239" text-anchor="start" font-weight="400" >node03 不同作业之间存在 3–7x 的性能态差</text><rect x="44.0" y="136.8" width="96.0" height="25.2" rx="3" fill="#fda4af" /><text x="92.0" y="176.0" font-size="11" fill="#be123c" text-anchor="middle" font-weight="700" >322 ms</text><text x="92.0" y="192.0" font-size="10" fill="#9f1239" text-anchor="middle" font-weight="400" >作业 1</text><rect x="168.0" y="123.6" width="96.0" height="38.4" rx="3" fill="#fda4af" /><text x="216.0" y="176.0" font-size="11" fill="#be123c" text-anchor="middle" font-weight="700" >491 ms</text><text x="216.0" y="192.0" font-size="10" fill="#9f1239" text-anchor="middle" font-weight="400" >作业 2</text><rect x="292.0" y="108.0" width="96.0" height="54.0" rx="3" fill="#fda4af" /><text x="340.0" y="176.0" font-size="11" fill="#be123c" text-anchor="middle" font-weight="700" >690 ms</text><text x="340.0" y="192.0" font-size="10" fill="#9f1239" text-anchor="middle" font-weight="400" >作业 3</text><line x1="40.0" y1="200.0" x2="452.0" y2="200.0" stroke="#be123c" stroke-width="1.2" stroke-dasharray="3 3" /><rect x="504.0" y="18.0" width="452.0" height="250.0" rx="10" fill="#ecfdf5" /><text x="524.0" y="46.0" font-size="14" fill="#0f766e" text-anchor="start" font-weight="700" >同一作业内 A/B · 有效</text><text x="524.0" y="66.0" font-size="11" fill="#115e59" text-anchor="start" font-weight="400" >同一台机器、同一时段、交替测量两次</text><text x="592.0" y="112.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >本项目</text><rect x="604.0" y="98.0" width="120.0" height="24.0" rx="4" fill="#4338ca" /><text x="730.0" y="115.0" font-size="11.5" fill="#4338ca" text-anchor="start" font-weight="700" >321.9 ms</text><text x="592.0" y="170.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >OpenBLAS</text><rect x="604.0" y="156.0" width="300.0" height="24.0" rx="4" fill="#94a3b8" /><text x="910.0" y="173.0" font-size="11.5" fill="#94a3b8" text-anchor="start" font-weight="700" >804.9 ms</text><text x="524.0" y="232.0" font-size="15" fill="#0f766e" text-anchor="start" font-weight="700" >比值 2.50x 可信</text><text x="690.0" y="232.0" font-size="11" fill="#115e59" text-anchor="start" font-weight="400" >→ 只有这一种比较进入文档与图表</text><text x="490.0" y="312.0" font-size="10.5" fill="#64748b" text-anchor="middle" font-weight="400" >集群 920F 实测：本项目的 321.9 ms 与 690 ms 都是真实读数，差异来自机器性能态而非代码。</text></svg>
+<div class="callout rose" style="margin-top:16px">
+<b>集群 920F 的实测：</b>同一份二进制、同一个 shape，在 node03 的不同 sbatch 作业里可以读出
+321.9 / 490.7 / 690.0 ms。任何「上次跑的是 X，这次是 Y」的对比都不可用。
+本仓库所有集群结论都产自 <code>sbatch -w node03 --exclusive --wrap="bash tools/onednn/ab_onednn.sh"</code>
+这一个作业内的交替测量。</div></div></section>
+
+<section><h2><span class="idx">02</span>第二个前提：绑核（本机）</h2><p class="sub">不绑核的 t16 数字会漂到结论翻转。</p><div class="card">
+<p style="margin:0 0 14px;font-size:13.5px">本机 608 核 / 32 NUMA、无调度器。OpenMP 线程若被放到不同 NUMA 节点，
+内存访问代价随放置变化，SME 与 KML 的对比会失真。</p>
+<table class="tbl">
+<thead><tr><th>档位</th><th>绑核方式</th><th>不绑核的后果</th></tr></thead>
+<tbody>
+<tr><td><b>t1</b></td><td><code>taskset -c 3</code></td><td>单线程被迁移 → 缓存全失效，读数抖动 ±20%</td></tr>
+<tr><td><b>t16</b></td><td><code>OMP_PROC_BIND=close OMP_PLACES=cores</code></td>
+<td>SME 合计在 <b>387–558 ms</b> 间漂移，结论翻转成「SME 慢 2 倍」；绑核后两次重复差异 &lt; 2.5%</td></tr>
+</tbody></table>
+<div class="callout" style="margin-top:16px"><b>协议：</b>SME vs KML 的每一条数字都出自绑核运行；
+每个配置重复两次，取同一作业内的读数。集群与本机是两套机器，毫秒数<b>不可跨机比较</b>，
+只能各自纵向解读。</div></div></section>
+
+<section><h2><span class="idx">03</span>四种平均：回答四个不同的问题</h2><p class="sub">同一个比较会给出四个不同的数——差异本身也是信息。</p><div class="card"><svg class="diagram" viewBox="0 0 860 250" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><text x="164.0" y="22.0" font-size="10.5" fill="#94a3b8" text-anchor="end" font-weight="700" >口径</text><text x="182.0" y="22.0" font-size="10.5" fill="#94a3b8" text-anchor="start" font-weight="700" >定义</text><text x="426.0" y="22.0" font-size="10.5" fill="#94a3b8" text-anchor="start" font-weight="700" >回答的问题</text><text x="836.0" y="22.0" font-size="10.5" fill="#94a3b8" text-anchor="end" font-weight="700" >使用建议</text><rect x="26.0" y="40.0" width="800.0" height="40.0" rx="6" fill="#ffffff" /><text x="38.0" y="65.0" font-size="12" fill="#4338ca" text-anchor="start" font-weight="700" >合计时间比</text><text x="182" y="65" font-size="11.5" fill="#475569" font-family="ui-monospace, Menlo, monospace">Σ 慢 / Σ 快</text><text x="426.0" y="65.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="400" >整套网络跑完谁更快</text><text x="826.0" y="65.0" font-size="11" fill="#64748b" text-anchor="end" font-weight="400" >汇报主指标</text><rect x="26.0" y="88.0" width="800.0" height="40.0" rx="6" fill="#f8fafc" /><text x="38.0" y="113.0" font-size="12" fill="#0f766e" text-anchor="start" font-weight="700" >几何平均</text><text x="182" y="113" font-size="11.5" fill="#475569" font-family="ui-monospace, Menlo, monospace">exp(mean(ln x))</text><text x="426.0" y="113.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="400" >典型一层快多少（乘性）</text><text x="826.0" y="113.0" font-size="11" fill="#64748b" text-anchor="end" font-weight="400" >算法对比常用</text><rect x="26.0" y="136.0" width="800.0" height="40.0" rx="6" fill="#ffffff" /><text x="38.0" y="161.0" font-size="12" fill="#b45309" text-anchor="start" font-weight="700" >算数平均</text><text x="182" y="161" font-size="11.5" fill="#475569" font-family="ui-monospace, Menlo, monospace">mean(x)</text><text x="426.0" y="161.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="400" >平均每个形状快多少</text><text x="826.0" y="161.0" font-size="11" fill="#64748b" text-anchor="end" font-weight="400" >偏袒大加速比</text><rect x="26.0" y="184.0" width="800.0" height="40.0" rx="6" fill="#f8fafc" /><text x="38.0" y="209.0" font-size="12" fill="#be123c" text-anchor="start" font-weight="700" >中位数</text><text x="182" y="209" font-size="11.5" fill="#475569" font-family="ui-monospace, Menlo, monospace">median(x)</text><text x="426.0" y="209.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="400" >一半形状至少快多少</text><text x="826.0" y="209.0" font-size="11" fill="#64748b" text-anchor="end" font-weight="400" >抗极端值</text><text x="26.0" y="242.0" font-size="10.5" fill="#64748b" text-anchor="start" font-weight="400" >同一个比较的四个数通常不同：本仓库 vs OpenBLAS 为 2.50 / 1.99 / 2.17 / 1.77，差异本身就是信息（分布右偏）。</text></svg></div>
+<div class="cols" style="margin-top:16px">
+<div class="card"><h3>vs OpenBLAS（集群，t16）</h3>
+<svg class="chart" viewBox="0 0 560 228" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><line x1="132.0" y1="28.0" x2="132.0" y2="170.0" stroke="#e6eaf2" stroke-width="1" /><text x="132.0" y="22.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >1x</text><line x1="207.5" y1="28.0" x2="207.5" y2="170.0" stroke="#e6eaf2" stroke-width="1" /><text x="207.5" y="22.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >1.5x</text><line x1="282.9" y1="28.0" x2="282.9" y2="170.0" stroke="#e6eaf2" stroke-width="1" /><text x="282.9" y="22.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >2x</text><line x1="358.4" y1="28.0" x2="358.4" y2="170.0" stroke="#e6eaf2" stroke-width="1" /><text x="358.4" y="22.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >2.5x</text><line x1="433.8" y1="28.0" x2="433.8" y2="170.0" stroke="#e6eaf2" stroke-width="1" /><text x="433.8" y="22.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >3x</text><text x="120.0" y="50.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >合计时间比</text><rect x="132.0" y="38.0" width="226.5" height="18.0" rx="3" fill="#0f766e"><title>合计时间比: 2.501x</title></rect><text x="366.5" y="52.0" font-size="11" fill="#0f766e" text-anchor="start" font-weight="700" >2.501x</text><text x="120.0" y="84.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >几何平均</text><rect x="132.0" y="72.0" width="149.8" height="18.0" rx="3" fill="#0f766e"><title>几何平均: 1.992x</title></rect><text x="289.8" y="86.0" font-size="11" fill="#0f766e" text-anchor="start" font-weight="700" >1.992x</text><text x="120.0" y="118.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >算数平均</text><rect x="132.0" y="106.0" width="176.7" height="18.0" rx="3" fill="#0f766e"><title>算数平均: 2.171x</title></rect><text x="316.7" y="120.0" font-size="11" fill="#0f766e" text-anchor="start" font-weight="700" >2.171x</text><text x="120.0" y="152.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >中位数</text><rect x="132.0" y="140.0" width="116.4" height="18.0" rx="3" fill="#0f766e"><title>中位数: 1.771x</title></rect><text x="256.4" y="154.0" font-size="11" fill="#0f766e" text-anchor="start" font-weight="700" >1.771x</text><text x="132.0" y="220.0" font-size="10" fill="#94a3b8" text-anchor="start" font-weight="400" >基线 1.0x；全部指标 &amp;gt; 1，方向一致</text></svg>
+<p style="margin:12px 0 0;font-size:12.5px;color:#64748b">中位数 1.77 &lt; 几何 1.99 &lt; 算数 2.17 &lt; 合计 2.50：
+说明少数极大加速比（大形状）拉高了合计与算数平均，分布右偏。</p></div>
+<div class="card"><h3>SME vs KML（本机，t16 绑核）</h3>
+<svg class="chart" viewBox="0 0 560 228" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><line x1="132.0" y1="28.0" x2="132.0" y2="170.0" stroke="#e6eaf2" stroke-width="1" /><text x="132.0" y="22.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >0.85x</text><line x1="179.4" y1="28.0" x2="179.4" y2="170.0" stroke="#e6eaf2" stroke-width="1" /><text x="179.4" y="22.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >0.9x</text><line x1="274.3" y1="28.0" x2="274.3" y2="170.0" stroke="#e6eaf2" stroke-width="1" /><text x="274.3" y="22.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >1x</text><line x1="369.1" y1="28.0" x2="369.1" y2="170.0" stroke="#e6eaf2" stroke-width="1" /><text x="369.1" y="22.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >1.1x</text><line x1="464.0" y1="28.0" x2="464.0" y2="170.0" stroke="#e6eaf2" stroke-width="1" /><text x="464.0" y="22.0" font-size="9.5" fill="#94a3b8" text-anchor="middle" font-weight="400" >1.2x</text><text x="120.0" y="50.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >合计时间比</text><rect x="274.3" y="38.0" width="110.5" height="18.0" rx="3" fill="#0f766e"><title>合计时间比: 1.117x</title></rect><text x="392.8" y="52.0" font-size="11" fill="#0f766e" text-anchor="start" font-weight="700" >1.117x</text><text x="120.0" y="84.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >几何平均</text><rect x="180.5" y="72.0" width="93.8" height="18.0" rx="3" fill="#be123c"><title>几何平均: 0.901x</title></rect><text x="282.3" y="86.0" font-size="11" fill="#be123c" text-anchor="start" font-weight="700" >0.901x</text><text x="120.0" y="118.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >算数平均</text><rect x="264.3" y="106.0" width="10.0" height="18.0" rx="3" fill="#be123c"><title>算数平均: 0.989x</title></rect><text x="282.3" y="120.0" font-size="11" fill="#be123c" text-anchor="start" font-weight="700" >0.989x</text><text x="120.0" y="152.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >中位数</text><rect x="274.3" y="140.0" width="20.3" height="18.0" rx="3" fill="#0f766e"><title>中位数: 1.021x</title></rect><text x="302.6" y="154.0" font-size="11" fill="#0f766e" text-anchor="start" font-weight="700" >1.021x</text><text x="132.0" y="220.0" font-size="10" fill="#94a3b8" text-anchor="start" font-weight="400" >基线 1.0x；合计与中位 &amp;gt;1，几何 &amp;lt;1</text></svg>
+<p style="margin:12px 0 0;font-size:12.5px;color:#64748b">合计 1.117 与几何 0.901 同时成立：
+SME 赢的是少数大 shape（省下的绝对时间多），输的是小空间大 IC（数量多）。
+这正是「必须同时报四个数」的典型场景。</p></div>
+</div></section>
+
+<section><h2><span class="idx">04</span>方向约定：比值的分子分母写清楚</h2><p class="sub">方向写反会让结论完全相反，这是本仓库踩过的坑。</p><div class="card"><table class="tbl">
+<thead><tr><th>对照</th><th>定义</th><th>&gt;1 的含义</th><th>仓库字段</th></tr></thead>
+<tbody>
+<tr><td>vs OpenBLAS</td><td><code>OpenBLAS / 本项目</code></td><td class="em">&gt;1 = 我们更快</td><td><code>total_speedup</code></td></tr>
+<tr><td>SME vs KML · 合计</td><td><code>SME / KML</code></td><td class="warn">&lt;1 = SME 更快</td><td><code>total_ratio</code></td></tr>
+<tr><td>SME vs KML · 逐形状</td><td><code>KML / SME</code></td><td class="em">&gt;1 = SME 更快</td><td>图表柱高</td></tr>
+</tbody></table>
+<div class="callout rose" style="margin-top:16px"><b>同一个「合计」有两套写法：</b>
+时间比 <code>SME/KML = 0.896</code> 与加速比 <code>KML/SME = 1.117</code> 描述的是同一件事。
+生成脚本里两个字段同时存在（<code>total_ratio</code> / <code>total_speedup</code>），
+就是为了避免显示方向出错。</div></div></section>
+
+<section><h2><span class="idx">05</span>已知陷阱清单</h2><p class="sub">每一条都真实踩过，写在这里是为了不再重复。</p><div class="card"><table class="tbl">
+<thead><tr><th>陷阱</th><th>表现</th><th>正确做法</th></tr></thead>
+<tbody>
+<tr><td>debug 计时</td><td><code>WINO_GEMM_DEBUG=1</code> 会放大小形状耗时，甚至把比值翻倍</td>
+<td>ours 侧只信无 debug 读数（E3/E5）</td></tr>
+<tr><td>timing 总时间当绝对值</td><td>S 比真实单线程高 5–27%</td>
+<td>占比看 S，绝对耗时看 T1</td></tr>
+<tr><td>跨机比较</td><td>集群 321.9 ms 与本机 345.9 ms 不是同一件事</td>
+<td>集群一套、本机一套，各自纵向比</td></tr>
+<tr><td>跨作业比较</td><td>3–7x 性能态漂移</td><td>单 sbatch 作业内 A/B</td></tr>
+<tr><td>oneDNN 逐形状数据</td><td>只存在于集群 <code>build/</code>，不在仓库</td>
+<td>只能引用区间（e2e_wino 1.15–9.5x），不编造逐条</td></tr>
+<tr><td>V 缓存容量</td><td><code>kMaxEntries=24</code>，59 层网络第 25 层起不命中</td>
+<td>层数 &gt; 24 时把 V 缓存收益按 &lt; 一半计</td></tr>
+</tbody></table></div></section>
+
+<section><h2><span class="idx">06</span>复现命令</h2><p class="sub">所有图表都能从仓库里的 markdown 表重新生成，不手改 HTML。</p><div class="card"><pre class="code"><code># 1) 正确性门（fp64 参考 + 相对容差 1e-4）
+./build/bench_winograd --sve --nhwc --verify --threads 16 shapes/conv_all.csv
+
+# 2) 集群：单作业内 A/B（ours / oneDNN e2e / benchdnn）
+sbatch -w node03 --exclusive --wrap=&quot;bash tools/onednn/ab_onednn.sh&quot;
+cat build/SUMMARY.txt
+
+# 3) 本机：SME vs KML，必须绑核
+taskset -c 3 ./build_sme_kml/bench_winograd --sme --nhwc --threads 1  shapes/conv_all.csv
+OMP_PROC_BIND=close OMP_PLACES=cores ./build_sme_kml/bench_winograd --sme --nhwc --threads 16 shapes/conv_all.csv
+
+# 4) 重新生成本套 HTML（静态、无外部依赖）
+python3 tools/gen_report_figures.py</code></pre></div></section>
+
+<div class="foot">
+  
+  数据来源：<code>docs/final_benchmark_bfd6b1e.md</code>（vs OpenBLAS）、
+  <code>docs/sme_fmopa_gemm.md</code>（SME vs KML）。
+  生成脚本：<code>tools/gen_report_figures.py</code>（本页为静态 HTML，无外部依赖）。
+</div>
+</div>
+</body>
+</html>

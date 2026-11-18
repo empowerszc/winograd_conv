@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>① Winograd 原理</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; }
+:root {
+  --ink: #0b1220; --slate: #334155; --muted: #64748b; --faint: #94a3b8;
+  --line: #e5e9f2; --bg: #f7f8fc; --card: #ffffff;
+  --indigo: #4338ca; --indigo-2: #6366f1; --indigo-soft: #eef2ff;
+  --teal: #0f766e; --teal-soft: #ecfdf5;
+  --amber: #b45309; --amber-soft: #fffbeb;
+  --rose: #be123c; --rose-soft: #fff1f2;
+  --green: #15803d;
+  --radius: 14px;
+}
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--slate);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 15px; line-height: 1.7;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+}
+.page { max-width: 1220px; margin: 0 auto; padding: 40px 32px 96px; }
+a { color: var(--indigo); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.num { font-variant-numeric: tabular-nums;
+       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+/* nav */
+.nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 34px; }
+.nav a {
+  font-size: 12.5px; padding: 6px 12px; border-radius: 999px;
+  background: #fff; border: 1px solid var(--line); color: var(--muted);
+  transition: .15s ease;
+}
+.nav a:hover { border-color: #c7d2fe; color: var(--indigo); text-decoration: none; }
+.nav a.on { background: var(--indigo); border-color: var(--indigo); color: #fff; }
+
+/* header */
+.eyebrow {
+  font-size: 11.5px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--indigo); font-weight: 700; margin-bottom: 12px;
+}
+h1 { font-size: 32px; line-height: 1.28; margin: 0 0 12px; color: var(--ink); font-weight: 750; letter-spacing: -.01em; }
+.lede { font-size: 15.5px; color: var(--muted); max-width: 78ch; margin: 0 0 22px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12.5px; color: var(--faint); margin-bottom: 44px; }
+.meta b { color: var(--slate); font-weight: 600; }
+
+/* sections */
+section { margin: 0 0 40px; }
+h2 {
+  font-size: 19px; color: var(--ink); font-weight: 700; margin: 0 0 6px;
+  display: flex; align-items: baseline; gap: 10px;
+}
+h2 .idx {
+  font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--indigo);
+  background: var(--indigo-soft); border-radius: 6px; padding: 2px 7px; font-weight: 700;
+}
+.sub { color: var(--muted); font-size: 13.5px; margin: 0 0 18px; max-width: 88ch; }
+h3 { font-size: 15px; color: var(--ink); margin: 26px 0 10px; font-weight: 650; }
+
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 24px 26px; box-shadow: 0 1px 2px rgba(15,23,42,.03), 0 18px 40px -28px rgba(15,23,42,.22);
+}
+.card + .card { margin-top: 16px; }
+.card > h3:first-child { margin-top: 0; }
+
+/* metric strip */
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+.metric {
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px;
+}
+.metric .k { font-size: 11.5px; color: var(--faint); letter-spacing: .04em; text-transform: uppercase; }
+.metric .v { font-size: 27px; font-weight: 750; color: var(--ink); line-height: 1.25; margin-top: 6px; letter-spacing: -.02em; }
+.metric .n { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.metric.hl { border-color: #c7d2fe; background: linear-gradient(180deg, #fbfbff, #fff); }
+.metric.hl .v { color: var(--indigo); }
+
+/* tables */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.tbl th, .tbl td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.tbl th { font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--faint); font-weight: 700; }
+.tbl tr:last-child td { border-bottom: 0; }
+.tbl td.c, .tbl th.c { text-align: center; }
+.tbl td.r, .tbl th.r { text-align: right; }
+.tbl tbody tr:hover { background: #fafbff; }
+.tbl .em { color: var(--indigo); font-weight: 700; }
+.tbl .warn { color: var(--rose); font-weight: 700; }
+
+.tag {
+  display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px;
+  border-radius: 999px; white-space: nowrap;
+}
+.tag.same { background: var(--teal-soft); color: var(--teal); }
+.tag.diff { background: var(--amber-soft); color: var(--amber); }
+.tag.gap  { background: var(--rose-soft); color: var(--rose); }
+.tag.n    { background: #f1f5f9; color: var(--muted); }
+
+/* chart */
+.chart { display: block; width: 100%; height: auto; }
+.diagram { display: block; width: 100%; height: auto; }
+.chart-wrap { overflow-x: auto; }
+
+/* code */
+pre.code {
+  background: #0b1220; color: #dbe4ff; border-radius: 12px; padding: 18px 20px;
+  overflow-x: auto; font-size: 12.5px; line-height: 1.65; margin: 14px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre.code .c { color: #7c8db5; }
+
+/* callout */
+.callout {
+  border-left: 3px solid var(--amber); background: var(--amber-soft);
+  border-radius: 0 10px 10px 0; padding: 16px 20px; font-size: 13.5px; color: #78350f;
+  margin: 16px 0 0;
+}
+.callout.rose { border-color: var(--rose); background: var(--rose-soft); color: #881337; }
+.callout.indigo { border-color: var(--indigo); background: var(--indigo-soft); color: #312e81; }
+.callout.teal { border-color: var(--teal); background: var(--teal-soft); color: #134e4a; }
+.callout b { font-weight: 700; }
+
+/* two-column */
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; align-items: start; }
+.cols.tight { gap: 12px; }
+
+/* footer */
+.foot { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12px; }
+
+/* index cards */
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+a.tile {
+  display: block; background: #fff; border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 22px 24px; color: inherit; transition: .16s ease; height: 100%;
+  box-shadow: 0 1px 2px rgba(15,23,42,.03);
+}
+a.tile:hover { text-decoration: none; border-color: #c7d2fe; transform: translateY(-2px);
+               box-shadow: 0 10px 30px -18px rgba(67,56,202,.45); }
+a.tile .n { font-size: 11.5px; color: var(--indigo); font-weight: 700; letter-spacing: .1em; }
+a.tile h3 { margin: 8px 0 6px; font-size: 16.5px; color: var(--ink); }
+a.tile p { margin: 0; font-size: 13px; color: var(--muted); }
+a.tile .spark { margin-top: 16px; height: 42px; }
+
+@media print {
+  body { background: #fff; }
+  .page { max-width: none; padding: 0; }
+  .nav { display: none; }
+  .card { box-shadow: none; break-inside: avoid; }
+  section { break-inside: avoid; }
+}
+@media (max-width: 720px) {
+  .page { padding: 24px 16px 64px; }
+  h1 { font-size: 25px; }
+  .card { padding: 18px 16px; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+<nav class="nav"><a href="index.html" class="">总览</a><a href="01_winograd_principles.html" class="on">① Winograd 原理</a><a href="02_system_architecture.html" class="">② 系统结构</a><a href="03_sme_gemm.html" class="">③ SME 内核</a><a href="04_performance.html" class="">④ 性能结果</a><a href="05_acl_comparison.html" class="">⑤ 与 ACL 对比</a><a href="06_timing.html" class="">⑥ 步耗时</a><a href="07_methodology.html" class="">⑦ 测量口径</a><a href="08_roadmap.html" class="">⑧ 演进路线</a><a href="09_bench_shapes.html" class="">⑨ 用例集</a></nav>
+<header>
+  <div class="eyebrow">Winograd 卷积复刻项目 · 图示</div>
+  <h1>① Winograd 原理</h1>
+  <p class="lede">F(4,4,3,3) 如何把每个输出像素的 9 次乘法降到 2.25 次，以及这条路径的代价落在哪里。</p>
+</header>
+
+<section><h2><span class="idx">01</span>tile 怎么切</h2><div class="card"><svg class="diagram" viewBox="0 0 760 300" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><text x="70.0" y="26.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="600" >输入特征图（每格 = 1 像素 × IC 通道）</text><rect x="70.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="100.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="130.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="160.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="190.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#c7d2fe" /><rect x="220.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#c7d2fe" /><rect x="250.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="280.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="310.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="340.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="370.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#eef2ff" /><rect x="400.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#eef2ff" /><rect x="70.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="100.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="130.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="160.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="190.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#c7d2fe" /><rect x="220.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#c7d2fe" /><rect x="250.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="280.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="310.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="340.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="370.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#eef2ff" /><rect x="400.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#eef2ff" /><rect x="70.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="100.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="130.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="160.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="190.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#c7d2fe" /><rect x="220.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#c7d2fe" /><rect x="250.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="280.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="310.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="340.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="370.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#eef2ff" /><rect x="400.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#eef2ff" /><rect x="70.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="100.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="130.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="160.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="190.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#c7d2fe" /><rect x="220.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#c7d2fe" /><rect x="250.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="280.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="310.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="340.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="370.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#eef2ff" /><rect x="400.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#eef2ff" /><rect x="70.0" y="174.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="100.0" y="174.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="130.0" y="174.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="160.0" y="174.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="190.0" y="174.0" width="29.0" height="29.0" rx="2" fill="#c7d2fe" /><rect x="220.0" y="174.0" width="29.0" height="29.0" rx="2" fill="#c7d2fe" /><rect x="250.0" y="174.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="280.0" y="174.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="310.0" y="174.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="340.0" y="174.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="370.0" y="174.0" width="29.0" height="29.0" rx="2" fill="#eef2ff" /><rect x="400.0" y="174.0" width="29.0" height="29.0" rx="2" fill="#eef2ff" /><rect x="70.0" y="204.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="100.0" y="204.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="130.0" y="204.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="160.0" y="204.0" width="29.0" height="29.0" rx="2" fill="#e0e7ff" /><rect x="190.0" y="204.0" width="29.0" height="29.0" rx="2" fill="#c7d2fe" /><rect x="220.0" y="204.0" width="29.0" height="29.0" rx="2" fill="#c7d2fe" /><rect x="250.0" y="204.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="280.0" y="204.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="310.0" y="204.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="340.0" y="204.0" width="29.0" height="29.0" rx="2" fill="#ede9fe" /><rect x="370.0" y="204.0" width="29.0" height="29.0" rx="2" fill="#eef2ff" /><rect x="400.0" y="204.0" width="29.0" height="29.0" rx="2" fill="#eef2ff" /><rect x="70" y="54" width="179" height="179" fill="none" stroke="#4338ca" stroke-width="2" rx="3"/><rect x="190" y="54" width="179" height="179" fill="none" stroke="#7c3aed" stroke-width="2" stroke-dasharray="5 3" rx="3"/><text x="160.0" y="254.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="700" >tile 0：6×6 输入</text><text x="280.0" y="254.0" font-size="11" fill="#7c3aed" text-anchor="middle" font-weight="700" >tile 1：6×6 输入</text><text x="250.0" y="44.0" font-size="10.5" fill="#64748b" text-anchor="middle" font-weight="400" >步长 4 → 相邻 tile 重叠 2 列</text><path d="M456 134 h46" stroke="#94a3b8" stroke-width="2" marker-end="url(#ar)"/><defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker></defs><rect x="516.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#ccfbf1" /><rect x="546.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#ccfbf1" /><rect x="576.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#ccfbf1" /><rect x="606.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#ccfbf1" /><rect x="516.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#ccfbf1" /><rect x="546.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#ccfbf1" /><rect x="576.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#ccfbf1" /><rect x="606.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#ccfbf1" /><rect x="516.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#ccfbf1" /><rect x="546.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#ccfbf1" /><rect x="576.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#ccfbf1" /><rect x="606.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#ccfbf1" /><rect x="516.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#ccfbf1" /><rect x="546.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#ccfbf1" /><rect x="576.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#ccfbf1" /><rect x="606.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#ccfbf1" /><rect x="516" y="54" width="119" height="119" fill="none" stroke="#0f766e" stroke-width="2" rx="3"/><text x="576.0" y="194.0" font-size="11" fill="#0f766e" text-anchor="middle" font-weight="700" >输出 tile 0：4×4</text><rect x="644.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#f5f3ff" /><rect x="674.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#f5f3ff" /><rect x="704.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#f5f3ff" /><rect x="734.0" y="54.0" width="29.0" height="29.0" rx="2" fill="#f5f3ff" /><rect x="644.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#f5f3ff" /><rect x="674.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#f5f3ff" /><rect x="704.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#f5f3ff" /><rect x="734.0" y="84.0" width="29.0" height="29.0" rx="2" fill="#f5f3ff" /><rect x="644.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#f5f3ff" /><rect x="674.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#f5f3ff" /><rect x="704.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#f5f3ff" /><rect x="734.0" y="114.0" width="29.0" height="29.0" rx="2" fill="#f5f3ff" /><rect x="644.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#f5f3ff" /><rect x="674.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#f5f3ff" /><rect x="704.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#f5f3ff" /><rect x="734.0" y="144.0" width="29.0" height="29.0" rx="2" fill="#f5f3ff" /><rect x="644" y="54" width="119" height="119" fill="none" stroke="#7c3aed" stroke-width="2" rx="3"/><text x="704.0" y="194.0" font-size="11" fill="#7c3aed" text-anchor="middle" font-weight="700" >输出 tile 1：4×4</text><text x="734.0" y="26.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >输出（4×4 像素 × OC 通道）</text><text x="380.0" y="288.0" font-size="11" fill="#64748b" text-anchor="middle" font-weight="400" >F(4,4,3,3)：一个 6×6 输入 tile 经 36 次乘法产出 16 个输出像素；相邻 tile 重叠 2 列/行以覆盖 3×3 卷积的感受野。</text></svg></div></section>
+
+<section><h2><span class="idx">02</span>三段流水</h2><p class="sub">Winograd 把一个卷积拆成三次小规模变换 + 一次批量小矩阵乘，乘法量集中在第二阶段。</p><div class="card"><svg class="diagram" viewBox="0 0 1180 250" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><rect x="47.5" y="42.0" width="330.0" height="150.0" rx="12" fill="#eef2ff" stroke="#4338ca" stroke-opacity="0.25"/><rect x="47.5" y="42.0" width="4.0" height="150.0" rx="2" fill="#4338ca" /><text x="65.5" y="68.0" font-size="12.5" fill="#4338ca" text-anchor="start" font-weight="700" >Phase 1 · 输入变换</text><text x="65.5" y="98.0" font-size="12.5" fill="#0f172a" text-anchor="start" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" >U = Bᵀ · d · B</text><text x="65.5" y="122.0" font-size="11" fill="#475569" text-anchor="start" font-weight="400" >6×6×IC  →  6×6×IC</text><text x="65.5" y="148.0" font-size="10.5" fill="#64748b" text-anchor="start" font-weight="400" >每 tile 一次</text><text x="65.5" y="164.0" font-size="10.5" fill="#64748b" text-anchor="start" font-weight="400" >通道向量化（SVE 谓词）</text><path d="M383.5 117.0 h31.5" stroke="#94a3b8" stroke-width="2" marker-end="url(#ar2)"/><rect x="425.0" y="42.0" width="330.0" height="150.0" rx="12" fill="#ecfdf5" stroke="#0f766e" stroke-opacity="0.25"/><rect x="425.0" y="42.0" width="4.0" height="150.0" rx="2" fill="#0f766e" /><text x="443.0" y="68.0" font-size="12.5" fill="#0f766e" text-anchor="start" font-weight="700" >Phase 2 · Winograd 域 GEMM</text><text x="443.0" y="98.0" font-size="12.5" fill="#0f172a" text-anchor="start" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" >M[ts] = U[ts] · V[ts]ᵀ</text><text x="443.0" y="122.0" font-size="11" fill="#475569" text-anchor="start" font-weight="400" >36 个切片，M×N×K = tile × OC × IC</text><text x="443.0" y="148.0" font-size="10.5" fill="#64748b" text-anchor="start" font-weight="400" >按 ts 分线程 / 每线程折叠成</text><text x="443.0" y="164.0" font-size="10.5" fill="#64748b" text-anchor="start" font-weight="400" >一次 batched 调用</text><path d="M761.0 117.0 h31.5" stroke="#94a3b8" stroke-width="2" marker-end="url(#ar2)"/><rect x="802.5" y="42.0" width="330.0" height="150.0" rx="12" fill="#fff7ed" stroke="#b45309" stroke-opacity="0.25"/><rect x="802.5" y="42.0" width="4.0" height="150.0" rx="2" fill="#b45309" /><text x="820.5" y="68.0" font-size="12.5" fill="#b45309" text-anchor="start" font-weight="700" >Phase 3 · 输出变换</text><text x="820.5" y="98.0" font-size="12.5" fill="#0f172a" text-anchor="start" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" >f = Aᵀ · M · A + bias</text><text x="820.5" y="122.0" font-size="11" fill="#475569" text-anchor="start" font-weight="400" >6×6×OC  →  4×4×OC</text><text x="820.5" y="148.0" font-size="10.5" fill="#64748b" text-anchor="start" font-weight="400" >每 tile 一次</text><text x="820.5" y="164.0" font-size="10.5" fill="#64748b" text-anchor="start" font-weight="400" >含 bias 与 clamp(ReLU)</text><defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker></defs><text x="590.0" y="24.0" font-size="12.5" fill="#334155" text-anchor="middle" font-weight="700" >一次前向的三段流水（每个 batch 重复一次）</text><text x="590.0" y="234.0" font-size="11" fill="#64748b" text-anchor="middle" font-weight="400" >权重变换 V = G·g·Gᵀ/576 只在首次调用做一次，之后跨调用缓存 —— 这是 Winograd 把「核窗口累加」的代价在权重侧一次付清的关键。</text></svg></div></section>
+
+<section><h2><span class="idx">03</span>为什么值得做</h2><div class="cols">
+<div class="card"><svg class="chart" viewBox="0 0 560 210" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><text x="128.0" y="24.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="600" >每个 4×4 输出块（16 像素）的乘法次数</text><text x="116.0" y="66.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >直接卷积 3×3</text><rect x="128.0" y="52.0" width="332.0" height="26.0" rx="4" fill="#cbd5e1" /><text x="468.0" y="70.0" font-size="11.5" fill="#475569" text-anchor="start" font-weight="700" >144  (16 像素 × 9)</text><text x="116.0" y="122.0" font-size="11.5" fill="#334155" text-anchor="end" font-weight="600" >Winograd F(4,4)</text><rect x="128.0" y="108.0" width="83.0" height="26.0" rx="4" fill="#4338ca" /><text x="219.0" y="126.0" font-size="11.5" fill="#4338ca" text-anchor="start" font-weight="700" >36  (6×6 = 36)</text><text x="128.0" y="178.0" font-size="15" fill="#4338ca" text-anchor="start" font-weight="700" >乘法数 −75%</text><text x="236.0" y="178.0" font-size="11.5" fill="#475569" text-anchor="start" font-weight="400" >→ 每输出像素 9 次降到 2.25 次</text></svg>
+<p style="margin:14px 0 0;font-size:13px;color:#64748b">
+代价是额外的加法与两次变换：输入变换每 tile 一次、输出变换每 tile 一次。
+只有当 IC×spatial 足够大、能把变换的固定开销摊薄时，净收益才为正 ——
+这正好解释了「小形状该走直接卷积」的边界。</p></div>
+<div class="card"><svg class="diagram" viewBox="0 0 420 344" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><text x="46.0" y="26.0" font-size="11.5" fill="#334155" text-anchor="start" font-weight="600" >Bᵀ（F(4,4,3,3) 输入变换矩阵）</text><rect x="46.0" y="56.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="62.0" y="77.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >4</text><rect x="80.0" y="56.0" width="32.0" height="32.0" rx="3" fill="#f1f5f9" /><text x="96.0" y="77.0" font-size="11" fill="#cbd5e1" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >0</text><rect x="114.0" y="56.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="130.0" y="77.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >-5</text><rect x="148.0" y="56.0" width="32.0" height="32.0" rx="3" fill="#f1f5f9" /><text x="164.0" y="77.0" font-size="11" fill="#cbd5e1" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >0</text><rect x="182.0" y="56.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="198.0" y="77.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >1</text><rect x="216.0" y="56.0" width="32.0" height="32.0" rx="3" fill="#f1f5f9" /><text x="232.0" y="77.0" font-size="11" fill="#cbd5e1" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >0</text><rect x="46.0" y="90.0" width="32.0" height="32.0" rx="3" fill="#f1f5f9" /><text x="62.0" y="111.0" font-size="11" fill="#cbd5e1" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >0</text><rect x="80.0" y="90.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="96.0" y="111.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >-4</text><rect x="114.0" y="90.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="130.0" y="111.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >-4</text><rect x="148.0" y="90.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="164.0" y="111.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >1</text><rect x="182.0" y="90.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="198.0" y="111.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >1</text><rect x="216.0" y="90.0" width="32.0" height="32.0" rx="3" fill="#f1f5f9" /><text x="232.0" y="111.0" font-size="11" fill="#cbd5e1" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >0</text><rect x="46.0" y="124.0" width="32.0" height="32.0" rx="3" fill="#f1f5f9" /><text x="62.0" y="145.0" font-size="11" fill="#cbd5e1" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >0</text><rect x="80.0" y="124.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="96.0" y="145.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >4</text><rect x="114.0" y="124.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="130.0" y="145.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >-4</text><rect x="148.0" y="124.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="164.0" y="145.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >-1</text><rect x="182.0" y="124.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="198.0" y="145.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >1</text><rect x="216.0" y="124.0" width="32.0" height="32.0" rx="3" fill="#f1f5f9" /><text x="232.0" y="145.0" font-size="11" fill="#cbd5e1" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >0</text><rect x="46.0" y="158.0" width="32.0" height="32.0" rx="3" fill="#f1f5f9" /><text x="62.0" y="179.0" font-size="11" fill="#cbd5e1" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >0</text><rect x="80.0" y="158.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="96.0" y="179.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >-2</text><rect x="114.0" y="158.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="130.0" y="179.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >-1</text><rect x="148.0" y="158.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="164.0" y="179.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >2</text><rect x="182.0" y="158.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="198.0" y="179.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >1</text><rect x="216.0" y="158.0" width="32.0" height="32.0" rx="3" fill="#f1f5f9" /><text x="232.0" y="179.0" font-size="11" fill="#cbd5e1" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >0</text><rect x="46.0" y="192.0" width="32.0" height="32.0" rx="3" fill="#f1f5f9" /><text x="62.0" y="213.0" font-size="11" fill="#cbd5e1" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >0</text><rect x="80.0" y="192.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="96.0" y="213.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >2</text><rect x="114.0" y="192.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="130.0" y="213.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >-1</text><rect x="148.0" y="192.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="164.0" y="213.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >-2</text><rect x="182.0" y="192.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="198.0" y="213.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >1</text><rect x="216.0" y="192.0" width="32.0" height="32.0" rx="3" fill="#f1f5f9" /><text x="232.0" y="213.0" font-size="11" fill="#cbd5e1" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >0</text><rect x="46.0" y="226.0" width="32.0" height="32.0" rx="3" fill="#f1f5f9" /><text x="62.0" y="247.0" font-size="11" fill="#cbd5e1" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >0</text><rect x="80.0" y="226.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="96.0" y="247.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >4</text><rect x="114.0" y="226.0" width="32.0" height="32.0" rx="3" fill="#f1f5f9" /><text x="130.0" y="247.0" font-size="11" fill="#cbd5e1" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >0</text><rect x="148.0" y="226.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="164.0" y="247.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >-5</text><rect x="182.0" y="226.0" width="32.0" height="32.0" rx="3" fill="#f1f5f9" /><text x="198.0" y="247.0" font-size="11" fill="#cbd5e1" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >0</text><rect x="216.0" y="226.0" width="32.0" height="32.0" rx="3" fill="#e0e7ff" /><text x="232.0" y="247.0" font-size="11" fill="#4338ca" text-anchor="middle" font-weight="600" font-family="ui-monospace, Menlo, monospace" >1</text><text x="46.0" y="286.0" font-size="11" fill="#475569" text-anchor="start" font-weight="400" >36 个系数中 14 个为零（39%）</text><text x="46.0" y="306.0" font-size="10.5" fill="#64748b" text-anchor="start" font-weight="400" >零系数占比高 → 专用展开内核可跳过近一半运算量</text><text x="46.0" y="326.0" font-size="10.5" fill="#94a3b8" text-anchor="start" font-weight="400" >（当前实现用运行时判断跳过；ACL 在编译期直接消去）</text></svg>
+<p style="margin:14px 0 0;font-size:13px;color:#64748b">
+Bᵀ 与 A 都有大量零系数。ACL 在编译期把它们消去（全展开汇编）；
+本项目当前在运行时 <code>continue</code> 跳过 —— 这是变换阶段仍有 30–50% 优化空间的原因。</p></div>
+</div></section>
+
+<section><h2><span class="idx">04</span>数值精度：为什么用相对容差</h2><p class="sub">F(4,4) 的 A 矩阵系数最大到 ±8，会把 GEMM 的累加误差放大；误差随 IC 线性增长，输出幅值也同步增长。</p><div class="card"><table class="tbl">
+<thead><tr><th>量</th><th class="r">典型值</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>绝对误差（IC=384）</td><td class="r num">~1e-2</td><td>输出幅值 ~1000，直接看绝对值会误判为 FAIL</td></tr>
+<tr><td>相对误差</td><td class="r num">2–6e-6</td><td>与 IC 基本无关，属 fp32 正常水平</td></tr>
+<tr><td>验证判据</td><td class="r num">1e-4 × max|ref| + 1e-5</td><td>fp64 直接卷积作参考，逐元素比较</td></tr>
+</tbody></table>
+<div class="callout teal" style="margin-top:16px">
+早期用固定绝对容差 1e-3，导致 IC=384/768 的大用例被误报为 FAIL —— 实际相对误差只有 6e-6。
+<b>判据必须随规模缩放</b>，这是验证方法学上最容易踩的坑。
+</div></div></section>
+
+<div class="foot">
+  
+  数据来源：<code>docs/final_benchmark_bfd6b1e.md</code>（vs OpenBLAS）、
+  <code>docs/sme_fmopa_gemm.md</code>（SME vs KML）。
+  生成脚本：<code>tools/gen_report_figures.py</code>（本页为静态 HTML，无外部依赖）。
+</div>
+</div>
+</body>
+</html>

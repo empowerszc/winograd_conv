@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>⑤ 与 ACL 的差异与优势</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; }
+:root {
+  --ink: #0b1220; --slate: #334155; --muted: #64748b; --faint: #94a3b8;
+  --line: #e5e9f2; --bg: #f7f8fc; --card: #ffffff;
+  --indigo: #4338ca; --indigo-2: #6366f1; --indigo-soft: #eef2ff;
+  --teal: #0f766e; --teal-soft: #ecfdf5;
+  --amber: #b45309; --amber-soft: #fffbeb;
+  --rose: #be123c; --rose-soft: #fff1f2;
+  --green: #15803d;
+  --radius: 14px;
+}
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--slate);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 15px; line-height: 1.7;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+}
+.page { max-width: 1220px; margin: 0 auto; padding: 40px 32px 96px; }
+a { color: var(--indigo); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.num { font-variant-numeric: tabular-nums;
+       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+/* nav */
+.nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 34px; }
+.nav a {
+  font-size: 12.5px; padding: 6px 12px; border-radius: 999px;
+  background: #fff; border: 1px solid var(--line); color: var(--muted);
+  transition: .15s ease;
+}
+.nav a:hover { border-color: #c7d2fe; color: var(--indigo); text-decoration: none; }
+.nav a.on { background: var(--indigo); border-color: var(--indigo); color: #fff; }
+
+/* header */
+.eyebrow {
+  font-size: 11.5px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--indigo); font-weight: 700; margin-bottom: 12px;
+}
+h1 { font-size: 32px; line-height: 1.28; margin: 0 0 12px; color: var(--ink); font-weight: 750; letter-spacing: -.01em; }
+.lede { font-size: 15.5px; color: var(--muted); max-width: 78ch; margin: 0 0 22px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12.5px; color: var(--faint); margin-bottom: 44px; }
+.meta b { color: var(--slate); font-weight: 600; }
+
+/* sections */
+section { margin: 0 0 40px; }
+h2 {
+  font-size: 19px; color: var(--ink); font-weight: 700; margin: 0 0 6px;
+  display: flex; align-items: baseline; gap: 10px;
+}
+h2 .idx {
+  font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--indigo);
+  background: var(--indigo-soft); border-radius: 6px; padding: 2px 7px; font-weight: 700;
+}
+.sub { color: var(--muted); font-size: 13.5px; margin: 0 0 18px; max-width: 88ch; }
+h3 { font-size: 15px; color: var(--ink); margin: 26px 0 10px; font-weight: 650; }
+
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 24px 26px; box-shadow: 0 1px 2px rgba(15,23,42,.03), 0 18px 40px -28px rgba(15,23,42,.22);
+}
+.card + .card { margin-top: 16px; }
+.card > h3:first-child { margin-top: 0; }
+
+/* metric strip */
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+.metric {
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px;
+}
+.metric .k { font-size: 11.5px; color: var(--faint); letter-spacing: .04em; text-transform: uppercase; }
+.metric .v { font-size: 27px; font-weight: 750; color: var(--ink); line-height: 1.25; margin-top: 6px; letter-spacing: -.02em; }
+.metric .n { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.metric.hl { border-color: #c7d2fe; background: linear-gradient(180deg, #fbfbff, #fff); }
+.metric.hl .v { color: var(--indigo); }
+
+/* tables */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.tbl th, .tbl td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.tbl th { font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--faint); font-weight: 700; }
+.tbl tr:last-child td { border-bottom: 0; }
+.tbl td.c, .tbl th.c { text-align: center; }
+.tbl td.r, .tbl th.r { text-align: right; }
+.tbl tbody tr:hover { background: #fafbff; }
+.tbl .em { color: var(--indigo); font-weight: 700; }
+.tbl .warn { color: var(--rose); font-weight: 700; }
+
+.tag {
+  display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px;
+  border-radius: 999px; white-space: nowrap;
+}
+.tag.same { background: var(--teal-soft); color: var(--teal); }
+.tag.diff { background: var(--amber-soft); color: var(--amber); }
+.tag.gap  { background: var(--rose-soft); color: var(--rose); }
+.tag.n    { background: #f1f5f9; color: var(--muted); }
+
+/* chart */
+.chart { display: block; width: 100%; height: auto; }
+.diagram { display: block; width: 100%; height: auto; }
+.chart-wrap { overflow-x: auto; }
+
+/* code */
+pre.code {
+  background: #0b1220; color: #dbe4ff; border-radius: 12px; padding: 18px 20px;
+  overflow-x: auto; font-size: 12.5px; line-height: 1.65; margin: 14px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre.code .c { color: #7c8db5; }
+
+/* callout */
+.callout {
+  border-left: 3px solid var(--amber); background: var(--amber-soft);
+  border-radius: 0 10px 10px 0; padding: 16px 20px; font-size: 13.5px; color: #78350f;
+  margin: 16px 0 0;
+}
+.callout.rose { border-color: var(--rose); background: var(--rose-soft); color: #881337; }
+.callout.indigo { border-color: var(--indigo); background: var(--indigo-soft); color: #312e81; }
+.callout.teal { border-color: var(--teal); background: var(--teal-soft); color: #134e4a; }
+.callout b { font-weight: 700; }
+
+/* two-column */
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; align-items: start; }
+.cols.tight { gap: 12px; }
+
+/* footer */
+.foot { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12px; }
+
+/* index cards */
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+a.tile {
+  display: block; background: #fff; border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 22px 24px; color: inherit; transition: .16s ease; height: 100%;
+  box-shadow: 0 1px 2px rgba(15,23,42,.03);
+}
+a.tile:hover { text-decoration: none; border-color: #c7d2fe; transform: translateY(-2px);
+               box-shadow: 0 10px 30px -18px rgba(67,56,202,.45); }
+a.tile .n { font-size: 11.5px; color: var(--indigo); font-weight: 700; letter-spacing: .1em; }
+a.tile h3 { margin: 8px 0 6px; font-size: 16.5px; color: var(--ink); }
+a.tile p { margin: 0; font-size: 13px; color: var(--muted); }
+a.tile .spark { margin-top: 16px; height: 42px; }
+
+@media print {
+  body { background: #fff; }
+  .page { max-width: none; padding: 0; }
+  .nav { display: none; }
+  .card { box-shadow: none; break-inside: avoid; }
+  section { break-inside: avoid; }
+}
+@media (max-width: 720px) {
+  .page { padding: 24px 16px 64px; }
+  h1 { font-size: 25px; }
+  .card { padding: 18px 16px; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+<nav class="nav"><a href="index.html" class="">总览</a><a href="01_winograd_principles.html" class="">① Winograd 原理</a><a href="02_system_architecture.html" class="">② 系统结构</a><a href="03_sme_gemm.html" class="">③ SME 内核</a><a href="04_performance.html" class="">④ 性能结果</a><a href="05_acl_comparison.html" class="on">⑤ 与 ACL 对比</a><a href="06_timing.html" class="">⑥ 步耗时</a><a href="07_methodology.html" class="">⑦ 测量口径</a><a href="08_roadmap.html" class="">⑧ 演进路线</a><a href="09_bench_shapes.html" class="">⑨ 用例集</a></nav>
+<header>
+  <div class="eyebrow">Winograd 卷积复刻项目 · 图示</div>
+  <h1>⑤ 与 ACL 的差异与优势</h1>
+  <p class="lede">同一套数学，两种工程哲学：ACL 用「手写内核 + 形状自适应」，本项目用「泛型内核 + 系统级取舍」。</p>
+</header>
+
+<section><h2><span class="idx">01</span>先说同源</h2><p class="sub">汇报时先讲这一页，后面的差异才站得住：数学层面 100% 同源，差别全在工程实现与调度策略。</p><div class="card"><table class="tbl">
+<thead><tr><th>维度</th><th>ACL 53.1.0</th><th>本项目</th><th class="c">判定</th></tr></thead>
+<tbody><tr><td>算法与公式</td><td>Y = Aᵀ[(GgGᵀ) ⊙ (BᵀdB)]A</td><td>同</td><td class="c"><span class="tag same">一致</span></td></tr><tr><td>G / Bᵀ / A 矩阵</td><td>6/-4/-4/1/1/0 …；4,0,-5,0,1,0 …；1,1,1,1,1,0 …</td><td>逐元素相同</td><td class="c"><span class="tag same">一致</span></td></tr><tr><td>归一化</td><td>recip576</td><td>1/576</td><td class="c"><span class="tag same">一致</span></td></tr><tr><td>tile 划分</td><td>6×6 输入 / 4×4 输出 / 步长 4</td><td>同</td><td class="c"><span class="tag same">一致</span></td></tr><tr><td>输出变换</td><td>融合 bias + clamp</td><td>同</td><td class="c"><span class="tag same">一致</span></td></tr><tr><td>SME 输出变换</td><td>sme_fp32_mopa_4x4_3x3</td><td>移植同一实现</td><td class="c"><span class="tag same">一致</span></td></tr><tr><td>GEMM 源码</td><td>arm_gemm（ACL 自带）</td><td>就地编译同一子集</td><td class="c"><span class="tag same">一致</span></td></tr><tr><td>tile 选择</td><td>按形状贪心选最大输出 tile；小图可退 F(2,2)</td><td>固定 F(4,4)，不降级</td><td class="c"><span class="tag diff">差异</span></td></tr><tr><td>形状门禁</td><td>oneDNN：ih/iw&gt;112、ic/oc&lt;64、threads&gt;28 回退 brgconv</td><td>无门禁</td><td class="c"><span class="tag diff">差异</span></td></tr><tr><td>变换内核</td><td>手写全展开汇编（fp32 共 5 118 行）</td><td>泛型 SVE intrinsics（1 691 行）</td><td class="c"><span class="tag diff">差异</span></td></tr><tr><td>布局写入</td><td>matrix_stride 直写 GEMM 序</td><td>U_tile → U 一次 scatter</td><td class="c"><span class="tag diff">差异</span></td></tr><tr><td>Winograd 域 GEMM</td><td>一次 batched arm_gemm（nmulti=36）</td><td>5 种后端可插拔 + 按线程折叠</td><td class="c"><span class="tag diff">差异</span></td></tr><tr><td>权重缓存</td><td>prepare() 一次，primitive 生命周期</td><td>跨调用 V 缓存（指针+指纹）</td><td class="c"><span class="tag diff">差异</span></td></tr><tr><td>多线程</td><td>NEScheduler + 内核内细粒度切分</td><td>单 OpenMP 区域 + 显式 barrier</td><td class="c"><span class="tag diff">差异</span></td></tr><tr><td>SME 输入变换</td><td>有（sme_fp32_mla_6x6，363 行）</td><td>无（保持纯 SVE）</td><td class="c"><span class="tag diff">差异</span></td></tr><tr><td>SME GEMM</td><td>arm_gemm 自带 sme_*_fp32_mopa_*（需 interleave）</td><td>自研 ZA 内核（K 主序免打包）</td><td class="c"><span class="tag diff">差异</span></td></tr><tr><td>覆盖面</td><td>fp32/fp16、2D/1D、3×3/5×5</td><td>仅 fp32 2D 3×3</td><td class="c"><span class="tag gap">收窄</span></td></tr></tbody></table>
+<p style="margin:14px 0 0;font-size:12.5px;color:#64748b">
+判定依据全部来自仓库内 <code>ComputeLibrary-53.1.0/</code> 源码逐行核对，
+定位命令见 <code>docs/vs_acl.md</code> §6。</p></div></section>
+
+<section><h2><span class="idx">02</span>八条优势（机制 / 证据 / 边界）</h2><p class="sub">每条都给出它成立的边界；只讲好话的对比在答辩时站不住。</p><div class="card"><table class="tbl">
+<thead><tr><th style="width:44px">#</th><th>优势</th><th>证据</th><th>适用边界</th></tr></thead>
+<tbody><tr><td class="num" style="color:#4338ca;font-weight:700">A1</td>
+<td><b>算法选择更彻底</b><div style="font-size:12.5px;color:#64748b;margin-top:2px">全形状 F(4,4)，不因小图退回 F(2,2)、不因线程数回退直接卷积</div></td>
+<td>同算法 PK <b>1.15–9.5x</b></td><td style="font-size:12.5px;color:#94a3b8">边界：极小形状 oneDNN 走 brgconv 更快（0.09–0.91x）</td></tr><tr><td class="num" style="color:#4338ca;font-weight:700">A2</td>
+<td><b>GEMM 后端可插拔</b><div style="font-size:12.5px;color:#64748b;margin-top:2px">5 种后端 + 统一布局契约，可随时 A/B</div></td>
+<td>arm_gemm 59/59 胜 OpenBLAS（合计 2.50x）；本机 KML 反超 arm_gemm</td><td style="font-size:12.5px;color:#94a3b8">结论不可跨机迁移</td></tr><tr><td class="num" style="color:#4338ca;font-weight:700">A3</td>
+<td><b>batched 调用摊薄开销</b><div style="font-size:12.5px;color:#64748b;margin-top:2px">每线程把连续切片折叠进一次 nmulti 调用</div></td>
+<td>修复后 <b>47/59 → 59/59</b></td><td style="font-size:12.5px;color:#94a3b8">切片数少于线程数时退化</td></tr><tr><td class="num" style="color:#4338ca;font-weight:700">A4</td>
+<td><b>单并行区域 + 线程本地缓冲</b><div style="font-size:12.5px;color:#64748b;margin-top:2px">1 次 fork/join、零热路径分配、去掉无效清零</div></td>
+<td>Case 0：14.2 → <b>1.94 ms</b>（7.3x）</td><td style="font-size:12.5px;color:#94a3b8">阶段间不能重叠</td></tr><tr><td class="num" style="color:#4338ca;font-weight:700">A5</td>
+<td><b>缓存贴合裸 API + 防 ABA</b><div style="font-size:12.5px;color:#64748b;margin-top:2px">指针 + 64 点指纹 + shape + ISA 作 key</div></td>
+<td>KML t16 几何 <b>1.07x</b>，最高 1.74x</td><td style="font-size:12.5px;color:#94a3b8">容量 24 条，需 LRU</td></tr><tr><td class="num" style="color:#4338ca;font-weight:700">A6</td>
+<td><b>SME 与切片形状对齐</b><div style="font-size:12.5px;color:#64748b;margin-top:2px">ZA 行 = OC、列 = tile，drain 零转置</div></td>
+<td>t16 合计 <b>快 10.4%</b>，最高 2.2x</td><td style="font-size:12.5px;color:#94a3b8">小空间大 OC/IC 落后 1.4–3.4x</td></tr><tr><td class="num" style="color:#4338ca;font-weight:700">A7</td>
+<td><b>代码规模</b><div style="font-size:12.5px;color:#64748b;margin-top:2px">3 636 行核心可完整通读</div></td>
+<td>ACL Winograd 目录 8 056 行</td><td style="font-size:12.5px;color:#94a3b8">—</td></tr><tr><td class="num" style="color:#4338ca;font-weight:700">A8</td>
+<td><b>独立真值验证</b><div style="font-size:12.5px;color:#64748b;margin-top:2px">fp64 直接卷积 + 相对容差 + bit-exact 布局回归</div></td>
+<td>22/22 通过，相对误差 2–6e-6</td><td style="font-size:12.5px;color:#94a3b8">—</td></tr></tbody></table></div></section>
+
+<section><h2><span class="idx">03</span>六条诚实的差距</h2><p class="sub">建议汇报时主动说 K1 与 K4 —— 主动暴露短板的报告更可信，而且这两条都有明确补法。</p><div class="card"><table class="tbl">
+<thead><tr><th style="width:44px">#</th><th>差距</th><th>具体</th><th>补法</th></tr></thead>
+<tbody><tr><td class="num" style="color:#be123c;font-weight:700">K1</td>
+<td><b>单 kernel 效率</b></td><td style="font-size:13px">transform_1d_sve 约 52 cyc/向量操作（理想 ~2）；ACL 全展开、寄存器驻留</td>
+<td style="font-size:12.5px;color:#64748b">F(4,4) 专用展开内核，预期变换 −30~50%</td></tr><tr><td class="num" style="color:#be123c;font-weight:700">K2</td>
+<td><b>多两趟内存往返</b></td><td style="font-size:13px">输入 scatter 6% + 输出 gather 15%（Case 0 串行计时）</td>
+<td style="font-size:12.5px;color:#64748b">变换直接写 GEMM 序（tile-major 已被实测证伪：−14%/−16%）</td></tr><tr><td class="num" style="color:#be123c;font-weight:700">K3</td>
+<td><b>小形状无 hybrid 退路</b></td><td style="font-size:13px">batch=1、IC≤128、spatial≤56² 慢 0.09–0.91x</td>
+<td style="font-size:12.5px;color:#64748b">im2col + arm_gemm 直接卷积路径</td></tr><tr><td class="num" style="color:#be123c;font-weight:700">K4</td>
+<td><b>SME GEMM 未与 ACL 的 SME 内核同机对打</b></td><td style="font-size:13px">构建时用 filter=&quot;sve_&quot; 强制了 SVE 内核</td>
+<td style="font-size:12.5px;color:#64748b">WINO_GEMM_FILTER=&quot;&quot; 放开，同作业 A/B</td></tr><tr><td class="num" style="color:#be123c;font-weight:700">K5</td>
+<td><b>覆盖面窄</b></td><td style="font-size:13px">仅 fp32、2D、3×3、unit stride</td>
+<td style="font-size:12.5px;color:#64748b">有意取舍</td></tr></tbody></table></div></section>
+
+<section><h2><span class="idx">04</span>同算法 PK 的三种口径</h2><p class="sub">oneDNN 的三列回答三个不同问题，不能混用。</p><div class="card"><table class="tbl">
+<thead><tr><th>对照列</th><th>oneDNN 算法</th><th>回答的问题</th><th>结果</th></tr></thead>
+<tbody>
+<tr><td><code>e2e_auto</code></td><td>自动（40 wino:acl + 19 brgconv）</td><td>我们比 oneDNN 最优选择快还是慢</td>
+  <td>大形状快 <b>1.1–2.8x</b>；小形状慢 0.09–0.91x</td></tr>
+<tr><td><code>e2e_wino</code></td><td>强制 wino:acl</td><td>同样做 Winograd，谁更快</td>
+  <td class="em">全部 1.15–9.5x</td></tr>
+<tr><td><code>benchdnn_wino</code></td><td>wino:acl（driver 口径）</td><td>换一个 driver 复核</td>
+  <td>与 <code>e2e_wino</code> 一致，互证</td></tr>
+</tbody></table>
+<div class="callout" style="margin-top:16px">
+<b>口径提醒：</b>ACL 选 F(4,4) 还是 F(2,2) 取决于它的构建是否启用 SME。
+集群侧 oneDNN 的实际选中项未从日志确认（历史文档记为「疑似 F(2,2)」），
+因此 1.15–9.5x 应读作「我们的 F(4,4) vs 对方当时的实际选择」。
+</div></div></section>
+
+<div class="foot">
+  
+  数据来源：<code>docs/final_benchmark_bfd6b1e.md</code>（vs OpenBLAS）、
+  <code>docs/sme_fmopa_gemm.md</code>（SME vs KML）。
+  生成脚本：<code>tools/gen_report_figures.py</code>（本页为静态 HTML，无外部依赖）。
+</div>
+</div>
+</body>
+</html>

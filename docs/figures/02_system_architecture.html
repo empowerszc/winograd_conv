@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>② 系统结构</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; }
+:root {
+  --ink: #0b1220; --slate: #334155; --muted: #64748b; --faint: #94a3b8;
+  --line: #e5e9f2; --bg: #f7f8fc; --card: #ffffff;
+  --indigo: #4338ca; --indigo-2: #6366f1; --indigo-soft: #eef2ff;
+  --teal: #0f766e; --teal-soft: #ecfdf5;
+  --amber: #b45309; --amber-soft: #fffbeb;
+  --rose: #be123c; --rose-soft: #fff1f2;
+  --green: #15803d;
+  --radius: 14px;
+}
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--slate);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 15px; line-height: 1.7;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+}
+.page { max-width: 1220px; margin: 0 auto; padding: 40px 32px 96px; }
+a { color: var(--indigo); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.num { font-variant-numeric: tabular-nums;
+       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+/* nav */
+.nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 34px; }
+.nav a {
+  font-size: 12.5px; padding: 6px 12px; border-radius: 999px;
+  background: #fff; border: 1px solid var(--line); color: var(--muted);
+  transition: .15s ease;
+}
+.nav a:hover { border-color: #c7d2fe; color: var(--indigo); text-decoration: none; }
+.nav a.on { background: var(--indigo); border-color: var(--indigo); color: #fff; }
+
+/* header */
+.eyebrow {
+  font-size: 11.5px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--indigo); font-weight: 700; margin-bottom: 12px;
+}
+h1 { font-size: 32px; line-height: 1.28; margin: 0 0 12px; color: var(--ink); font-weight: 750; letter-spacing: -.01em; }
+.lede { font-size: 15.5px; color: var(--muted); max-width: 78ch; margin: 0 0 22px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12.5px; color: var(--faint); margin-bottom: 44px; }
+.meta b { color: var(--slate); font-weight: 600; }
+
+/* sections */
+section { margin: 0 0 40px; }
+h2 {
+  font-size: 19px; color: var(--ink); font-weight: 700; margin: 0 0 6px;
+  display: flex; align-items: baseline; gap: 10px;
+}
+h2 .idx {
+  font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--indigo);
+  background: var(--indigo-soft); border-radius: 6px; padding: 2px 7px; font-weight: 700;
+}
+.sub { color: var(--muted); font-size: 13.5px; margin: 0 0 18px; max-width: 88ch; }
+h3 { font-size: 15px; color: var(--ink); margin: 26px 0 10px; font-weight: 650; }
+
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 24px 26px; box-shadow: 0 1px 2px rgba(15,23,42,.03), 0 18px 40px -28px rgba(15,23,42,.22);
+}
+.card + .card { margin-top: 16px; }
+.card > h3:first-child { margin-top: 0; }
+
+/* metric strip */
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+.metric {
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px;
+}
+.metric .k { font-size: 11.5px; color: var(--faint); letter-spacing: .04em; text-transform: uppercase; }
+.metric .v { font-size: 27px; font-weight: 750; color: var(--ink); line-height: 1.25; margin-top: 6px; letter-spacing: -.02em; }
+.metric .n { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.metric.hl { border-color: #c7d2fe; background: linear-gradient(180deg, #fbfbff, #fff); }
+.metric.hl .v { color: var(--indigo); }
+
+/* tables */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.tbl th, .tbl td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.tbl th { font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--faint); font-weight: 700; }
+.tbl tr:last-child td { border-bottom: 0; }
+.tbl td.c, .tbl th.c { text-align: center; }
+.tbl td.r, .tbl th.r { text-align: right; }
+.tbl tbody tr:hover { background: #fafbff; }
+.tbl .em { color: var(--indigo); font-weight: 700; }
+.tbl .warn { color: var(--rose); font-weight: 700; }
+
+.tag {
+  display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px;
+  border-radius: 999px; white-space: nowrap;
+}
+.tag.same { background: var(--teal-soft); color: var(--teal); }
+.tag.diff { background: var(--amber-soft); color: var(--amber); }
+.tag.gap  { background: var(--rose-soft); color: var(--rose); }
+.tag.n    { background: #f1f5f9; color: var(--muted); }
+
+/* chart */
+.chart { display: block; width: 100%; height: auto; }
+.diagram { display: block; width: 100%; height: auto; }
+.chart-wrap { overflow-x: auto; }
+
+/* code */
+pre.code {
+  background: #0b1220; color: #dbe4ff; border-radius: 12px; padding: 18px 20px;
+  overflow-x: auto; font-size: 12.5px; line-height: 1.65; margin: 14px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre.code .c { color: #7c8db5; }
+
+/* callout */
+.callout {
+  border-left: 3px solid var(--amber); background: var(--amber-soft);
+  border-radius: 0 10px 10px 0; padding: 16px 20px; font-size: 13.5px; color: #78350f;
+  margin: 16px 0 0;
+}
+.callout.rose { border-color: var(--rose); background: var(--rose-soft); color: #881337; }
+.callout.indigo { border-color: var(--indigo); background: var(--indigo-soft); color: #312e81; }
+.callout.teal { border-color: var(--teal); background: var(--teal-soft); color: #134e4a; }
+.callout b { font-weight: 700; }
+
+/* two-column */
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; align-items: start; }
+.cols.tight { gap: 12px; }
+
+/* footer */
+.foot { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12px; }
+
+/* index cards */
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+a.tile {
+  display: block; background: #fff; border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 22px 24px; color: inherit; transition: .16s ease; height: 100%;
+  box-shadow: 0 1px 2px rgba(15,23,42,.03);
+}
+a.tile:hover { text-decoration: none; border-color: #c7d2fe; transform: translateY(-2px);
+               box-shadow: 0 10px 30px -18px rgba(67,56,202,.45); }
+a.tile .n { font-size: 11.5px; color: var(--indigo); font-weight: 700; letter-spacing: .1em; }
+a.tile h3 { margin: 8px 0 6px; font-size: 16.5px; color: var(--ink); }
+a.tile p { margin: 0; font-size: 13px; color: var(--muted); }
+a.tile .spark { margin-top: 16px; height: 42px; }
+
+@media print {
+  body { background: #fff; }
+  .page { max-width: none; padding: 0; }
+  .nav { display: none; }
+  .card { box-shadow: none; break-inside: avoid; }
+  section { break-inside: avoid; }
+}
+@media (max-width: 720px) {
+  .page { padding: 24px 16px 64px; }
+  h1 { font-size: 25px; }
+  .card { padding: 18px 16px; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+<nav class="nav"><a href="index.html" class="">总览</a><a href="01_winograd_principles.html" class="">① Winograd 原理</a><a href="02_system_architecture.html" class="on">② 系统结构</a><a href="03_sme_gemm.html" class="">③ SME 内核</a><a href="04_performance.html" class="">④ 性能结果</a><a href="05_acl_comparison.html" class="">⑤ 与 ACL 对比</a><a href="06_timing.html" class="">⑥ 步耗时</a><a href="07_methodology.html" class="">⑦ 测量口径</a><a href="08_roadmap.html" class="">⑧ 演进路线</a><a href="09_bench_shapes.html" class="">⑨ 用例集</a></nav>
+<header>
+  <div class="eyebrow">Winograd 卷积复刻项目 · 图示</div>
+  <h1>② 系统结构</h1>
+  <p class="lede">从张量布局到线程模型：哪些是算法决定的，哪些是为了这台无 L3 的机器做的工程取舍。</p>
+</header>
+
+<section><h2><span class="idx">01</span>端到端数据流</h2><p class="sub">计算核心只认 NHWC；NCHW 由一次 cache-blocked 转置承担。</p><div class="card"><svg class="diagram" viewBox="0 0 1180 210" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><rect x="48.3" y="58.0" width="178.0" height="84.0" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="1" stroke-opacity="0.4"/><text x="137.3" y="88.0" font-size="12" fill="#334155" text-anchor="middle" font-weight="700" >NCHW 输入</text><text x="137.3" y="110.0" font-size="10.5" fill="#64748b" text-anchor="middle" font-weight="400" >[N][IC][IH][IW]</text><path d="M230.33333333333334 100.0 h38.333333333333336" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#ar3)"/><rect x="274.7" y="58.0" width="178.0" height="84.0" rx="10" fill="#f1f5f9" stroke="#64748b" stroke-width="1" stroke-opacity="0.4"/><text x="363.7" y="88.0" font-size="12" fill="#334155" text-anchor="middle" font-weight="700" >→ NHWC</text><text x="363.7" y="110.0" font-size="10.5" fill="#64748b" text-anchor="middle" font-weight="400" >cache-blocked</text><text x="363.7" y="125.0" font-size="10.5" fill="#64748b" text-anchor="middle" font-weight="400" >转置</text><path d="M456.6666666666667 100.0 h38.333333333333336" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#ar3)"/><rect x="501.0" y="58.0" width="178.0" height="84.0" rx="10" fill="#eef2ff" stroke="#4338ca" stroke-width="2" stroke-opacity="0.55"/><text x="590.0" y="88.0" font-size="12" fill="#4338ca" text-anchor="middle" font-weight="700" >Phase 1/2/3</text><text x="590.0" y="110.0" font-size="10.5" fill="#64748b" text-anchor="middle" font-weight="400" >NHWC 计算核心</text><path d="M683.0 100.0 h38.333333333333336" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#ar3)"/><rect x="727.3" y="58.0" width="178.0" height="84.0" rx="10" fill="#f1f5f9" stroke="#64748b" stroke-width="1" stroke-opacity="0.4"/><text x="816.3" y="88.0" font-size="12" fill="#334155" text-anchor="middle" font-weight="700" >→ NCHW</text><text x="816.3" y="110.0" font-size="10.5" fill="#64748b" text-anchor="middle" font-weight="400" >cache-blocked</text><text x="816.3" y="125.0" font-size="10.5" fill="#64748b" text-anchor="middle" font-weight="400" >转置</text><path d="M909.3333333333334 100.0 h38.333333333333336" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#ar3)"/><rect x="953.7" y="58.0" width="178.0" height="84.0" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="1" stroke-opacity="0.4"/><text x="1042.7" y="88.0" font-size="12" fill="#334155" text-anchor="middle" font-weight="700" >NCHW 输出</text><text x="1042.7" y="110.0" font-size="10.5" fill="#64748b" text-anchor="middle" font-weight="400" >[N][OC][OH][OW]</text><defs><marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker></defs><text x="590.0" y="30.0" font-size="12.5" fill="#334155" text-anchor="middle" font-weight="700" >端到端数据流：计算核心只认 NHWC，NCHW 由转换包装承担</text><text x="590.0" y="184.0" font-size="11" fill="#64748b" text-anchor="middle" font-weight="400" >在无 L3、L2 仅 768 KB/核的机器上，NCHW 的跨步 tile 提取有约 16× 缓存行放大；顺序转置的代价远低于它。</text></svg></div></section>
+
+<section><h2><span class="idx">02</span>三级 ISA：同一套矩阵，三种宽度</h2><p class="sub">变换矩阵在三种 ISA 间共用一份定义 —— 修一次矩阵，三条路径同时正确（历史上 3 次矩阵 bug 的教训）。</p><div class="card"><table class="tbl">
+<thead><tr><th>方面</th><th>NEON</th><th>SVE</th><th>SME</th></tr></thead>
+<tbody>
+<tr><td>向量宽度</td><td class="num">128 bit（4 float）</td><td class="num">VL = 512 bit（16 float）</td><td class="num">同 SVE + 64×64 ZA</td></tr>
+<tr><td>tail 处理</td><td>三段降级 4→2→1</td><td>谓词 <code>whilelt</code>，一份代码</td><td>同 SVE</td></tr>
+<tr><td>变换实现</td><td>intrinsics</td><td>intrinsics + 谓词</td><td>输出变换用 FMOPA 外积</td></tr>
+<tr><td>通道并行度</td><td class="num">4</td><td class="num">16</td><td class="num">64（4 × VL）</td></tr>
+<tr><td>代码量</td><td class="num">390 行</td><td class="num">285 行</td><td class="num">1 016 行</td></tr>
+</tbody></table></div></section>
+
+<section><h2><span class="idx">03</span>GEMM 后端可插拔</h2><p class="sub">统一「U 按 tile、V 按 OC 行、K 内连续」的布局契约，后端自己决定要不要打包。</p><div class="card"><table class="tbl">
+<thead><tr><th>后端</th><th>实现</th><th>定位</th><th class="r">59 形状合计</th></tr></thead>
+<tbody>
+<tr><td><b>arm_gemm</b></td><td>ACL 53.1.0 的 SVE JIT（与 oneDNN 同源）</td><td>生产默认</td><td class="r num">321.9 ms（集群）</td></tr>
+<tr><td><b>KML kblas</b></td><td>华为 KML <code>cblas_sgemm</code>（locking）</td><td>本机日常首选</td><td class="r num">233 ms（本机）</td></tr>
+<tr><td><b>OpenBLAS</b></td><td>鲲鹏版 <code>cblas_sgemm</code></td><td>对照基线</td><td class="r num">804.9 ms（集群）</td></tr>
+<tr><td><b>SME FMOPA</b></td><td>自研 ZA 外积内核</td><td>实验，特定形状领先</td><td class="r num">见第 ③ 页</td></tr>
+<tr><td>naive</td><td>三重循环</td><td>无依赖兜底</td><td class="r num">—</td></tr>
+</tbody></table>
+<div class="callout indigo" style="margin-top:16px">
+KML 与 arm_gemm 的排名在集群和本机<b>正好相反</b>（本机 KML 233 ms &lt; arm_gemm 328 ms）。
+这正是「后端必须可插拔」的证据：单一后端会把平台相关的结论当成普适结论。
+</div></div></section>
+
+<section><h2><span class="idx">04</span>并行结构：一次 fork/join</h2><p class="sub">权重变换 + 所有 batch 的输入/GEMM/输出都在同一个 parallel 区域内，靠显式 barrier 串起三段。</p><div class="card"><svg class="diagram" viewBox="0 0 1180 250" width="100%" preserveAspectRatio="xMidYMid meet" role="img"><text x="590.0" y="26.0" font-size="12.5" fill="#334155" text-anchor="middle" font-weight="700" >单个 #pragma omp parallel 区域覆盖全部阶段（每 batch 一次）</text><text x="182.4" y="48.0" font-size="10.5" fill="#475569" text-anchor="middle" font-weight="600" >权重变换</text><text x="353.8" y="48.0" font-size="10.5" fill="#475569" text-anchor="middle" font-weight="600" >Phase 1</text><line x1="484.8" y1="52.0" x2="484.8" y2="182.0" stroke="#0f172a" stroke-width="1.2" stroke-dasharray="3 3" /><text x="646.1" y="48.0" font-size="10.5" fill="#475569" text-anchor="middle" font-weight="600" >Phase 2 (GEMM)</text><line x1="807.4" y1="52.0" x2="807.4" y2="182.0" stroke="#0f172a" stroke-width="1.2" stroke-dasharray="3 3" /><text x="928.3" y="48.0" font-size="10.5" fill="#475569" text-anchor="middle" font-weight="600" >Phase 3</text><line x1="1049.3" y1="52.0" x2="1049.3" y2="182.0" stroke="#0f172a" stroke-width="1.2" stroke-dasharray="3 3" /><text x="120.0" y="76.0" font-size="10.5" fill="#64748b" text-anchor="end" font-weight="400" >线程 0</text><rect x="133.0" y="62.0" width="98.8" height="20.0" rx="3" fill="#c7d2fe" opacity="0.9"/><rect x="233.8" y="62.0" width="239.9" height="20.0" rx="3" fill="#a5b4fc" opacity="0.9"/><rect x="495.9" y="62.0" width="300.4" height="20.0" rx="3" fill="#5eead4" opacity="0.9"/><rect x="818.4" y="62.0" width="219.8" height="20.0" rx="3" fill="#fcd34d" opacity="0.9"/><text x="120.0" y="106.0" font-size="10.5" fill="#64748b" text-anchor="end" font-weight="400" >线程 1</text><rect x="133.0" y="92.0" width="98.8" height="20.0" rx="3" fill="#c7d2fe" opacity="0.9"/><rect x="233.8" y="92.0" width="239.9" height="20.0" rx="3" fill="#a5b4fc" opacity="0.9"/><rect x="495.9" y="92.0" width="300.4" height="20.0" rx="3" fill="#5eead4" opacity="0.9"/><rect x="818.4" y="92.0" width="219.8" height="20.0" rx="3" fill="#fcd34d" opacity="0.9"/><text x="120.0" y="136.0" font-size="10.5" fill="#64748b" text-anchor="end" font-weight="400" >…</text><rect x="133.0" y="122.0" width="98.8" height="20.0" rx="3" fill="#c7d2fe" opacity="0.9"/><rect x="233.8" y="122.0" width="239.9" height="20.0" rx="3" fill="#a5b4fc" opacity="0.9"/><rect x="495.9" y="122.0" width="300.4" height="20.0" rx="3" fill="#5eead4" opacity="0.9"/><rect x="818.4" y="122.0" width="219.8" height="20.0" rx="3" fill="#fcd34d" opacity="0.9"/><text x="120.0" y="166.0" font-size="10.5" fill="#64748b" text-anchor="end" font-weight="400" >线程 N-1</text><rect x="133.0" y="152.0" width="98.8" height="20.0" rx="3" fill="#c7d2fe" opacity="0.9"/><rect x="233.8" y="152.0" width="239.9" height="20.0" rx="3" fill="#a5b4fc" opacity="0.9"/><rect x="495.9" y="152.0" width="300.4" height="20.0" rx="3" fill="#5eead4" opacity="0.9"/><rect x="818.4" y="152.0" width="219.8" height="20.0" rx="3" fill="#fcd34d" opacity="0.9"/><text x="132.0" y="204.0" font-size="11" fill="#475569" text-anchor="start" font-weight="400" >1 次 fork/join，2 个显式 barrier（输入→GEMM、GEMM→输出），Phase 3 用 nowait</text><text x="132.0" y="224.0" font-size="10.5" fill="#94a3b8" text-anchor="start" font-weight="400" >对比：把权重变换放进独立 parallel 区域会多一次 fork/join，小形状反而慢约 7%</text></svg></div></section>
+
+<section><h2><span class="idx">05</span>缓冲与缓存：热路径不做分配</h2><div class="cols">
+<div class="card"><h3>线程本地缓冲</h3>
+<p style="font-size:13.5px;color:#475569;margin:0">
+6 个 <code>thread_local</code> 缓冲（d/U/M/f tile、权重临时）跨调用复用，
+容量不足才 realloc。每个逻辑缓冲持有<b>独立</b>的 Scratch —— 早期共用一个曾导致 9 个缓冲全部别名同一块内存，
+正确性测试全挂。</p></div>
+<div class="card"><h3>V 跨调用缓存</h3>
+<p style="font-size:13.5px;color:#475569;margin:0">
+key = 权重指针 + 64 点 FNV-1a 指纹 + shape + F44 标记 + ISA，防「同址重分配」的 ABA。
+命中直接跳过权重变换，KML t16 几何平均 <b>1.07x</b>、最高 <b>1.74x</b>。
+容量 24 条且无淘汰是个已知短板（59 形状用例集后半段不命中）。</p></div>
+</div></section>
+
+<div class="foot">
+  
+  数据来源：<code>docs/final_benchmark_bfd6b1e.md</code>（vs OpenBLAS）、
+  <code>docs/sme_fmopa_gemm.md</code>（SME vs KML）。
+  生成脚本：<code>tools/gen_report_figures.py</code>（本页为静态 HTML，无外部依赖）。
+</div>
+</div>
+</body>
+</html>

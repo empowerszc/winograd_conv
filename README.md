@@ -48,6 +48,7 @@ winograd_conv/
 │   ├── compare.sh                         ← 极简对比脚本（输出 mb,ic,ih,iw,oc,ours_ms）
 │   ├── filter_sweep.sh                    ← M=25 选核实验（auto/6x4VL/8x1VL/inter）
 │   ├── gen_benchdnn_list.sh               ← 生成 benchdnn 描述符清单 shapes/conv_all.list
+│   ├── gen_report_figures.py              ← 生成 docs/figures/ 汇报图示（解析 markdown 表 → 静态 HTML/SVG）
 │   ├── arm_gemm_repro.cpp                 ← arm_gemm 布局契约最小复现（--dump 诊断）
 │   ├── onednn/
 │   │   ├── ab_onednn.sh                   ← 单 sbatch 作业 A/B（ours/e2e/benchdnn/filter+merge）
@@ -59,6 +60,7 @@ winograd_conv/
 └── docs/
     ├── algorithm.md                       ← 算法详解（数学、布局、缓冲、并行、ISA 内核、精度）
     ├── project_summary.md                 ← 项目工作总结/汇报底稿（对比、证据、路线）★
+    ├── figures/                           ← 汇报图示（10 个自包含 HTML 页，离线可开，`python3 tools/gen_report_figures.py` 重生成）★
     ├── vs_acl.md                          ← 与 ACL Winograd 的逐层差异与优势（汇报用）★
     ├── sme_fmopa_gemm.md                  ← 自研 SME FMOPA GEMM（设计、标定、踩坑、性能）★
     ├── why_faster_than_acl_23.11.md       ← 为什么比 ACL 23.11 快（独立分析，含例子）

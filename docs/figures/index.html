@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Winograd 卷积复刻 · 图示总览</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; }
+:root {
+  --ink: #0b1220; --slate: #334155; --muted: #64748b; --faint: #94a3b8;
+  --line: #e5e9f2; --bg: #f7f8fc; --card: #ffffff;
+  --indigo: #4338ca; --indigo-2: #6366f1; --indigo-soft: #eef2ff;
+  --teal: #0f766e; --teal-soft: #ecfdf5;
+  --amber: #b45309; --amber-soft: #fffbeb;
+  --rose: #be123c; --rose-soft: #fff1f2;
+  --green: #15803d;
+  --radius: 14px;
+}
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--slate);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 15px; line-height: 1.7;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+}
+.page { max-width: 1220px; margin: 0 auto; padding: 40px 32px 96px; }
+a { color: var(--indigo); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.num { font-variant-numeric: tabular-nums;
+       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+/* nav */
+.nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 34px; }
+.nav a {
+  font-size: 12.5px; padding: 6px 12px; border-radius: 999px;
+  background: #fff; border: 1px solid var(--line); color: var(--muted);
+  transition: .15s ease;
+}
+.nav a:hover { border-color: #c7d2fe; color: var(--indigo); text-decoration: none; }
+.nav a.on { background: var(--indigo); border-color: var(--indigo); color: #fff; }
+
+/* header */
+.eyebrow {
+  font-size: 11.5px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--indigo); font-weight: 700; margin-bottom: 12px;
+}
+h1 { font-size: 32px; line-height: 1.28; margin: 0 0 12px; color: var(--ink); font-weight: 750; letter-spacing: -.01em; }
+.lede { font-size: 15.5px; color: var(--muted); max-width: 78ch; margin: 0 0 22px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12.5px; color: var(--faint); margin-bottom: 44px; }
+.meta b { color: var(--slate); font-weight: 600; }
+
+/* sections */
+section { margin: 0 0 40px; }
+h2 {
+  font-size: 19px; color: var(--ink); font-weight: 700; margin: 0 0 6px;
+  display: flex; align-items: baseline; gap: 10px;
+}
+h2 .idx {
+  font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--indigo);
+  background: var(--indigo-soft); border-radius: 6px; padding: 2px 7px; font-weight: 700;
+}
+.sub { color: var(--muted); font-size: 13.5px; margin: 0 0 18px; max-width: 88ch; }
+h3 { font-size: 15px; color: var(--ink); margin: 26px 0 10px; font-weight: 650; }
+
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 24px 26px; box-shadow: 0 1px 2px rgba(15,23,42,.03), 0 18px 40px -28px rgba(15,23,42,.22);
+}
+.card + .card { margin-top: 16px; }
+.card > h3:first-child { margin-top: 0; }
+
+/* metric strip */
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+.metric {
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px;
+}
+.metric .k { font-size: 11.5px; color: var(--faint); letter-spacing: .04em; text-transform: uppercase; }
+.metric .v { font-size: 27px; font-weight: 750; color: var(--ink); line-height: 1.25; margin-top: 6px; letter-spacing: -.02em; }
+.metric .n { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.metric.hl { border-color: #c7d2fe; background: linear-gradient(180deg, #fbfbff, #fff); }
+.metric.hl .v { color: var(--indigo); }
+
+/* tables */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.tbl th, .tbl td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.tbl th { font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--faint); font-weight: 700; }
+.tbl tr:last-child td { border-bottom: 0; }
+.tbl td.c, .tbl th.c { text-align: center; }
+.tbl td.r, .tbl th.r { text-align: right; }
+.tbl tbody tr:hover { background: #fafbff; }
+.tbl .em { color: var(--indigo); font-weight: 700; }
+.tbl .warn { color: var(--rose); font-weight: 700; }
+
+.tag {
+  display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px;
+  border-radius: 999px; white-space: nowrap;
+}
+.tag.same { background: var(--teal-soft); color: var(--teal); }
+.tag.diff { background: var(--amber-soft); color: var(--amber); }
+.tag.gap  { background: var(--rose-soft); color: var(--rose); }
+.tag.n    { background: #f1f5f9; color: var(--muted); }
+
+/* chart */
+.chart { display: block; width: 100%; height: auto; }
+.diagram { display: block; width: 100%; height: auto; }
+.chart-wrap { overflow-x: auto; }
+
+/* code */
+pre.code {
+  background: #0b1220; color: #dbe4ff; border-radius: 12px; padding: 18px 20px;
+  overflow-x: auto; font-size: 12.5px; line-height: 1.65; margin: 14px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre.code .c { color: #7c8db5; }
+
+/* callout */
+.callout {
+  border-left: 3px solid var(--amber); background: var(--amber-soft);
+  border-radius: 0 10px 10px 0; padding: 16px 20px; font-size: 13.5px; color: #78350f;
+  margin: 16px 0 0;
+}
+.callout.rose { border-color: var(--rose); background: var(--rose-soft); color: #881337; }
+.callout.indigo { border-color: var(--indigo); background: var(--indigo-soft); color: #312e81; }
+.callout.teal { border-color: var(--teal); background: var(--teal-soft); color: #134e4a; }
+.callout b { font-weight: 700; }
+
+/* two-column */
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; align-items: start; }
+.cols.tight { gap: 12px; }
+
+/* footer */
+.foot { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12px; }
+
+/* index cards */
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+a.tile {
+  display: block; background: #fff; border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 22px 24px; color: inherit; transition: .16s ease; height: 100%;
+  box-shadow: 0 1px 2px rgba(15,23,42,.03);
+}
+a.tile:hover { text-decoration: none; border-color: #c7d2fe; transform: translateY(-2px);
+               box-shadow: 0 10px 30px -18px rgba(67,56,202,.45); }
+a.tile .n { font-size: 11.5px; color: var(--indigo); font-weight: 700; letter-spacing: .1em; }
+a.tile h3 { margin: 8px 0 6px; font-size: 16.5px; color: var(--ink); }
+a.tile p { margin: 0; font-size: 13px; color: var(--muted); }
+a.tile .spark { margin-top: 16px; height: 42px; }
+
+@media print {
+  body { background: #fff; }
+  .page { max-width: none; padding: 0; }
+  .nav { display: none; }
+  .card { box-shadow: none; break-inside: avoid; }
+  section { break-inside: avoid; }
+}
+@media (max-width: 720px) {
+  .page { padding: 24px 16px 64px; }
+  h1 { font-size: 25px; }
+  .card { padding: 18px 16px; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+<nav class="nav"><a href="index.html" class="on">总览</a><a href="01_winograd_principles.html" class="">① Winograd 原理</a><a href="02_system_architecture.html" class="">② 系统结构</a><a href="03_sme_gemm.html" class="">③ SME 内核</a><a href="04_performance.html" class="">④ 性能结果</a><a href="05_acl_comparison.html" class="">⑤ 与 ACL 对比</a><a href="06_timing.html" class="">⑥ 步耗时</a><a href="07_methodology.html" class="">⑦ 测量口径</a><a href="08_roadmap.html" class="">⑧ 演进路线</a><a href="09_bench_shapes.html" class="">⑨ 用例集</a></nav>
+<header>
+  <div class="eyebrow">Winograd 卷积复刻项目 · 图示</div>
+  <h1>Winograd 卷积复刻 · 图示总览</h1>
+  <p class="lede">九页图示覆盖「原理 → 结构 → SME 内核 → 性能 → 与 ACL 对比 → 步耗时 → 测量口径 → 路线 → 用例集」，面向汇报与答辩：每张图只讲一件事，数字都能追溯到仓库里的表。</p>
+</header>
+
+<section><h2><span class="idx">00</span>一句话</h2><p class="sub">同一个算法，两种工程哲学；差异全部落在工程实现上，并且每一条都有可复现的数据。</p><div class="card">
+<p style="margin:0 0 14px;font-size:15px;color:#334155">
+本项目从 ACL 的 Winograd 思路出发，<b>算法与变换矩阵完全一致</b>；差异在四处工程选择：
+固定 F(4,4) 主路径而不按形状降级、泛型 SVE 内核而不手写展开汇编、可插拔 GEMM 后端而不绑定单一库、
+单 OpenMP 区域而不引入调度器。</p>
+<div class="metrics">
+  <div class="metric hl"><div class="k">vs OpenBLAS · 59 形状</div>
+    <div class="v">2.50x</div>
+    <div class="n">合计时间比 · 几何平均 1.99x · 59/59 全胜</div></div>
+  <div class="metric"><div class="k">vs oneDNN wino:acl · 同算法</div>
+    <div class="v">1.15–9.5x</div><div class="n">e2e + benchdnn 两列互证</div></div>
+  <div class="metric"><div class="k">自研 SME GEMM · t16 绑核</div>
+    <div class="v">−10.4%</div>
+    <div class="n">总耗时 vs KML · 32/59 形状胜</div></div>
+  <div class="metric"><div class="k">正确性 · fp64 参考</div>
+    <div class="v">22/22</div><div class="n">相对误差 2–6e-6（容差 1e-4）</div></div>
+</div>
+</div></section>
+
+<section><h2><span class="idx">01</span>图示索引</h2><p class="sub">每页都可以单独打开、投影或打印；全部为静态 HTML，无外部依赖。</p><div class="grid">
+  <a class="tile" href="01_winograd_principles.html">
+    <div class="n">01</div><h3>Winograd 原理</h3>
+    <p>tile 划分与重叠、三段流水、乘法数 144→36、Bᵀ 的零系数分布。</p>
+    <div class="spark"><svg viewBox="0 0 240 42" width="100%"><rect x="0" y="8" width="140" height="10" rx="5" fill="#cbd5e1"/><rect x="0" y="26" width="35" height="10" rx="5" fill="#4338ca"/></svg></div>
+  </a>
+  <a class="tile" href="02_system_architecture.html">
+    <div class="n">02</div><h3>系统结构</h3>
+    <p>NHWC 计算核心与布局转换、三级 ISA、可插拔 GEMM 后端、单 OpenMP 区域时间线。</p>
+    <div class="spark"><svg viewBox="0 0 240 42" width="100%"><rect x="0" y="16" width="46" height="12" rx="3" fill="#e0e7ff"/><rect x="54" y="16" width="46" height="12" rx="3" fill="#a5b4fc"/><rect x="108" y="16" width="46" height="12" rx="3" fill="#5eead4"/><rect x="162" y="16" width="46" height="12" rx="3" fill="#fcd34d"/></svg></div>
+  </a>
+  <a class="tile" href="03_sme_gemm.html">
+    <div class="n">03</div><h3>SME 内核</h3>
+    <p>ZA 的四个 tile 如何映射到 OC/tile、drain 的 64 条切片、微内核汇编与 ABI 陷阱。</p>
+    <div class="spark"><svg viewBox="0 0 240 42" width="100%"><g fill="#e0e7ff"><rect x="0" y="4" width="30" height="8" rx="2"/><rect x="0" y="17" width="30" height="8" rx="2"/><rect x="0" y="30" width="30" height="8" rx="2"/></g><g fill="#4338ca"><rect x="36" y="4" width="8" height="8" rx="2"/><rect x="48" y="17" width="8" height="8" rx="2"/><rect x="60" y="30" width="8" height="8" rx="2"/></g></svg></div>
+  </a>
+  <a class="tile" href="04_performance.html">
+    <div class="n">04</div><h3>性能结果</h3>
+    <p>59 形状逐条加速比、分布直方图、四种平均口径、SME vs KML 两档对照。</p>
+    <div class="spark"><svg viewBox="0 0 240 42" width="100%"><g fill="#4338ca"><rect x="0" y="30" width="6" height="12"/><rect x="10" y="24" width="6" height="18"/><rect x="20" y="18" width="6" height="24"/><rect x="30" y="27" width="6" height="15"/><rect x="40" y="12" width="6" height="30"/><rect x="50" y="20" width="6" height="22"/><rect x="60" y="8" width="6" height="34"/><rect x="70" y="22" width="6" height="20"/></g><g fill="#0f766e"><rect x="82" y="26" width="6" height="16"/><rect x="92" y="14" width="6" height="28"/><rect x="102" y="20" width="6" height="22"/><rect x="112" y="10" width="6" height="32"/></g></svg></div>
+  </a>
+  <a class="tile" href="05_acl_comparison.html">
+    <div class="n">05</div><h3>与 ACL 对比</h3>
+    <p>同源清单（逐元素一致）、八个维度的实现差异、优势证据与诚实的差距。</p>
+    <div class="spark"><svg viewBox="0 0 240 42" width="100%"><rect x="0" y="6" width="96" height="30" rx="4" fill="#ecfdf5"/><rect x="104" y="6" width="96" height="30" rx="4" fill="#fffbeb"/><line x1="100" y1="4" x2="100" y2="38" stroke="#cbd5e1" stroke-dasharray="3 3"/></svg></div>
+  </a>
+  <a class="tile" href="06_timing.html">
+    <div class="n">06</div><h3>步耗时拆解</h3>
+    <p>8 步时间占比、三种形态、小 GEMM 效率崩塌、16 线程只拿到 7–13×。</p>
+    <div class="spark"><svg viewBox="0 0 240 42" width="100%"><rect x="0" y="14" width="128" height="12" rx="3" fill="#4338ca"/><rect x="128" y="14" width="52" height="12" rx="3" fill="#0f766e"/><rect x="180" y="14" width="56" height="12" rx="3" fill="#b45309"/><rect x="0" y="30" width="72" height="8" rx="2" fill="#4338ca" opacity=".55"/><rect x="72" y="30" width="34" height="8" rx="2" fill="#0f766e" opacity=".55"/><rect x="106" y="30" width="130" height="8" rx="2" fill="#f59e0b" opacity=".55"/></svg></div>
+  </a>
+  <a class="tile" href="07_methodology.html">
+    <div class="n">07</div><h3>测量口径</h3>
+    <p>同作业 A/B、绑核、四种平均各自回答什么、方向约定与六个已知陷阱。</p>
+    <div class="spark"><svg viewBox="0 0 240 42" width="100%"><circle cx="18" cy="24" r="7" fill="#0f766e"/><circle cx="52" cy="14" r="4" fill="#4338ca"/><circle cx="76" cy="30" r="5" fill="#be123c"/><line x1="0" y1="36" x2="140" y2="36" stroke="#cbd5e1" stroke-width="1.5"/><rect x="152" y="10" width="10" height="26" rx="2" fill="#818cf8"/><rect x="168" y="16" width="10" height="20" rx="2" fill="#818cf8"/><rect x="184" y="6" width="10" height="30" rx="2" fill="#818cf8"/><rect x="200" y="20" width="10" height="16" rx="2" fill="#818cf8"/></svg></div>
+  </a>
+  <a class="tile" href="08_roadmap.html">
+    <div class="n">08</div><h3>演进路线</h3>
+    <p>三阶段九项任务（做法/预期/风险）、判定标准，以及四条被数据证伪的方向。</p>
+    <div class="spark"><svg viewBox="0 0 240 42" width="100%"><rect x="0" y="12" width="70" height="20" rx="4" fill="#ecfdf5" stroke="#0f766e"/><rect x="80" y="12" width="70" height="20" rx="4" fill="#eef2ff" stroke="#4338ca"/><rect x="160" y="12" width="70" height="20" rx="4" fill="#fffbeb" stroke="#b45309"/><path d="M74 22 l6 0 m-3 -3 l3 3 -3 3" stroke="#94a3b8" fill="none"/><path d="M154 22 l6 0 m-3 -3 l3 3 -3 3" stroke="#94a3b8" fill="none"/></svg></div>
+  </a>
+  <a class="tile" href="09_bench_shapes.html">
+    <div class="n">09</div><h3>基准用例集</h3>
+    <p>59 个形状的七个小节、tiles × IC 网格热力图、形状参数含义与复现命令。</p>
+    <div class="spark"><svg viewBox="0 0 240 42" width="100%"><g><rect x="0" y="6" width="18" height="14" rx="2" fill="#eef2ff"/><rect x="22" y="6" width="18" height="14" rx="2" fill="#c7d2fe"/><rect x="44" y="6" width="18" height="14" rx="2" fill="#818cf8"/><rect x="66" y="6" width="18" height="14" rx="2" fill="#4338ca"/><rect x="0" y="24" width="18" height="14" rx="2" fill="#f1f5f9"/><rect x="22" y="24" width="18" height="14" rx="2" fill="#e0e7ff"/><rect x="44" y="24" width="18" height="14" rx="2" fill="#a5b4fc"/><rect x="66" y="24" width="18" height="14" rx="2" fill="#6366f1"/></g></svg></div>
+  </a>
+</div></section>
+
+<section><h2><span class="idx">02</span>测量口径（读图前必看）</h2><p class="sub">所有数字都是同机器、同作业、绑核口径；集群与本机是两套机器，毫秒数不可跨机比较。</p><div class="card"><table class="tbl">
+<thead><tr><th>结论</th><th>机器</th><th>线程 / 绑核</th><th class="r">数值</th></tr></thead>
+<tbody>
+<tr><td>vs OpenBLAS（鲲鹏版）</td><td>集群 920F（node03）</td><td>16T · 同一 sbatch 作业内 A/B</td><td class="r num">321.9 vs 804.9 ms</td></tr>
+<tr><td>vs oneDNN <code>wino:acl</code></td><td>集群 920F</td><td>16T · 同作业同实现</td><td class="r num">1.15–9.5x</td></tr>
+<tr><td>SME vs KML · t1</td><td>本机 608 核（毕昇）</td><td>1T · <code>taskset -c 3</code></td><td class="r num">3317.9 vs 3403.3 ms</td></tr>
+<tr><td>SME vs KML · t16</td><td>本机 608 核</td><td>16T · <code>OMP_PROC_BIND=close</code></td><td class="r num">345.9 vs 386.3 ms</td></tr>
+</tbody></table>
+<div class="callout indigo" style="margin-top:16px">
+<b>为什么强调绑核：</b>不绑核时 t16 的 SME 合计会在 387–558 ms 之间漂移，结论直接翻转成「SME 慢 2 倍」；
+绑核后两次重复差异 &lt; 2.5%。同理，集群跨作业存在 3–7x 的性能态漂移，因此所有对比都在单作业内完成。
+</div></div></section>
+
+<div class="foot">
+  
+  数据来源：<code>docs/final_benchmark_bfd6b1e.md</code>（vs OpenBLAS）、
+  <code>docs/sme_fmopa_gemm.md</code>（SME vs KML）。
+  生成脚本：<code>tools/gen_report_figures.py</code>（本页为静态 HTML，无外部依赖）。
+</div>
+</div>
+</body>
+</html>
