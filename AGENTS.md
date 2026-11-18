@@ -104,6 +104,10 @@ L1=32KB/核, L2=768KB/核, **无 L3**, 16 NUMA × 38 cores = 608 cores。
    TileExt 10%+InXform 25% 均劣化）。
 4. 其余集群旧任务（小形状 hybrid direct conv 等）优先级低于以上，见下节历史清单。
 
+> **完整路线图**（含每项的「具体做法 / 预期 / 验证方式 / 风险」以及**已证伪清单**）
+> 见 `docs/project_summary.md` §9。分三阶段：低风险确定性收益（SME 打包/尾块/V 缓存）→
+> 结构性改造（hybrid 调度、SME 流水、形状自适应选后端）→ 探索（F44 展开变换、bf16 外积）。
+
 **oneDNN 对照已闭环**（集群侧，历史）：三列全出数据（src=59 na=0），nthr=16 已确认。最终方案：
 - `run_benchdnn.sh`：`ONEDNN_VERBOSE=1` + `--mode=p -v4` + `DNNL_NUM_THREADS=16` +
   `OMP_THREAD_LIMIT=16` + KNOWN_GOOD BIN + `: > "$OUT"` 前移 + CRLF 自愈 + shift 修复
