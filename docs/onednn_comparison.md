@@ -87,8 +87,9 @@ dilates 旧 bug，修复生效**，e2e 应出全量 59 行数据。
 
 ### ours vs OpenBLAS —— 已终局 ✅
 
-59/59 全胜，geomean **1.99x**，合计 321.9 vs 804.9 ms = **2.50x**；大形状折算 GEMM
-≈960 GFLOPS/16 核 ≈ SVE-512 峰值 94%。**全量逐形状表见 `docs/final_benchmark_bfd6b1e.md`。**
+59/59 全胜，合计 **2.50x**，几何平均 **1.99x**，算数平均 **2.17x**，中位数 1.77x（321.9 vs 804.9 ms）；
+大形状折算 GEMM ≈960 GFLOPS/16 核 ≈ SVE-512 峰值 94%。
+口径差异（该看哪个）见 `docs/project_summary.md` §5.5；**全量逐形状表见 `docs/final_benchmark_bfd6b1e.md`。**
 
 ### ours vs oneDNN —— 已闭环 ✅
 
